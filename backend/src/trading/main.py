@@ -50,9 +50,8 @@ from trading.infrastructure.reference import COMPANY_DIRECTORY
 from trading.infrastructure.reference.sectors import StaticSectorMap
 from trading.interface.app import AppDeps, create_app
 from trading.observability import configure_logging
-from trading.strategies.base import Strategy
-from trading.strategies.political_signal import PoliticalSignalStrategy
-from trading.strategies.trivial import TrivialStrategy
+from trading.strategies import registry as strategy_registry
+from trading.strategies.base import Strategy, StrategyConfig
 
 # Development quotes; a real MarketDataPort adapter replaces this in a later milestone.
 # Every ticker the entity resolver can produce needs a quote so the paper broker can fill.
@@ -98,13 +97,16 @@ def build_dependencies(settings: Settings) -> AppDeps:
         max_drawdown_pct=settings.max_drawdown_pct,
     )
     risk_gate = RiskGate(risk_limits, kill_switch)
-    thresholds = ConvictionThresholds(
-        trade=settings.trade_threshold, watch=settings.watch_threshold
+    # Translate global Settings into the strategies layer's own typed config so every strategy
+    # is built through the registry (spec section 18: add a strategy = one module + register).
+    strategy_config = StrategyConfig(
+        thresholds=ConvictionThresholds(
+            trade=settings.trade_threshold, watch=settings.watch_threshold
+        ),
+        window_days=settings.corroboration_window_days,
     )
 
-    political_strategy = PoliticalSignalStrategy(
-        thresholds=thresholds, window_days=settings.corroboration_window_days
-    )
+    political_strategy = strategy_registry.create("political_signal", strategy_config)
 
     # A single live venue (one Alpaca account) is wired only when live is allowed and
     # credentials are present; otherwise it stays None and no sleeve can route to it.
@@ -171,7 +173,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
     # Adding a sleeve = one more spec here.
     sleeve_specs: list[tuple[str, str, Strategy]] = [
         ("sleeve-political", "political_signal", political_strategy),
-        ("sleeve-trivial", "trivial", TrivialStrategy()),
+        ("sleeve-trivial", "trivial", strategy_registry.create("trivial", strategy_config)),
     ]
     registry = SleeveRegistry(
         [
