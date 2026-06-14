@@ -87,10 +87,36 @@ curl -s -XPOST localhost:8000/ingest     # run one ingest→evaluate cycle (if s
 curl -s localhost:8000/events            # full audit chain for what just happened
 curl -s -XPOST localhost:8000/reconcile  # per-sleeve diff of local projections vs broker
 curl -s -XPOST localhost:8000/backtest   # replay recorded signals; equity curve + metrics
+curl -s 'localhost:8000/quotes?symbols=AAPL,MSFT,NVDA'  # live quotes (disabled => enabled:false)
+curl -s localhost:8000/quotes/tracked    # symbols held (or the default watchlist)
+curl -s localhost:8000/positions/live    # live position marks + unrealized P&L
 curl -s -XPOST localhost:8000/sleeves/sleeve-political/readiness  # live preflight checklist
 curl -s -XPOST localhost:8000/sleeves/sleeve-political/mode \
   -H 'content-type: application/json' -d '{"mode":"live","confirm":true}'  # opt a sleeve into live
 ```
+
+## Live market data (live stock tracking + live P&L)
+
+A `QuoteFeedPort` (separate from the single-symbol `MarketDataPort` used by the paper broker
+and backtests) drives live tracking. `AlpacaMarketData` implements both ports over the Alpaca
+Market Data API v2 (`GET /v2/stocks/quotes/latest?symbols=…`), taking an injected
+`httpx.AsyncClient` and the same `APCA-API-KEY-ID`/`APCA-API-SECRET-KEY` auth as the broker.
+`last` is the bid/ask **midpoint** of the latest NBBO quote (no extra trade round-trip; falls
+back to whichever side is present).
+
+OFF by construction: a bare `python -m trading.main` injects `DisabledQuoteFeed` and makes no
+network calls. The feed turns on only when `ENABLE_LIVE_QUOTES=true` **and** data credentials
+resolve (`ALPACA_DATA_KEY_ID`/`ALPACA_DATA_SECRET_KEY`, else the `ALPACA_LIVE_*` keys — Alpaca
+data accepts paper or live keys). Endpoints:
+
+- `GET /quotes?symbols=AAPL,MSFT` → `{enabled, as_of, quotes:[{symbol,bid,ask,last,as_of}]}`;
+  disabled feed returns `{enabled:false, as_of:null, quotes:[]}` (HTTP 200, never 5xx).
+- `GET /quotes/tracked` → `{symbols:[…]}`, symbols held per the open-positions projection over
+  the event log, falling back to `DEFAULT_WATCHLIST`.
+- `GET /positions/live` → `{enabled, positions:[{symbol,sleeve_id,quantity,avg_price,last,
+  market_value,unrealized_pnl}]}`. The marking math is a pure domain function
+  (`domain/positions.mark_positions`); when the feed is disabled each position is marked at its
+  own avg price (zero unrealized P&L) so it still returns useful numbers. Decimals are strings.
 
 ## Going live (M5, spec §11)
 

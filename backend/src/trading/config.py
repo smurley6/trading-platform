@@ -43,6 +43,26 @@ class Settings(BaseSettings):
     live_max_position_concentration_pct: Decimal = Decimal("15")
     live_max_drawdown_pct: Decimal = Decimal("10")
 
+    # Live market data feed (live stock tracking + live P&L marks). OFF by construction: a
+    # bare `python -m trading.main` injects the disabled feed and makes no network calls.
+    # The feed turns on only when `enable_live_quotes` is true AND data credentials resolve
+    # (see `alpaca_data_key_id`/`alpaca_data_secret_key` below). Alpaca's data API accepts
+    # either paper or live keys, so by default the feed reuses the live broker credentials if
+    # present; the dedicated `alpaca_data_*` vars override that (env-only, never committed).
+    enable_live_quotes: bool = False
+    alpaca_data_base_url: str = "https://data.alpaca.markets"
+    alpaca_data_key_id: str | None = None
+    alpaca_data_secret_key: str | None = None
+    # Watchlist used by /quotes/tracked when the platform holds no positions yet.
+    default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
+
+    def data_key_id(self) -> str | None:
+        """Resolved market-data key: the dedicated data key, else the live broker key."""
+        return self.alpaca_data_key_id or self.alpaca_live_key_id
+
+    def data_secret_key(self) -> str | None:
+        return self.alpaca_data_secret_key or self.alpaca_live_secret_key
+
     # Data sources (FR-ING). External sources default OFF so a bare `python -m trading.main`
     # makes no network calls; configure these to enable the political pipeline.
     news_feed_urls: list[str] = []

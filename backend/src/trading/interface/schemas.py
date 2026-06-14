@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field
 from trading.application.backtest import BacktestResult
 from trading.application.live_trading import LiveReadinessReport
 from trading.application.ports.broker import BrokerOrder
+from trading.application.ports.market_data import Quote
 from trading.application.reconcile import ReconciliationReport
 from trading.application.sleeve_registry import SleeveState
 from trading.domain.events import StoredEvent
+from trading.domain.positions import MarkedPosition
 from trading.domain.signals import Signal, SignalSource
 from trading.domain.sleeves import Sleeve, TradingMode
 
@@ -241,6 +243,61 @@ class SleeveModeIn(BaseModel):
 class SleeveModeOut(BaseModel):
     sleeve: SleeveOut
     readiness: LiveReadinessOut | None = None
+
+
+class QuoteOut(BaseModel):
+    symbol: str
+    bid: Decimal
+    ask: Decimal
+    last: Decimal
+    as_of: datetime
+
+    @classmethod
+    def from_quote(cls, quote: Quote) -> "QuoteOut":
+        return cls(
+            symbol=quote.symbol,
+            bid=quote.bid,
+            ask=quote.ask,
+            last=quote.last,
+            as_of=quote.as_of,
+        )
+
+
+class QuotesOut(BaseModel):
+    enabled: bool
+    as_of: datetime | None
+    quotes: list[QuoteOut]
+
+
+class TrackedSymbolsOut(BaseModel):
+    symbols: list[str]
+
+
+class LivePositionOut(BaseModel):
+    symbol: str
+    sleeve_id: str
+    quantity: Decimal
+    avg_price: Decimal
+    last: Decimal
+    market_value: Decimal
+    unrealized_pnl: Decimal
+
+    @classmethod
+    def from_marked(cls, marked: MarkedPosition) -> "LivePositionOut":
+        return cls(
+            symbol=marked.symbol,
+            sleeve_id=marked.sleeve_id,
+            quantity=marked.quantity,
+            avg_price=marked.avg_price,
+            last=marked.last,
+            market_value=marked.market_value,
+            unrealized_pnl=marked.unrealized_pnl,
+        )
+
+
+class LivePositionsOut(BaseModel):
+    enabled: bool
+    positions: list[LivePositionOut]
 
 
 class KillSwitchIn(BaseModel):

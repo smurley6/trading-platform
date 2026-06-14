@@ -6,9 +6,18 @@ import { useEffect, useRef } from "react";
 interface SymbolChartProps {
   symbol: string;
   height?: number;
+  /** Let the user switch symbols inside the widget (used by the Markets main chart). */
+  allowSymbolChange?: boolean;
+  /** Show TradingView's built-in watchlist/details side panel (Markets main chart). */
+  withDetails?: boolean;
 }
 
-export function SymbolChart({ symbol, height = 360 }: SymbolChartProps) {
+export function SymbolChart({
+  symbol,
+  height = 360,
+  allowSymbolChange = false,
+  withDetails = false,
+}: SymbolChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -28,7 +37,8 @@ export function SymbolChart({ symbol, height = 360 }: SymbolChartProps) {
       theme: "dark",
       style: "1",
       hide_top_toolbar: false,
-      allow_symbol_change: false,
+      allow_symbol_change: allowSymbolChange,
+      details: withDetails,
       backgroundColor: "rgba(0,0,0,0)",
     });
     container.appendChild(script);
@@ -36,7 +46,7 @@ export function SymbolChart({ symbol, height = 360 }: SymbolChartProps) {
     return () => {
       container.innerHTML = "";
     };
-  }, [symbol]);
+  }, [symbol, allowSymbolChange, withDetails]);
 
   return (
     <div className="tradingview-widget-container" ref={containerRef} style={{ height }}>

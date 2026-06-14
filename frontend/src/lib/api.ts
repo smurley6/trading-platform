@@ -6,13 +6,16 @@ import type {
   EvaluateResult,
   IngestResult,
   KillSwitchState,
+  LivePositionsResult,
   LiveReadiness,
+  QuotesResult,
   ReconcileReport,
   SignalFeedItem,
   SignalInput,
   Sleeve,
   SleeveModeResult,
   StoredEventDto,
+  TrackedSymbols,
   TradingMode,
 } from "./types";
 
@@ -74,6 +77,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ mode, confirm }),
     }),
+
+  // --- Live market-data feeds (Markets screen + Dashboard) -------------------------------
+  // These feeds default to OFF (no credentials) and may be absent on older backends, so each
+  // resolves to a disabled-but-valid shape on any non-200 / network error. Callers can render
+  // unconditionally without try/catch and simply branch on `.enabled`.
+
+  quotes: (symbols: string[]): Promise<QuotesResult> => {
+    if (symbols.length === 0) return Promise.resolve({ enabled: false, as_of: null, quotes: [] });
+    return request<QuotesResult>(`/quotes?symbols=${encodeURIComponent(symbols.join(","))}`).catch(
+      () => ({ enabled: false, as_of: null, quotes: [] }),
+    );
+  },
+
+  trackedSymbols: (): Promise<TrackedSymbols> =>
+    request<TrackedSymbols>("/quotes/tracked").catch(() => ({ symbols: [] })),
+
+  livePositions: (): Promise<LivePositionsResult> =>
+    request<LivePositionsResult>("/positions/live").catch(() => ({
+      enabled: false,
+      positions: [],
+    })),
 };
 
 export { ApiError };

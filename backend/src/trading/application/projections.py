@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 from trading.domain.events import EventType, StoredEvent
-from trading.domain.orders import OrderSide
+from trading.domain.orders import Fill, OrderSide
+from trading.domain.positions import HeldPosition, Portfolio
 from trading.domain.signals import Signal, SignalSource
 
 
@@ -71,6 +72,45 @@ def positions_from_events(
             quantity = -quantity
         quantities[symbol] = quantities.get(symbol, Decimal("0")) + quantity
     return {symbol: qty for symbol, qty in quantities.items() if qty != 0}
+
+
+def held_positions_from_events(events: Sequence[StoredEvent]) -> list[HeldPosition]:
+    """Open positions with cost basis, derived from recorded fills, grouped per sleeve.
+
+    Replays each sleeve's fills through the same `Portfolio.apply_fill` math used live, so
+    avg cost basis is consistent with the rest of the system. Fully-closed positions drop
+    out (the portfolio removes them at zero quantity).
+    """
+    by_sleeve: dict[str, Portfolio] = {}
+    for stored in events:
+        if stored.event.event_type != EventType.ORDER_FILLED:
+            continue
+        payload = stored.event.payload
+        sleeve_id = str(payload.get("sleeve_id", ""))
+        fill = Fill(
+            client_order_id=str(payload.get("client_order_id", "")),
+            symbol=str(payload["symbol"]),
+            side=OrderSide(str(payload["side"])),
+            price=Decimal(str(payload["price"])),
+            quantity=Decimal(str(payload["quantity"])),
+            fees=Decimal(str(payload.get("fees", "0"))),
+            filled_at=datetime.fromisoformat(str(payload["filled_at"])),
+        )
+        portfolio = by_sleeve.get(sleeve_id, Portfolio(cash=Decimal("0")))
+        by_sleeve[sleeve_id] = portfolio.apply_fill(fill)
+
+    held: list[HeldPosition] = []
+    for sleeve_id, portfolio in by_sleeve.items():
+        for position in portfolio.positions.values():
+            held.append(
+                HeldPosition(
+                    symbol=position.symbol,
+                    sleeve_id=sleeve_id,
+                    quantity=position.quantity,
+                    avg_price=position.avg_entry_price,
+                )
+            )
+    return held
 
 
 def order_statuses_from_events(

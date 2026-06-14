@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -19,13 +20,15 @@ from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
-from trading.application.projections import signals_from_events
+from trading.application.ports.market_data import QuoteFeedPort
+from trading.application.projections import held_positions_from_events, signals_from_events
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
 from trading.domain.conviction import ConvictionThresholds, compute_conviction
 from trading.domain.events import DomainEvent, EventType
+from trading.domain.positions import mark_positions
 from trading.domain.sleeves import TradingMode
 from trading.interface.schemas import (
     BacktestOut,
@@ -35,14 +38,19 @@ from trading.interface.schemas import (
     IngestOut,
     KillSwitchIn,
     KillSwitchOut,
+    LivePositionOut,
+    LivePositionsOut,
     LiveReadinessOut,
     OrderOut,
+    QuoteOut,
+    QuotesOut,
     ReconcileOut,
     SignalFeedItem,
     SignalIn,
     SleeveModeIn,
     SleeveModeOut,
     SleeveOut,
+    TrackedSymbolsOut,
 )
 
 _USER_ACTION_STREAM = "user-actions"
@@ -59,6 +67,8 @@ class AppDeps:
     clock: ClockPort
     conviction_thresholds: ConvictionThresholds
     conviction_window_days: int
+    quote_feed: QuoteFeedPort | None = None  # live tracking/marks; None => disabled
+    default_watchlist: list[str] = field(default_factory=list)
     political_cycle: PoliticalCycle | None = None
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
     assess_readiness: AssessLiveReadiness | None = None
@@ -170,6 +180,42 @@ def create_app(deps: AppDeps) -> FastAPI:
             )
         return items
 
+    @app.get("/quotes", response_model=QuotesOut)
+    async def quotes(symbols: Annotated[str | None, Query()] = None) -> QuotesOut:
+        feed = deps.quote_feed
+        if feed is None or not feed.enabled:
+            return QuotesOut(enabled=False, as_of=None, quotes=[])
+        wanted = _parse_symbols(symbols) or deps.default_watchlist
+        fetched = await feed.get_quotes(wanted)
+        as_of = max((q.as_of for q in fetched), default=deps.clock.now())
+        return QuotesOut(
+            enabled=True,
+            as_of=as_of,
+            quotes=[QuoteOut.from_quote(q) for q in fetched],
+        )
+
+    @app.get("/quotes/tracked", response_model=TrackedSymbolsOut)
+    async def tracked_symbols() -> TrackedSymbolsOut:
+        held = held_positions_from_events(await deps.event_store.read_all())
+        symbols = sorted({p.symbol for p in held})
+        return TrackedSymbolsOut(symbols=symbols or list(deps.default_watchlist))
+
+    @app.get("/positions/live", response_model=LivePositionsOut)
+    async def live_positions() -> LivePositionsOut:
+        held = held_positions_from_events(await deps.event_store.read_all())
+        feed = deps.quote_feed
+        enabled = feed is not None and feed.enabled
+        marks: dict[str, Decimal] = {}
+        if enabled and held:
+            assert feed is not None
+            symbols = sorted({p.symbol for p in held})
+            marks = {q.symbol: q.last for q in await feed.get_quotes(symbols)}
+        marked = mark_positions(held, marks)
+        return LivePositionsOut(
+            enabled=enabled,
+            positions=[LivePositionOut.from_marked(m) for m in marked],
+        )
+
     @app.post("/ingest", response_model=IngestOut)
     async def ingest() -> IngestOut:
         if deps.political_cycle is None:
@@ -269,6 +315,12 @@ def create_app(deps: AppDeps) -> FastAPI:
             deps.event_bus.unsubscribe(queue)
 
     return app
+
+
+def _parse_symbols(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
 
 
 def _require_sleeve(deps: AppDeps, sleeve_id: str) -> None:

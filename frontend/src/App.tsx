@@ -7,6 +7,7 @@ import { KillSwitchControl } from "./components/KillSwitchControl";
 import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
+import { Markets } from "./features/markets/Markets";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { SignalFeed } from "./features/signals/SignalFeed";
 import { api } from "./lib/api";
@@ -14,11 +15,12 @@ import type { Sleeve } from "./lib/types";
 import { useEventStream } from "./lib/useEventStream";
 import { useLoader } from "./lib/useLoader";
 
-type View = "dashboard" | "algorithms" | "signals" | "blotter" | "risk";
+type View = "dashboard" | "algorithms" | "markets" | "signals" | "blotter" | "risk";
 
 const NAV: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
   { id: "algorithms", label: "Algorithms" },
+  { id: "markets", label: "Markets" },
   { id: "signals", label: "Signal feed" },
   { id: "blotter", label: "Blotter" },
   { id: "risk", label: "Risk" },
@@ -132,6 +134,8 @@ function Screen({
       return <Dashboard refreshKey={refreshKey} sleeves={sleeves} />;
     case "algorithms":
       return <Algorithms refreshKey={refreshKey} sleeves={sleeves} />;
+    case "markets":
+      return <Markets refreshKey={refreshKey} />;
     case "signals":
       return <SignalFeed refreshKey={refreshKey} />;
     case "blotter":

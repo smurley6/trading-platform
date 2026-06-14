@@ -17,6 +17,7 @@ from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
+from trading.application.ports.market_data import QuoteFeedPort
 from trading.application.projections import signals_from_events
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
@@ -33,6 +34,8 @@ from trading.infrastructure.clock import SystemClock
 from trading.infrastructure.data_sources.congress_trades import CongressTradesSource
 from trading.infrastructure.data_sources.news import NewsSource
 from trading.infrastructure.data_sources.usaspending import UsaSpendingSource
+from trading.infrastructure.market_data.alpaca import AlpacaMarketData
+from trading.infrastructure.market_data.disabled import DisabledQuoteFeed
 from trading.infrastructure.market_data.historical import synthetic_price_series
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
@@ -113,6 +116,23 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_live_base_url,
         )
         live_aclosers.append(live_client.aclose)
+
+    # Live quote feed (live stock tracking + live P&L). OFF by construction: built only when
+    # enabled AND data credentials resolve (Alpaca data accepts paper or live keys); else the
+    # disabled feed keeps `python -m trading.main` network-silent. Reused for /quotes,
+    # /quotes/tracked and /positions/live.
+    quote_feed: QuoteFeedPort = DisabledQuoteFeed()
+    data_key_id = settings.data_key_id()
+    data_secret_key = settings.data_secret_key()
+    if settings.enable_live_quotes and data_key_id and data_secret_key:
+        data_client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
+        quote_feed = AlpacaMarketData(
+            client=data_client,
+            key_id=data_key_id,
+            secret_key=data_secret_key,
+            base_url=settings.alpaca_data_base_url,
+        )
+        live_aclosers.append(data_client.aclose)
 
     # Each sleeve is an isolated capital pool: its own paper broker, evaluator, and reconciler.
     # Adding a sleeve = one more spec here.
@@ -238,6 +258,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
         clock=clock,
         conviction_thresholds=thresholds,
         conviction_window_days=settings.corroboration_window_days,
+        quote_feed=quote_feed,
+        default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
         backtest_runner=run_backtest,
         assess_readiness=assess_readiness,

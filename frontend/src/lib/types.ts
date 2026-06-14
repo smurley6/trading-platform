@@ -135,3 +135,41 @@ export interface SignalInput {
   source_reliability?: number;
   raw_payload?: Record<string, unknown>;
 }
+
+// Live market-data feeds (Markets screen + Dashboard live P&L). Numeric fields arrive as
+// strings from the backend (parse with Number(...)). All three feeds default to OFF when no
+// data-provider credentials are configured, so every consumer must treat `enabled: false`
+// (and any network error) as a graceful no-op.
+
+export interface Quote {
+  symbol: string;
+  bid: string;
+  ask: string;
+  last: string;
+  as_of: string;
+}
+
+export interface QuotesResult {
+  enabled: boolean;
+  as_of: string | null;
+  quotes: Quote[];
+}
+
+export interface TrackedSymbols {
+  symbols: string[];
+}
+
+export interface LivePosition {
+  symbol: string;
+  sleeve_id: string;
+  quantity: string;
+  avg_price: string;
+  last: string;
+  market_value: string;
+  unrealized_pnl: string;
+}
+
+export interface LivePositionsResult {
+  enabled: boolean;
+  positions: LivePosition[];
+}

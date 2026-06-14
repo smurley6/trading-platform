@@ -1,6 +1,6 @@
 """Positions and per-sleeve portfolio state (long-only equities for M1)."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -15,6 +15,55 @@ class Position:
 
     def market_value(self, price: Decimal) -> Decimal:
         return self.quantity * price
+
+
+@dataclass(frozen=True, slots=True)
+class HeldPosition:
+    """A held lot to be marked: identity (symbol + owning sleeve) plus cost basis."""
+
+    symbol: str
+    sleeve_id: str
+    quantity: Decimal
+    avg_price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class MarkedPosition:
+    symbol: str
+    sleeve_id: str
+    quantity: Decimal
+    avg_price: Decimal
+    last: Decimal
+    market_value: Decimal
+    unrealized_pnl: Decimal
+
+
+def mark_positions(
+    positions: Sequence[HeldPosition], marks: Mapping[str, Decimal]
+) -> list[MarkedPosition]:
+    """Pure: value each held position at a mark price and compute unrealized P&L.
+
+    `marks` maps symbol -> last price (e.g. from a live quote feed). A symbol absent from
+    `marks` falls back to its own `avg_price`, so a disabled/partial feed still yields useful
+    numbers (zero unrealized P&L) and never raises (FR live-P&L deliverable).
+    """
+    marked: list[MarkedPosition] = []
+    for held in positions:
+        last = marks.get(held.symbol, held.avg_price)
+        market_value = held.quantity * last
+        unrealized = (last - held.avg_price) * held.quantity
+        marked.append(
+            MarkedPosition(
+                symbol=held.symbol,
+                sleeve_id=held.sleeve_id,
+                quantity=held.quantity,
+                avg_price=held.avg_price,
+                last=last,
+                market_value=market_value,
+                unrealized_pnl=unrealized,
+            )
+        )
+    return marked
 
 
 @dataclass(frozen=True, slots=True)
