@@ -22,7 +22,7 @@ from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
-from trading.application.projections import held_positions_from_events, signals_from_events
+from trading.application.ports.read_model import ReadModelPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
 from trading.application.signal_recording import record_signals
@@ -60,6 +60,7 @@ _USER_ACTION_STREAM = "user-actions"
 @dataclass
 class AppDeps:
     event_store: EventStorePort
+    read_model: ReadModelPort  # CQRS read side: current-state projections (no per-request replay)
     kill_switch: KillSwitch
     sleeve_registry: SleeveRegistry
     evaluators: dict[str, EvaluateSignals]  # keyed by sleeve_id
@@ -162,19 +163,13 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def signal_feed(
         limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     ) -> list[SignalFeedItem]:
-        events = await deps.event_store.read_all()
-        feed = [
-            SignalFeedItem.from_stored(s)
-            for s in events
-            if s.event.event_type == EventType.SIGNAL_RECEIVED
-        ]
-        return feed[-limit:]
+        records = await deps.read_model.recent_signals(limit=limit)
+        return [SignalFeedItem.from_record(r) for r in records]
 
     @app.get("/conviction", response_model=list[ConvictionItem])
     async def conviction() -> list[ConvictionItem]:
-        events = await deps.event_store.read_all()
-        window = signals_from_events(
-            events, now=deps.clock.now(), window_days=deps.conviction_window_days
+        window = await deps.read_model.signals_in_window(
+            now=deps.clock.now(), window_days=deps.conviction_window_days
         )
         items: list[ConvictionItem] = []
         for ticker in sorted({s.ticker for s in window}):
@@ -210,13 +205,13 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.get("/quotes/tracked", response_model=TrackedSymbolsOut)
     async def tracked_symbols() -> TrackedSymbolsOut:
-        held = held_positions_from_events(await deps.event_store.read_all())
+        held = await deps.read_model.held_positions()
         symbols = sorted({p.symbol for p in held})
         return TrackedSymbolsOut(symbols=symbols or list(deps.default_watchlist))
 
     @app.get("/positions/live", response_model=LivePositionsOut)
     async def live_positions() -> LivePositionsOut:
-        held = held_positions_from_events(await deps.event_store.read_all())
+        held = await deps.read_model.held_positions()
         feed = deps.quote_feed
         enabled = feed is not None and feed.enabled
         marks: dict[str, Decimal] = {}
@@ -364,7 +359,7 @@ def create_app(deps: AppDeps) -> FastAPI:
 
 
 async def _tracked_symbols(deps: AppDeps) -> list[str]:
-    held = held_positions_from_events(await deps.event_store.read_all())
+    held = await deps.read_model.held_positions()
     symbols = sorted({p.symbol for p in held})
     return symbols or list(deps.default_watchlist)
 

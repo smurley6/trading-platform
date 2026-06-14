@@ -19,14 +19,16 @@ from trading.domain.events import EventType
 from trading.domain.sleeves import Sleeve
 from trading.infrastructure.backtest_env import InMemoryBacktestEnvFactory
 from trading.infrastructure.market_data.historical import synthetic_price_series
-from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
+from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.interface.app import AppDeps, create_app
 from trading.strategies.trivial import TrivialStrategy
 
 
 @pytest.fixture
 async def client(
-    event_store: InMemoryEventStore,
+    event_store: ProjectingEventStore,
+    read_model: InMemoryReadModel,
     kill_switch: KillSwitch,
     sleeve: Sleeve,
     sleeve_registry: SleeveRegistry,
@@ -77,6 +79,7 @@ async def client(
     app = create_app(
         AppDeps(
             event_store=event_store,
+            read_model=read_model,
             kill_switch=kill_switch,
             sleeve_registry=sleeve_registry,
             evaluators={sleeve.id: evaluate_signals},
