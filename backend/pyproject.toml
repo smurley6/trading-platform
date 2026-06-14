@@ -85,6 +85,11 @@ markers = [
 [tool.coverage.run]
 source = ["src/trading/domain", "src/trading/application"]
 
+[tool.coverage.report]
+# Spec 7.2: coverage gate on domain + application. Enforced by CI's `pytest --cov`
+# (pytest-cov reads fail_under here and exits non-zero below it), so it actually blocks.
+fail_under = 80
+
 [tool.importlinter]
 root_package = "trading"
 

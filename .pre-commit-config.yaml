@@ -7,17 +7,20 @@ repos:
       - id: ruff-format
         files: ^backend/
 
+  # These run the project-aware checks from the active environment (PATH), so they work with
+  # any venv location, pipx, or a system install — not a hardcoded backend/.venv path. Activate
+  # the backend venv (or otherwise put mypy/lint-imports on PATH) before committing.
   - repo: local
     hooks:
       - id: mypy
         name: mypy --strict (backend)
-        entry: bash -c 'cd backend && .venv/bin/mypy'
+        entry: bash -c 'cd backend && mypy'
         language: system
         files: ^backend/.*\.py$
         pass_filenames: false
       - id: import-linter
         name: import-linter (hexagonal layering)
-        entry: bash -c 'cd backend && .venv/bin/lint-imports'
+        entry: bash -c 'cd backend && lint-imports'
         language: system
         files: ^backend/.*\.py$
         pass_filenames: false
