@@ -1,0 +1,213 @@
+"""EvaluateSignals use case: signals -> strategy -> risk gate -> execution.
+
+Signals are recorded upstream (see `signal_recording`); this use case reads them in,
+runs the strategy, and emits decision/risk/order/snapshot events. Every step shares one
+correlation id, so any trade answers "what signals, what conviction, what risk verdict,
+what market context" (spec section 12).
+"""
+
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any
+from uuid import uuid4
+
+from trading.application.place_order import PlaceOrder, PlaceOrderRequest
+from trading.application.ports.broker import BrokerOrder, BrokerPort
+from trading.application.ports.clock import ClockPort
+from trading.application.ports.event_store import EventStorePort
+from trading.application.ports.market_data import MarketDataPort, Quote
+from trading.application.risk import RiskContext, RiskGate
+from trading.domain.decisions import Decision, RiskVerdict
+from trading.domain.events import DomainEvent, EventType
+from trading.domain.orders import OrderSide
+from trading.domain.positions import Portfolio, Position
+from trading.domain.signals import Signal
+from trading.domain.sleeves import Sleeve
+from trading.strategies.base import Strategy
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationResult:
+    correlation_id: str
+    decisions: tuple[Decision, ...]
+    orders: tuple[BrokerOrder, ...]
+
+
+class EvaluateSignals:
+    def __init__(
+        self,
+        *,
+        strategy: Strategy,
+        sleeve: Sleeve,
+        risk_gate: RiskGate,
+        place_order: PlaceOrder,
+        broker: BrokerPort,
+        market_data: MarketDataPort,
+        event_store: EventStorePort,
+        clock: ClockPort,
+    ) -> None:
+        self._strategy = strategy
+        self._sleeve = sleeve
+        self._risk_gate = risk_gate
+        self._place_order = place_order
+        self._broker = broker
+        self._market_data = market_data
+        self._event_store = event_store
+        self._clock = clock
+        self._peak_equity = Decimal("0")
+
+    async def execute(
+        self, signals: Sequence[Signal], *, correlation_id: str | None = None
+    ) -> EvaluationResult:
+        correlation_id = correlation_id or str(uuid4())
+
+        account = await self._broker.get_account()
+        portfolio = Portfolio(
+            cash=account.cash,
+            positions={
+                p.symbol: Position(p.symbol, p.quantity, p.avg_entry_price)
+                for p in await self._broker.list_positions()
+            },
+        )
+        self._peak_equity = max(self._peak_equity, account.equity)
+
+        decisions: list[Decision] = []
+        orders: list[BrokerOrder] = []
+        for proposal in self._strategy.evaluate(signals, portfolio):
+            target = proposal.target
+            current = portfolio.quantity(target.symbol)
+            delta = target.quantity - current
+            if delta == 0:
+                continue
+            side = OrderSide.BUY if delta > 0 else OrderSide.SELL
+            quantity = abs(delta)
+
+            quote = await self._market_data.get_quote(target.symbol)
+            decision = Decision(
+                id=str(uuid4()),
+                strategy_id=self._strategy.strategy_id,
+                sleeve_id=self._sleeve.id,
+                created_at=self._clock.now(),
+                symbol=target.symbol,
+                target_quantity=target.quantity,
+                correlation_id=correlation_id,
+                conviction_score=proposal.conviction_score,
+                contributing_signal_ids=proposal.contributing_signal_ids,
+            )
+            decisions.append(decision)
+            decision_stream = f"decision-{decision.id}"
+            await self._append(
+                decision_stream,
+                EventType.DECISION_MADE,
+                {
+                    "decision_id": decision.id,
+                    "strategy_id": decision.strategy_id,
+                    "sleeve_id": decision.sleeve_id,
+                    "symbol": decision.symbol,
+                    "target_quantity": str(decision.target_quantity),
+                    "current_quantity": str(current),
+                    "side": side.value,
+                    "quantity": str(quantity),
+                    "conviction_score": proposal.conviction_score,
+                    "contributing_signal_ids": list(proposal.contributing_signal_ids),
+                    "rationale": proposal.rationale,
+                    "market_context": _quote_payload(quote),
+                },
+                correlation_id,
+            )
+
+            assessment = self._risk_gate.evaluate(
+                side,
+                quantity,
+                RiskContext(
+                    sleeve_equity=account.equity,
+                    peak_equity=self._peak_equity,
+                    current_position_value=current * quote.last,
+                    price=quote.last,
+                ),
+            )
+            await self._append(
+                decision_stream,
+                EventType.RISK_EVALUATED,
+                {
+                    "decision_id": decision.id,
+                    "verdict": assessment.verdict.value,
+                    "reason": assessment.reason,
+                    "requested_quantity": str(quantity),
+                    "approved_quantity": str(assessment.approved_quantity),
+                },
+                correlation_id,
+            )
+            if assessment.verdict is RiskVerdict.REJECTED:
+                logger.info(
+                    "decision rejected by risk gate: %s",
+                    assessment.reason,
+                    extra={"correlation_id": correlation_id},
+                )
+                continue
+
+            broker_order = await self._place_order.execute(
+                PlaceOrderRequest(
+                    sleeve_id=self._sleeve.id,
+                    decision_id=decision.id,
+                    client_order_id=f"ord-{decision.id}",
+                    symbol=target.symbol,
+                    side=side,
+                    quantity=assessment.approved_quantity,
+                    correlation_id=correlation_id,
+                )
+            )
+            orders.append(broker_order)
+
+        await self._snapshot(correlation_id)
+        return EvaluationResult(
+            correlation_id=correlation_id, decisions=tuple(decisions), orders=tuple(orders)
+        )
+
+    async def _snapshot(self, correlation_id: str) -> None:
+        account = await self._broker.get_account()
+        positions = await self._broker.list_positions()
+        await self._append(
+            f"sleeve-{self._sleeve.id}",
+            EventType.PORTFOLIO_SNAPSHOT,
+            {
+                "sleeve_id": self._sleeve.id,
+                "cash": str(account.cash),
+                "equity": str(account.equity),
+                "positions": {
+                    p.symbol: {
+                        "quantity": str(p.quantity),
+                        "avg_entry_price": str(p.avg_entry_price),
+                    }
+                    for p in positions
+                },
+            },
+            correlation_id,
+        )
+
+    async def _append(
+        self, stream_id: str, event_type: str, payload: dict[str, Any], correlation_id: str
+    ) -> None:
+        await self._event_store.append(
+            DomainEvent(
+                stream_id=stream_id,
+                event_type=event_type,
+                payload=payload,
+                occurred_at=self._clock.now(),
+                correlation_id=correlation_id,
+            )
+        )
+
+
+def _quote_payload(quote: Quote) -> dict[str, str]:
+    return {
+        "symbol": quote.symbol,
+        "bid": str(quote.bid),
+        "ask": str(quote.ask),
+        "last": str(quote.last),
+        "as_of": quote.as_of.isoformat(),
+    }

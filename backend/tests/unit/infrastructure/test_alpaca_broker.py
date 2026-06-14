@@ -1,0 +1,127 @@
+"""AlpacaBroker against a mock HTTP transport — real request shaping + response parsing,
+no network. Verifies the live broker satisfies BrokerPort and is idempotent (FR-EXE-3)."""
+
+from collections.abc import Callable
+from decimal import Decimal
+
+import httpx
+import pytest
+
+from trading.domain.orders import OrderSide, OrderStatus, OrderType
+from trading.infrastructure.brokers.alpaca import AlpacaBroker, AlpacaBrokerError
+
+Handler = Callable[[httpx.Request], httpx.Response]
+
+_FILLED_ORDER = {
+    "id": "broker-1",
+    "client_order_id": "ord-1",
+    "symbol": "LMT",
+    "qty": "10",
+    "filled_qty": "10",
+    "filled_avg_price": "450.25",
+    "side": "buy",
+    "type": "market",
+    "status": "filled",
+    "filled_at": "2026-06-13T14:00:00Z",
+}
+
+
+def _broker(handler: Handler) -> AlpacaBroker:
+    return AlpacaBroker(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://api.alpaca.markets",
+    )
+
+
+async def test_submit_sends_auth_and_parses_fill() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("APCA-API-KEY-ID")
+        captured["path"] = request.url.path
+        return httpx.Response(200, json=_FILLED_ORDER)
+
+    order = await _broker(handler).submit_order(
+        client_order_id="ord-1", symbol="LMT", side=OrderSide.BUY, quantity=Decimal("10")
+    )
+
+    assert captured["auth"] == "k"
+    assert captured["path"] == "/v2/orders"
+    assert order.status is OrderStatus.FILLED
+    assert order.broker_order_id == "broker-1"
+    assert order.fills[0].price == Decimal("450.25")
+    assert order.fills[0].quantity == Decimal("10")
+
+
+async def test_duplicate_client_order_id_is_idempotent() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "POST":
+            return httpx.Response(422, json={"message": "client_order_id must be unique"})
+        return httpx.Response(200, json=_FILLED_ORDER)
+
+    order = await _broker(handler).submit_order(
+        client_order_id="ord-1", symbol="LMT", side=OrderSide.BUY, quantity=Decimal("10")
+    )
+
+    assert order.client_order_id == "ord-1"
+    assert "POST /v2/orders" in calls
+    assert "GET /v2/orders:by_client_order_id" in calls  # resolved existing instead of dup
+
+
+async def test_submit_error_raises() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="forbidden")
+
+    with pytest.raises(AlpacaBrokerError):
+        await _broker(handler).submit_order(
+            client_order_id="ord-1", symbol="LMT", side=OrderSide.BUY, quantity=Decimal("1")
+        )
+
+
+async def test_list_positions_and_account() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/positions":
+            return httpx.Response(
+                200,
+                json=[{"symbol": "LMT", "qty": "10", "avg_entry_price": "450.25"}],
+            )
+        return httpx.Response(200, json={"cash": "55000.00", "equity": "100000.00"})
+
+    broker = _broker(handler)
+    positions = await broker.list_positions()
+    account = await broker.get_account()
+
+    assert positions[0].symbol == "LMT"
+    assert positions[0].quantity == Decimal("10")
+    assert account.cash == Decimal("55000.00")
+    assert account.equity == Decimal("100000.00")
+
+
+async def test_pending_order_has_no_fills() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "b2",
+                "client_order_id": "ord-2",
+                "symbol": "LMT",
+                "qty": "10",
+                "filled_qty": "0",
+                "filled_avg_price": None,
+                "side": "buy",
+                "type": "market",
+                "status": "accepted",
+            },
+        )
+
+    order = await _broker(handler).submit_order(
+        client_order_id="ord-2", symbol="LMT", side=OrderSide.BUY, quantity=Decimal("10")
+    )
+    assert order.status is OrderStatus.ACKNOWLEDGED
+    assert order.fills == ()
+    assert order.order_type is OrderType.MARKET
