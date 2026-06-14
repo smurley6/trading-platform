@@ -17,9 +17,7 @@ from trading.interface.app import AppDeps, create_app
 def test_websocket_streams_events_live() -> None:
     clock = FixedClock()
     read_model = InMemoryReadModel()
-    event_bus = BroadcastingEventStore(
-        ProjectingEventStore(InMemoryEventStore(clock), read_model)
-    )
+    event_bus = BroadcastingEventStore(ProjectingEventStore(InMemoryEventStore(clock), read_model))
     deps = AppDeps(
         event_store=event_bus,
         read_model=read_model,

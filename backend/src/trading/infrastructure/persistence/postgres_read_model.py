@@ -211,9 +211,7 @@ class PostgresReadModel:
 
     async def recent_signals(self, *, limit: int) -> Sequence[SignalRecord]:
         query = (
-            select(rm_signals_table)
-            .order_by(rm_signals_table.c.recorded_id.desc())
-            .limit(limit)
+            select(rm_signals_table).order_by(rm_signals_table.c.recorded_id.desc()).limit(limit)
         )
         async with self._engine.connect() as conn:
             rows = (await conn.execute(query)).all()

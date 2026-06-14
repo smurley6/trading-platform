@@ -155,13 +155,9 @@ async def test_order_statuses_latest_wins_and_sleeve_scoped() -> None:
 
 async def test_latest_snapshot_per_sleeve() -> None:
     rm = InMemoryReadModel()
-    await rm.apply(
-        _snapshot_event(sleeve_id="s1", cash="900", equity="1000", taken_at=_WHEN)
-    )
+    await rm.apply(_snapshot_event(sleeve_id="s1", cash="900", equity="1000", taken_at=_WHEN))
     later = _WHEN + timedelta(hours=1)
-    await rm.apply(
-        _snapshot_event(sleeve_id="s1", cash="800", equity="1100", taken_at=later)
-    )
+    await rm.apply(_snapshot_event(sleeve_id="s1", cash="800", equity="1100", taken_at=later))
     [snap] = await rm.latest_portfolio_snapshots()
     assert (snap.taken_at, snap.cash, snap.equity) == (later, Decimal("800"), Decimal("1100"))
 
