@@ -18,7 +18,7 @@ from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
-from trading.application.ports.market_data import QuoteFeedPort, QuoteStreamPort
+from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
@@ -39,6 +39,7 @@ from trading.infrastructure.market_data.alpaca import AlpacaMarketData
 from trading.infrastructure.market_data.alpaca_history import AlpacaHistoricalData
 from trading.infrastructure.market_data.alpaca_stream import AlpacaQuoteStream
 from trading.infrastructure.market_data.disabled import DisabledQuoteFeed, DisabledQuoteStream
+from trading.infrastructure.market_data.feed_backed import FeedBackedMarketData
 from trading.infrastructure.market_data.historical import SyntheticHistoricalPrices
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
@@ -103,7 +104,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
     event_bus = BroadcastingEventStore(inner_store)
     event_store: EventStorePort = event_bus
 
-    market_data = StaticMarketData(_DEV_PRICES, clock)
+    # Decision/fill price seam: static dev prices by default, swapped to the live feed below
+    # when it is enabled so the strategy decides and the paper broker fills at real prices.
+    market_data: MarketDataPort = StaticMarketData(_DEV_PRICES, clock)
     kill_switch = KillSwitch()  # global: shared across all sleeves (FR-RISK-3)
     risk_limits = RiskLimits(
         max_trade_pct_of_sleeve=settings.max_trade_pct_of_sleeve,
@@ -154,6 +157,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(data_client.aclose)
+        # Route the decision/fill price seam through the live feed (real prices), keeping the
+        # static dev prices as the fallback for symbols the feed cannot price.
+        market_data = FeedBackedMarketData(quote_feed, market_data)
 
     # Real-time quote stream behind /ws/quotes. Same switch as the REST feed: built only when
     # enabled AND data creds resolve; otherwise the disabled stream opens no socket. Seeded with
