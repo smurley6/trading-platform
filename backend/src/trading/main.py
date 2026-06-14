@@ -99,10 +99,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
     risk_gate = RiskGate(risk_limits, kill_switch)
     # Translate global Settings into the strategies layer's own typed config so every strategy
     # is built through the registry (spec section 18: add a strategy = one module + register).
+    # `thresholds` is also handed to the API layer (deps below) for the /conviction endpoint.
+    thresholds = ConvictionThresholds(
+        trade=settings.trade_threshold, watch=settings.watch_threshold
+    )
     strategy_config = StrategyConfig(
-        thresholds=ConvictionThresholds(
-            trade=settings.trade_threshold, watch=settings.watch_threshold
-        ),
+        thresholds=thresholds,
         window_days=settings.corroboration_window_days,
     )
 

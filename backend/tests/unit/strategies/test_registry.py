@@ -14,9 +14,7 @@ from trading.strategies.trivial import TrivialStrategy
 
 
 def _config() -> StrategyConfig:
-    return StrategyConfig(
-        thresholds=ConvictionThresholds(trade=65.0, watch=30.0), window_days=14
-    )
+    return StrategyConfig(thresholds=ConvictionThresholds(trade=65.0, watch=30.0), window_days=14)
 
 
 def test_both_shipped_strategies_are_registered() -> None:

@@ -65,6 +65,4 @@ class PoliticalSignalStrategy:
 
 @register(STRATEGY_ID)
 def _build(config: StrategyConfig) -> PoliticalSignalStrategy:
-    return PoliticalSignalStrategy(
-        thresholds=config.thresholds, window_days=config.window_days
-    )
+    return PoliticalSignalStrategy(thresholds=config.thresholds, window_days=config.window_days)
