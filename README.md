@@ -46,6 +46,26 @@ frontend/   React 18 + TypeScript SPA (see frontend/README.md)
       all checks pass and the operator confirms; mode changes are recorded as events. Secrets
       are env-only with separate live credentials. Unambiguous LIVE indicator in the UI.
 
+## Enhancements (post-M5)
+
+- **Live market data**: a `QuoteFeedPort` with an `AlpacaMarketData` adapter (Alpaca Market
+  Data API v2) exposing `GET /quotes`, `/quotes/tracked`, and `/positions/live` (open
+  positions marked to the latest quote → live unrealized P&L). Off by construction: a
+  `DisabledQuoteFeed` is wired unless `ENABLE_LIVE_QUOTES` + data credentials are set, so
+  startup and tests make no network calls. Decimals are serialized as strings; disabled
+  feeds return `enabled:false` (HTTP 200), never errors.
+- **Markets screen**: a new UI screen built on TradingView embed widgets (ticker tape,
+  watchlist, advanced chart, market overview, mini charts) — genuinely live with no API
+  keys. The watchlist defaults to the platform's tracked symbols and overlays numeric quotes
+  only when the backend feed is enabled, degrading cleanly to charts-only when it is off.
+- **Algorithms screen redesign**: per-algorithm performance stats (return, drawdown, win
+  rate, realized P&L), a conviction-by-ticker breakdown, and signal→decision attribution —
+  all derived client-side from the event log.
+- **Real historical backtest prices**: an `AlpacaHistoricalData` adapter (daily bars,
+  paginated) behind a `HistoricalPricesPort` feeds the backtester real history when
+  `ENABLE_HISTORICAL_DATA` + data credentials are set; otherwise the deterministic synthetic
+  provider is used, keeping backtests offline and reproducible by default.
+
 ## Quick start (backend)
 
 ```bash
