@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.
     default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
 
+    # Real historical bars for backtests (FR-BT). OFF by construction: a bare
+    # `python -m trading.main` and the test suite price backtests off the deterministic
+    # synthetic path and make ZERO network calls. The backtest fetches REAL daily OHLC bars
+    # (bar close per day) from the Alpaca data API only when `enable_historical_data` is true
+    # AND data credentials resolve (the same `data_key_id()`/`data_secret_key()` + base URL as
+    # the live quote feed). `backtest_lookback_days` bounds the bar date range when the recorded
+    # signals do not already span one.
+    enable_historical_data: bool = False
+    backtest_lookback_days: int = 180
+
     def data_key_id(self) -> str | None:
         """Resolved market-data key: the dedicated data key, else the live broker key."""
         return self.alpaca_data_key_id or self.alpaca_live_key_id

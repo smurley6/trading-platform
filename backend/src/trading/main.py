@@ -17,6 +17,7 @@ from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
+from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import QuoteFeedPort
 from trading.application.projections import signals_from_events
 from trading.application.reconcile import Reconcile
@@ -35,8 +36,9 @@ from trading.infrastructure.data_sources.congress_trades import CongressTradesSo
 from trading.infrastructure.data_sources.news import NewsSource
 from trading.infrastructure.data_sources.usaspending import UsaSpendingSource
 from trading.infrastructure.market_data.alpaca import AlpacaMarketData
+from trading.infrastructure.market_data.alpaca_history import AlpacaHistoricalData
 from trading.infrastructure.market_data.disabled import DisabledQuoteFeed
-from trading.infrastructure.market_data.historical import synthetic_price_series
+from trading.infrastructure.market_data.historical import SyntheticHistoricalPrices
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
 from trading.infrastructure.nlp.sentiment import LexiconSentiment
@@ -133,6 +135,19 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(data_client.aclose)
+
+    # Historical price source for backtests. Default OFF -> synthetic (offline, no network);
+    # real Alpaca daily bars are wired only when enabled AND the same data credentials resolve.
+    historical_prices: HistoricalPricesPort = SyntheticHistoricalPrices(_DEV_PRICES)
+    if settings.enable_historical_data and data_key_id and data_secret_key:
+        history_client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
+        historical_prices = AlpacaHistoricalData(
+            client=history_client,
+            key_id=data_key_id,
+            secret_key=data_secret_key,
+            base_url=settings.alpaca_data_base_url,
+        )
+        live_aclosers.append(history_client.aclose)
 
     # Each sleeve is an isolated capital pool: its own paper broker, evaluator, and reconciler.
     # Adding a sleeve = one more spec here.
@@ -235,8 +250,14 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     async def run_backtest() -> BacktestResult:
         recorded = signals_from_events(await event_store.read_all())
+        symbols = sorted({s.ticker for s in recorded})
         times = sorted({s.created_at for s in recorded})
-        prices = synthetic_price_series(_DEV_PRICES, times)
+        # Date range: bound by the recorded signal timestamps, widened to at least
+        # backtest_lookback_days so real bars span enough history to mark every signal.
+        end = times[-1] if times else clock.now()
+        lookback = timedelta(days=settings.backtest_lookback_days)
+        start = min(times[0], end - lookback) if times else end - lookback
+        prices = await historical_prices.price_series(symbols, start, end)
         return await backtest.run(
             BacktestRequest(
                 strategy=political_strategy,

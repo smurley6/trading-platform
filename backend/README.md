@@ -17,7 +17,11 @@ interface  →  infrastructure  →  application  →  strategies  →  domain
 - **backtesting** (`application/backtest.py`) — replays recorded signals through the *same*
   `EvaluateSignals` path used live, in a throwaway environment (manual clock, in-memory
   store, historical-price market data, paper broker) supplied via the `BacktestEnvFactory`
-  port. No parallel logic; output is equity curve, return, drawdown, and trade list.
+  port. No parallel logic; output is equity curve, return, drawdown, and trade list. The
+  `PriceSeries` it replays against comes from an injected `HistoricalPricesPort`: **real**
+  daily OHLC bars (bar close per day) from the Alpaca data API when `ENABLE_HISTORICAL_DATA`
+  is set and data credentials resolve, and a deterministic **synthetic** path otherwise — the
+  default, so a bare run and the test suite are network-free.
 - **infrastructure/** — adapters: `PaperBroker`, `AlpacaBroker` (live), `ModeRoutingBroker`
   (paper↔live), `StaticMarketData`/`HistoricalMarketData`, in-memory and Postgres event
   stores, `SystemClock`/`ManualClock`, NLP (`GazetteerEntityResolver`, `LexiconSentiment`),
@@ -107,7 +111,16 @@ back to whichever side is present).
 OFF by construction: a bare `python -m trading.main` injects `DisabledQuoteFeed` and makes no
 network calls. The feed turns on only when `ENABLE_LIVE_QUOTES=true` **and** data credentials
 resolve (`ALPACA_DATA_KEY_ID`/`ALPACA_DATA_SECRET_KEY`, else the `ALPACA_LIVE_*` keys — Alpaca
-data accepts paper or live keys). Endpoints:
+data accepts paper or live keys).
+
+The **backtest** reuses the same data API and credentials for *historical* bars: a
+`HistoricalPricesPort` yields the `PriceSeries` a backtest replays against. `AlpacaHistoricalData`
+fetches daily OHLC bars (`GET /v2/stocks/bars?symbols=…&timeframe=1Day&start=…&end=…`, paging
+through `next_page_token`) and maps each bar **close** to a price point; it is wired only when
+`ENABLE_HISTORICAL_DATA=true` **and** data credentials resolve. Otherwise `SyntheticHistorical
+Prices` (the deterministic illustrative path) is injected — the default, so backtests run
+offline and existing results are unchanged. `BACKTEST_LOOKBACK_DAYS` bounds the bar date range
+when the recorded signals don't already span one. Endpoints:
 
 - `GET /quotes?symbols=AAPL,MSFT` → `{enabled, as_of, quotes:[{symbol,bid,ask,last,as_of}]}`;
   disabled feed returns `{enabled:false, as_of:null, quotes:[]}` (HTTP 200, never 5xx).
