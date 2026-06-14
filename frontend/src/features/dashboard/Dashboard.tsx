@@ -2,15 +2,17 @@
 
 import type { ColDef } from "ag-grid-community";
 import { Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
 import { api } from "../../lib/api";
 import { formatMoney, formatNumber } from "../../lib/format";
 import { equitySeries, latestSnapshots, positionRows } from "../../lib/projections";
 import type { SleeveSnapshot } from "../../lib/projections";
-import type { LivePosition, Sleeve } from "../../lib/types";
+import type { LivePosition, LivePositionsResult, Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
+
+const LIVE_POLL_INTERVAL_MS = 5_000;
 
 interface SleeveRow {
   id: string;
@@ -65,7 +67,9 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
   const events = useLoader(() => api.events(1000), [refreshKey]);
   // Optional live P&L overlay. Defaults to OFF (no credentials) and resolves to a disabled
   // shape on any error, so the rest of the dashboard is unaffected when it's not available.
-  const live = useLoader(() => api.livePositions(), [refreshKey]);
+  // Once enabled, it refreshes on a light interval so market value / unrealized P&L track the
+  // moving feed in near-real-time; while disabled it stays dormant (no polling) — like today.
+  const live = useLivePositions(refreshKey);
   const [selected, setSelected] = useState<string | null>(null);
 
   const allEvents = events.data ?? [];
@@ -87,8 +91,8 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
   const activeSleeve = selected ?? sleeves[0]?.id ?? null;
   const series = activeSleeve ? equitySeries(allEvents, activeSleeve) : [];
 
-  const livePositions: LivePosition[] = live.data?.enabled ? live.data.positions : [];
-  const liveOn = live.data?.enabled ?? false;
+  const livePositions: LivePosition[] = live.enabled ? live.positions : [];
+  const liveOn = live.enabled;
   const liveUnrealized = livePositions.reduce((sum, p) => sum + Number(p.unrealized_pnl), 0);
   const liveMarketValue = livePositions.reduce((sum, p) => sum + Number(p.market_value), 0);
 
@@ -161,6 +165,42 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
       </Card>
     </StackLayout>
   );
+}
+
+// Live positions overlay: fetch once on mount / refreshKey change, then — only while the feed
+// reports enabled — keep refreshing on a light interval so the P&L marks track the moving feed.
+// When the feed is disabled (today's default) it never schedules an interval, so the Dashboard
+// behaves exactly as before: a single resolved-to-disabled probe and nothing more.
+function useLivePositions(refreshKey: number): LivePositionsResult {
+  const [state, setState] = useState<LivePositionsResult>({ enabled: false, positions: [] });
+
+  useEffect(() => {
+    let cancelled = false;
+    let pollTimer: number | undefined;
+
+    const load = (): void => {
+      void api.livePositions().then((result) => {
+        if (cancelled) return;
+        setState(result);
+        // Schedule the next poll only while the feed is on; otherwise stay dormant.
+        if (result.enabled && pollTimer === undefined) {
+          pollTimer = window.setInterval(load, LIVE_POLL_INTERVAL_MS);
+        } else if (!result.enabled && pollTimer !== undefined) {
+          window.clearInterval(pollTimer);
+          pollTimer = undefined;
+        }
+      });
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+    };
+  }, [refreshKey]);
+
+  return state;
 }
 
 function SummaryCard({ label, value }: { label: string; value: string }) {

@@ -1,5 +1,6 @@
 """FastAPI application. Receives fully wired dependencies from the composition root."""
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
-from trading.application.ports.market_data import QuoteFeedPort
+from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
 from trading.application.projections import held_positions_from_events, signals_from_events
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
@@ -68,6 +69,7 @@ class AppDeps:
     conviction_thresholds: ConvictionThresholds
     conviction_window_days: int
     quote_feed: QuoteFeedPort | None = None  # live tracking/marks; None => disabled
+    quote_stream: QuoteStreamPort | None = None  # /ws/quotes real-time push; None => disabled
     default_watchlist: list[str] = field(default_factory=list)
     political_cycle: PoliticalCycle | None = None
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
@@ -76,6 +78,10 @@ class AppDeps:
     event_bus: EventBroadcasterPort | None = None  # live WebSocket fan-out (FR-API-1)
     reconcile_interval_seconds: int = 0  # 0 disables the scheduler (tests)
     ingest_interval_seconds: int = 0
+    # Long-running background coroutines started on startup and cancelled on shutdown (e.g. the
+    # Alpaca quote-stream consumer). Each is a factory so nothing runs until the app starts —
+    # when empty (the default) startup launches no task and opens no socket.
+    background_tasks: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     # Resources to release on shutdown (e.g. the shared HTTP client for data sources).
     aclosers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
 
@@ -92,9 +98,17 @@ def create_app(deps: AppDeps) -> FastAPI:
             for func, seconds in jobs:
                 scheduler.add_job(func, "interval", seconds=seconds)
             scheduler.start()
+        # Start any long-running background consumers (e.g. the live quote stream). Empty by
+        # default, so a bare run launches nothing and opens no socket.
+        tasks = [asyncio.ensure_future(factory()) for factory in deps.background_tasks]
         try:
             yield
         finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                # Await cancellation; swallow CancelledError and any teardown error.
+                await asyncio.gather(*tasks, return_exceptions=True)
             if scheduler is not None:
                 scheduler.shutdown(wait=False)
             for aclose in deps.aclosers:
@@ -314,7 +328,69 @@ def create_app(deps: AppDeps) -> FastAPI:
         finally:
             deps.event_bus.unsubscribe(queue)
 
+    @app.websocket("/ws/quotes")
+    async def stream_quotes(websocket: WebSocket) -> None:
+        await websocket.accept()
+        stream = deps.quote_stream
+        enabled = stream is not None and stream.enabled
+        # Contract: the first frame is always the status, so the client knows whether to
+        # expect live quotes or fall back to charts-only.
+        await websocket.send_json({"type": "status", "enabled": enabled})
+        if not enabled or stream is None:
+            # Disabled: hold the socket open but never push or error. Wait for the client to
+            # disconnect (any inbound frame raises WebSocketDisconnect on close).
+            try:
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                pass
+            return
+
+        # Enabled: seed the upstream subscription with the platform's tracked symbols, then
+        # fan quotes out of a per-connection queue while concurrently honoring client
+        # subscribe requests. Mirrors /ws/events (per-connection queue, clean disconnect).
+        await stream.add_symbols(await _tracked_symbols(deps))
+        queue = stream.subscribe()
+        push = asyncio.ensure_future(_push_quotes(websocket, queue))
+        recv = asyncio.ensure_future(_handle_quote_requests(websocket, stream))
+        try:
+            await asyncio.wait({push, recv}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (push, recv):
+                task.cancel()
+            stream.unsubscribe(queue)
+
     return app
+
+
+async def _tracked_symbols(deps: AppDeps) -> list[str]:
+    held = held_positions_from_events(await deps.event_store.read_all())
+    symbols = sorted({p.symbol for p in held})
+    return symbols or list(deps.default_watchlist)
+
+
+async def _push_quotes(websocket: WebSocket, queue: "asyncio.Queue[Quote]") -> None:
+    while True:
+        quote = await queue.get()
+        await websocket.send_json(
+            {
+                "type": "quote",
+                "symbol": quote.symbol,
+                "bid": str(quote.bid),
+                "ask": str(quote.ask),
+                "last": str(quote.last),
+                "as_of": quote.as_of.isoformat(),
+            }
+        )
+
+
+async def _handle_quote_requests(websocket: WebSocket, stream: QuoteStreamPort) -> None:
+    while True:
+        message = await websocket.receive_json()
+        if isinstance(message, dict) and message.get("action") == "subscribe":
+            requested = message.get("symbols")
+            if isinstance(requested, list):
+                await stream.add_symbols([str(s) for s in requested])
 
 
 def _parse_symbols(raw: str | None) -> list[str]:

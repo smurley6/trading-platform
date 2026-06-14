@@ -18,7 +18,7 @@ from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
-from trading.application.ports.market_data import QuoteFeedPort
+from trading.application.ports.market_data import QuoteFeedPort, QuoteStreamPort
 from trading.application.projections import signals_from_events
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
@@ -37,7 +37,8 @@ from trading.infrastructure.data_sources.news import NewsSource
 from trading.infrastructure.data_sources.usaspending import UsaSpendingSource
 from trading.infrastructure.market_data.alpaca import AlpacaMarketData
 from trading.infrastructure.market_data.alpaca_history import AlpacaHistoricalData
-from trading.infrastructure.market_data.disabled import DisabledQuoteFeed
+from trading.infrastructure.market_data.alpaca_stream import AlpacaQuoteStream
+from trading.infrastructure.market_data.disabled import DisabledQuoteFeed, DisabledQuoteStream
 from trading.infrastructure.market_data.historical import SyntheticHistoricalPrices
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
@@ -135,6 +136,23 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(data_client.aclose)
+
+    # Real-time quote stream behind /ws/quotes. Same switch as the REST feed: built only when
+    # enabled AND data creds resolve; otherwise the disabled stream opens no socket. Seeded with
+    # the default watchlist so it streams something out of the box; clients extend the upstream
+    # subscription via {"action":"subscribe",...} and each connection also adds tracked symbols.
+    # Constructing AlpacaQuoteStream opens NOTHING — its run() task is started on app startup.
+    quote_stream: QuoteStreamPort = DisabledQuoteStream()
+    background_tasks: list[Callable[[], Awaitable[None]]] = []
+    if settings.enable_live_quotes and data_key_id and data_secret_key:
+        alpaca_stream = AlpacaQuoteStream(
+            key_id=data_key_id,
+            secret_key=data_secret_key,
+            symbols=settings.default_watchlist,
+            url=settings.alpaca_data_stream_url,
+        )
+        quote_stream = alpaca_stream
+        background_tasks.append(alpaca_stream.run)
 
     # Historical price source for backtests. Default OFF -> synthetic (offline, no network);
     # real Alpaca daily bars are wired only when enabled AND the same data credentials resolve.
@@ -280,6 +298,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
         conviction_thresholds=thresholds,
         conviction_window_days=settings.corroboration_window_days,
         quote_feed=quote_feed,
+        quote_stream=quote_stream,
+        background_tasks=background_tasks,
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
         backtest_runner=run_backtest,

@@ -21,6 +21,7 @@ import { api } from "../../lib/api";
 import { formatNumber } from "../../lib/format";
 import type { Quote } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
+import { useQuoteStream } from "../../lib/useQuoteStream";
 
 const DEFAULT_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"];
 
@@ -36,17 +37,10 @@ export function Markets({ refreshKey }: MarketsProps) {
     return fromBackend.length > 0 ? fromBackend : DEFAULT_SYMBOLS;
   }, [tracked.data]);
 
-  // Live numeric quote overlay (optional). Refresh when the symbol set changes or the app ticks.
-  const quotesKey = symbols.join(",");
-  const quotes = useLoader(() => api.quotes(symbols), [quotesKey, refreshKey]);
-  const quoteBySymbol = useMemo(() => {
-    const map = new Map<string, Quote>();
-    if (quotes.data?.enabled) {
-      for (const q of quotes.data.quotes) map.set(q.symbol, q);
-    }
-    return map;
-  }, [quotes.data]);
-  const numericFeedOn = quotes.data?.enabled ?? false;
+  // Live numeric quote overlay (optional). Driven by the real-time stream hook: it pushes
+  // bid/ask/last updates as prices move (or falls back to interval polling), and stays fully
+  // dormant when the feed is off — so the watchlist is charts-only / FEED OFF exactly as today.
+  const { enabled: numericFeedOn, quotes: quoteBySymbol } = useQuoteStream(symbols);
 
   const [selected, setSelected] = useState<string | null>(null);
   const active = selected ?? symbols[0] ?? "AAPL";

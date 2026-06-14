@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # present; the dedicated `alpaca_data_*` vars override that (env-only, never committed).
     enable_live_quotes: bool = False
     alpaca_data_base_url: str = "https://data.alpaca.markets"
+    # Real-time quote stream behind /ws/quotes. Same ENABLE_LIVE_QUOTES + data-cred switch as
+    # the REST feed gates it — no separate on/off flag. Dormant by default: the disabled stream
+    # opens no socket; the live WebSocket is dialed only when the feed is enabled and creds
+    # resolve (see main.py). Override only to point at a different Alpaca data feed (e.g. SIP).
+    alpaca_data_stream_url: str = "wss://stream.data.alpaca.markets/v2/iex"
     alpaca_data_key_id: str | None = None
     alpaca_data_secret_key: str | None = None
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.

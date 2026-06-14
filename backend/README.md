@@ -131,6 +131,28 @@ when the recorded signals don't already span one. Endpoints:
   (`domain/positions.mark_positions`); when the feed is disabled each position is marked at its
   own avg price (zero unrealized P&L) so it still returns useful numbers. Decimals are strings.
 
+### Real-time quote stream (`WS /ws/quotes`)
+
+A `QuoteStreamPort` pushes live NBBO updates over a WebSocket, fanning out to per-connection
+queues exactly like the `/ws/events` event broadcaster. `AlpacaQuoteStream` consumes Alpaca's
+market-data WebSocket (`wss://stream.data.alpaca.markets/v2/iex`, config `ALPACA_DATA_STREAM_URL`):
+connect → `auth` → `subscribe quotes` → map `{"T":"q",...}` frames to `Quote`s (`last` = the same
+bid/ask midpoint as the REST feed), reconnecting with capped exponential backoff. It is gated by
+the **same `ENABLE_LIVE_QUOTES` + data-credential switch** as the REST `/quotes` feed (no separate
+flag) and is **dormant by default**: a bare `python -m trading.main` injects `DisabledQuoteStream`,
+starts no background task, and opens no socket. The live stream's consume task is started on app
+startup and cancelled cleanly on shutdown (only when enabled). The `websockets` library lives in
+infrastructure only (the import-linter layering contract keeps it out of interface/application).
+
+`/ws/quotes` contract:
+- On connect the server immediately sends `{"type":"status","enabled":true|false}`.
+- Disabled: the socket stays open but no quotes are sent and it never errors (the frontend falls
+  back to charts-only).
+- Enabled: the client MAY send `{"action":"subscribe","symbols":["AAPL","LMT"]}`; the server
+  ensures those plus the platform's tracked symbols are subscribed upstream and pushes
+  `{"type":"quote","symbol":"AAPL","bid":"232.10","ask":"232.14","last":"232.12","as_of":"<ISO>"}`
+  frames (Decimals as strings, consistent with REST `/quotes`).
+
 ## Going live (M5, spec §11)
 
 Live trading is off by construction. The paper→live switch is config-only at the broker
