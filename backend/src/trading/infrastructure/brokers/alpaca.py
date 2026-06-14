@@ -20,8 +20,9 @@ from trading.application.ports.broker import (
     BrokerAccount,
     BrokerOrder,
     BrokerPosition,
+    OrderNotFoundError,
 )
-from trading.domain.orders import Fill, OrderSide, OrderStatus, OrderType
+from trading.domain.orders import TERMINAL_STATUSES, Fill, OrderSide, OrderStatus, OrderType
 
 # Alpaca order states -> our lifecycle. Unknown/transient states map to SUBMITTED.
 _STATUS_MAP = {
@@ -90,6 +91,29 @@ class AlpacaBroker:
                 f"order submit failed ({response.status_code}): {response.text}"
             )
         return _to_order(response.json())
+
+    async def cancel_order(self, *, client_order_id: str) -> BrokerOrder:
+        order = await self._lookup(client_order_id)
+        if order.status in TERMINAL_STATUSES:
+            return order  # already final — nothing to cancel
+        response = await self._client.delete(
+            f"{self._base_url}/v2/orders/{order.broker_order_id}", headers=self._headers
+        )
+        # 204 cancel accepted; 422 not cancelable (e.g. it just filled). Either way, re-fetch
+        # the authoritative state rather than assume the outcome.
+        if response.status_code not in (200, 204, 422):
+            raise AlpacaBrokerError(f"cancel failed ({response.status_code}): {response.text}")
+        return await self._lookup(client_order_id)
+
+    async def _lookup(self, client_order_id: str) -> BrokerOrder:
+        try:
+            return await self._get_by_client_order_id(client_order_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise OrderNotFoundError(
+                    f"no order with client_order_id {client_order_id}"
+                ) from exc
+            raise
 
     async def list_orders(self) -> Sequence[BrokerOrder]:
         response = await self._client.get(

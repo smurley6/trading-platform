@@ -7,6 +7,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from trading.application.ports.broker import OrderNotFoundError
 from trading.domain.orders import OrderSide, OrderStatus, OrderType
 from trading.infrastructure.brokers.alpaca import AlpacaBroker, AlpacaBrokerError
 
@@ -100,6 +101,55 @@ async def test_list_positions_and_account() -> None:
     assert positions[0].quantity == Decimal("10")
     assert account.cash == Decimal("55000.00")
     assert account.equity == Decimal("100000.00")
+
+
+async def test_cancel_open_order_deletes_then_refetches() -> None:
+    calls: list[str] = []
+    open_order = {
+        "id": "b9",
+        "client_order_id": "ord-9",
+        "symbol": "LMT",
+        "qty": "10",
+        "filled_qty": "0",
+        "filled_avg_price": None,
+        "side": "buy",
+        "type": "market",
+        "status": "accepted",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        # First lookup -> open; after the DELETE -> canceled.
+        status = "canceled" if any(c.startswith("DELETE") for c in calls) else "accepted"
+        return httpx.Response(200, json={**open_order, "status": status})
+
+    order = await _broker(handler).cancel_order(client_order_id="ord-9")
+
+    assert order.status is OrderStatus.CANCELED
+    assert "DELETE /v2/orders/b9" in calls  # canceled by broker order id
+
+
+async def test_cancel_terminal_order_is_noop() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=_FILLED_ORDER)  # already filled
+
+    order = await _broker(handler).cancel_order(client_order_id="ord-1")
+
+    assert order.status is OrderStatus.FILLED
+    assert "DELETE" not in calls  # nothing to cancel
+
+
+async def test_cancel_missing_order_raises_not_found() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "order not found"})
+
+    with pytest.raises(OrderNotFoundError):
+        await _broker(handler).cancel_order(client_order_id="ghost")
 
 
 async def test_pending_order_has_no_fills() -> None:

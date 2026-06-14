@@ -51,6 +51,9 @@ class EmptyBroker:
     ) -> BrokerOrder:
         raise NotImplementedError
 
+    async def cancel_order(self, *, client_order_id: str) -> BrokerOrder:
+        raise NotImplementedError
+
     async def list_orders(self) -> Sequence[BrokerOrder]:
         return []
 

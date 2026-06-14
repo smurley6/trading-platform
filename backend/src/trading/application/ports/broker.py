@@ -33,6 +33,10 @@ class BrokerAccount:
     equity: Decimal
 
 
+class OrderNotFoundError(Exception):
+    """No order exists for the given client_order_id at the broker."""
+
+
 class BrokerPort(Protocol):
     async def submit_order(
         self,
@@ -44,6 +48,15 @@ class BrokerPort(Protocol):
         order_type: OrderType = OrderType.MARKET,
     ) -> BrokerOrder:
         """Submit an order. MUST be idempotent on `client_order_id` (FR-EXE-3)."""
+        ...
+
+    async def cancel_order(self, *, client_order_id: str) -> BrokerOrder:
+        """Cancel an open order by its idempotency key, returning its resulting state.
+
+        Raises `OrderNotFoundError` if no such order exists. MUST be safe to call on an
+        already-terminal order (filled/canceled/rejected): it is a no-op that returns the
+        current state rather than erroring.
+        """
         ...
 
     async def list_orders(self) -> Sequence[BrokerOrder]: ...

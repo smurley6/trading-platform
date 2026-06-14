@@ -8,6 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from trading.application.backtest import BacktestResult
+from trading.application.cancel_order import CancelResult
 from trading.application.live_trading import LiveReadinessReport
 from trading.application.ports.broker import BrokerOrder
 from trading.application.ports.market_data import Quote
@@ -88,6 +89,24 @@ class OrderOut(BaseModel):
             side=order.side.value,
             quantity=order.quantity,
             status=order.status.value,
+        )
+
+
+class CancelOut(BaseModel):
+    correlation_id: str
+    sleeve_id: str
+    client_order_id: str
+    broker_order_id: str
+    status: str
+
+    @classmethod
+    def from_result(cls, result: CancelResult) -> "CancelOut":
+        return cls(
+            correlation_id=result.correlation_id,
+            sleeve_id=result.sleeve_id,
+            client_order_id=result.order.client_order_id,
+            broker_order_id=result.order.broker_order_id,
+            status=result.order.status.value,
         )
 
 

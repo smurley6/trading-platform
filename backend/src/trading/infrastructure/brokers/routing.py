@@ -62,6 +62,9 @@ class ModeRoutingBroker:
             order_type=order_type,
         )
 
+    async def cancel_order(self, *, client_order_id: str) -> BrokerOrder:
+        return await self._active().cancel_order(client_order_id=client_order_id)
+
     async def list_orders(self) -> Sequence[BrokerOrder]:
         return await self._active().list_orders()
 

@@ -113,6 +113,15 @@ def held_positions_from_events(events: Sequence[StoredEvent]) -> list[HeldPositi
     return held
 
 
+def order_sleeve(events: Sequence[StoredEvent], client_order_id: str) -> str | None:
+    """The sleeve that owns an order, from its recorded lifecycle events (None if unknown)."""
+    for stored in events:
+        payload = stored.event.payload
+        if payload.get("client_order_id") == client_order_id and payload.get("sleeve_id"):
+            return str(payload["sleeve_id"])
+    return None
+
+
 def order_statuses_from_events(
     events: Sequence[StoredEvent], *, sleeve_id: str | None = None
 ) -> dict[str, str]:

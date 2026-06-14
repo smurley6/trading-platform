@@ -8,7 +8,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from trading.application.ports.broker import BrokerAccount, BrokerOrder, BrokerPosition
+from trading.application.ports.broker import (
+    BrokerAccount,
+    BrokerOrder,
+    BrokerPosition,
+    OrderNotFoundError,
+)
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.market_data import MarketDataPort
 from trading.domain.orders import Fill, OrderSide, OrderStatus, OrderType
@@ -94,6 +99,15 @@ class PaperBroker:
                 fills=(fill,),
             )
             self._orders[client_order_id] = order
+            return order
+
+    async def cancel_order(self, *, client_order_id: str) -> BrokerOrder:
+        async with self._lock:
+            order = self._orders.get(client_order_id)
+            if order is None:
+                raise OrderNotFoundError(f"no order with client_order_id {client_order_id}")
+            # Paper fills are immediate, so every order is already terminal — nothing to
+            # cancel. Return current state (no-op), consistent with the port contract.
             return order
 
     async def list_orders(self) -> Sequence[BrokerOrder]:

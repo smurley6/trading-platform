@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from trading.application.backtest import BacktestResult
+from trading.application.cancel_order import CancelFailedError, CancelOrder
 from trading.application.evaluate_signals import EvaluateSignals
 from trading.application.live_trading import (
     AssessLiveReadiness,
@@ -18,6 +19,7 @@ from trading.application.live_trading import (
     RequestLiveTrading,
 )
 from trading.application.political_cycle import PoliticalCycle
+from trading.application.ports.broker import OrderNotFoundError
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
@@ -33,6 +35,7 @@ from trading.domain.positions import mark_positions
 from trading.domain.sleeves import TradingMode
 from trading.interface.schemas import (
     BacktestOut,
+    CancelOut,
     ConvictionItem,
     EvaluateOut,
     EventOut,
@@ -76,6 +79,7 @@ class AppDeps:
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
     assess_readiness: AssessLiveReadiness | None = None
     request_live: RequestLiveTrading | None = None
+    cancel_order: CancelOrder | None = None  # manual order cancellation (FR-EXE); None => off
     event_bus: EventBroadcasterPort | None = None  # live WebSocket fan-out (FR-API-1)
     reconcile_interval_seconds: int = 0  # 0 disables the scheduler (tests)
     ingest_interval_seconds: int = 0
@@ -306,6 +310,23 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/reconcile", response_model=list[ReconcileOut])
     async def run_reconcile() -> list[ReconcileOut]:
         return [ReconcileOut.from_report(await r.execute()) for r in deps.reconcilers]
+
+    @app.post("/orders/{client_order_id}/cancel", response_model=CancelOut)
+    async def cancel_order(
+        client_order_id: str,
+        sleeve_id: Annotated[str | None, Query()] = None,
+    ) -> CancelOut:
+        if deps.cancel_order is None:
+            raise HTTPException(status_code=409, detail="order cancellation is not configured")
+        try:
+            result = await deps.cancel_order.execute(
+                client_order_id=client_order_id, sleeve_id=sleeve_id
+            )
+        except OrderNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CancelFailedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CancelOut.from_result(result)
 
     @app.websocket("/ws/events")
     async def stream_events(websocket: WebSocket) -> None:

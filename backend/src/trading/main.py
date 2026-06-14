@@ -9,6 +9,7 @@ import httpx
 from fastapi import FastAPI
 
 from trading.application.backtest import Backtest, BacktestRequest, BacktestResult
+from trading.application.cancel_order import CancelOrder
 from trading.application.evaluate_signals import EvaluateSignals
 from trading.application.ingest_signals import IngestSignals
 from trading.application.live_trading import AssessLiveReadiness, RequestLiveTrading
@@ -234,6 +235,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     evaluators: dict[str, EvaluateSignals] = {}
     reconcilers_by_id: dict[str, Reconcile] = {}
+    brokers_by_id: dict[str, BrokerPort] = {}  # per-sleeve routing broker, for manual cancel
     political_evaluator: EvaluateSignals | None = None
     for sleeve_id, _strategy_id, strategy in sleeve_specs:
         sleeve = registry.get(sleeve_id).sleeve
@@ -264,12 +266,19 @@ def build_dependencies(settings: Settings) -> AppDeps:
             clock=clock,
         )
         evaluators[sleeve_id] = evaluator
+        brokers_by_id[sleeve_id] = router
         reconcilers_by_id[sleeve_id] = Reconcile(
             broker=router, event_store=event_store, clock=clock, sleeve_id=sleeve_id
         )
         if sleeve_id == "sleeve-political":
             political_evaluator = evaluator
     reconcilers = list(reconcilers_by_id.values())
+    cancel_order = CancelOrder(
+        brokers=brokers_by_id,
+        event_store=event_store,
+        clock=clock,
+        default_sleeve_id="sleeve-political",
+    )
 
     live_ceilings = RiskLimits(
         max_trade_pct_of_sleeve=settings.live_max_trade_pct_of_sleeve,
@@ -354,6 +363,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         backtest_runner=run_backtest,
         assess_readiness=assess_readiness,
         request_live=request_live,
+        cancel_order=cancel_order,
         event_bus=event_bus,
         reconcile_interval_seconds=settings.reconcile_interval_seconds,
         ingest_interval_seconds=settings.ingest_interval_seconds,
