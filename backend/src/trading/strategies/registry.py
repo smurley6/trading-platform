@@ -3,11 +3,15 @@
 from collections.abc import Callable
 from typing import TypeVar
 
-from trading.strategies.base import Strategy
+from trading.strategies.base import Strategy, StrategyConfig
 
-_REGISTRY: dict[str, Callable[[], Strategy]] = {}
+# A factory builds a strategy from an explicit, typed config so the same registry can serve
+# config-free strategies (which ignore it) and config-driven ones (which read it).
+StrategyFactory = Callable[[StrategyConfig], Strategy]
 
-_F = TypeVar("_F", bound=Callable[[], Strategy])
+_REGISTRY: dict[str, StrategyFactory] = {}
+
+_F = TypeVar("_F", bound=StrategyFactory)
 
 
 def register(strategy_id: str) -> Callable[[_F], _F]:
@@ -20,14 +24,14 @@ def register(strategy_id: str) -> Callable[[_F], _F]:
     return decorator
 
 
-def create(strategy_id: str) -> Strategy:
+def create(strategy_id: str, config: StrategyConfig) -> Strategy:
     try:
         factory = _REGISTRY[strategy_id]
     except KeyError:
         raise KeyError(
             f"unknown strategy '{strategy_id}'; available: {sorted(_REGISTRY)}"
         ) from None
-    return factory()
+    return factory(config)
 
 
 def available() -> tuple[str, ...]:

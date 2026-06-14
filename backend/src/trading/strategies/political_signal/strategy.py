@@ -16,13 +16,12 @@ from trading.domain.conviction import (
 from trading.domain.decisions import TargetPosition
 from trading.domain.positions import Portfolio
 from trading.domain.signals import Signal
-from trading.strategies.base import StrategyProposal
+from trading.strategies.base import StrategyConfig, StrategyProposal
 from trading.strategies.registry import register
 
 STRATEGY_ID = "political_signal"
 
 
-@register(STRATEGY_ID)
 @dataclass
 class PoliticalSignalStrategy:
     strategy_id: str = field(default=STRATEGY_ID, init=False)
@@ -62,3 +61,10 @@ class PoliticalSignalStrategy:
                 )
             # WATCH: hold whatever we have, propose nothing.
         return proposals
+
+
+@register(STRATEGY_ID)
+def _build(config: StrategyConfig) -> PoliticalSignalStrategy:
+    return PoliticalSignalStrategy(
+        thresholds=config.thresholds, window_days=config.window_days
+    )

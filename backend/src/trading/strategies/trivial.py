@@ -11,13 +11,12 @@ from decimal import Decimal
 from trading.domain.decisions import TargetPosition
 from trading.domain.positions import Portfolio
 from trading.domain.signals import Signal
-from trading.strategies.base import StrategyProposal
+from trading.strategies.base import StrategyConfig, StrategyProposal
 from trading.strategies.registry import register
 
 STRATEGY_ID = "trivial"
 
 
-@register(STRATEGY_ID)
 @dataclass
 class TrivialStrategy:
     strategy_id: str = field(default=STRATEGY_ID, init=False)
@@ -39,3 +38,9 @@ class TrivialStrategy:
             elif net < 0 and portfolio.quantity(ticker) > 0:
                 proposals.append(StrategyProposal(TargetPosition(ticker, Decimal("0"))))
         return proposals
+
+
+@register(STRATEGY_ID)
+def _build(config: StrategyConfig) -> TrivialStrategy:
+    # The trivial strategy is a fixed-size proof of the rails; it takes no config.
+    return TrivialStrategy()
