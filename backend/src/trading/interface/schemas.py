@@ -11,6 +11,7 @@ from trading.application.backtest import BacktestResult
 from trading.application.live_trading import LiveReadinessReport
 from trading.application.ports.broker import BrokerOrder
 from trading.application.ports.market_data import Quote
+from trading.application.ports.read_model import SignalRecord
 from trading.application.reconcile import ReconciliationReport
 from trading.application.sleeve_registry import SleeveState
 from trading.domain.events import StoredEvent
@@ -135,19 +136,17 @@ class SignalFeedItem(BaseModel):
     source_reliability: float
 
     @classmethod
-    def from_stored(cls, stored: StoredEvent) -> "SignalFeedItem":
-        payload = stored.event.payload
+    def from_record(cls, record: SignalRecord) -> "SignalFeedItem":
+        signal = record.signal
         return cls(
-            signal_id=str(payload["signal_id"]),
-            occurred_at=stored.event.occurred_at,
-            source_type=str(payload["source_type"]),
-            ticker=str(payload["ticker"]),
-            politician_id=(
-                None if payload["politician_id"] is None else str(payload["politician_id"])
-            ),
-            sentiment=float(payload["sentiment"]),
-            politician_weight=float(payload["politician_weight"]),
-            source_reliability=float(payload["source_reliability"]),
+            signal_id=signal.id,
+            occurred_at=record.occurred_at,
+            source_type=signal.source_type.value,
+            ticker=signal.ticker,
+            politician_id=signal.politician_id,
+            sentiment=signal.sentiment,
+            politician_weight=signal.politician_weight,
+            source_reliability=signal.source_reliability,
         )
 
 

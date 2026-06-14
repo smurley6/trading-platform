@@ -19,6 +19,7 @@ from trading.application.risk import KillSwitch
 from trading.application.sleeve_registry import SleeveRegistry
 from trading.domain.conviction import ConvictionThresholds
 from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
 from trading.interface.app import AppDeps, create_app
 
 _AS_OF = datetime(2026, 6, 13, 20, 0, tzinfo=UTC)
@@ -56,6 +57,7 @@ class FakeQuoteStream:
 def _deps(clock: FixedClock, stream: FakeQuoteStream | None, watchlist: list[str]) -> AppDeps:
     return AppDeps(
         event_store=InMemoryEventStore(clock),
+        read_model=InMemoryReadModel(),
         kill_switch=KillSwitch(),
         sleeve_registry=SleeveRegistry([]),
         evaluators={},

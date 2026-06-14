@@ -19,7 +19,7 @@ from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import QuoteFeedPort, QuoteStreamPort
-from trading.application.projections import signals_from_events
+from trading.application.ports.read_model import ReadModelPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
@@ -45,6 +45,8 @@ from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
 from trading.infrastructure.nlp.sentiment import LexiconSentiment
 from trading.infrastructure.persistence.broadcasting import BroadcastingEventStore
 from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
+from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.infrastructure.politicians.repository import StaticPoliticianRepository
 from trading.infrastructure.reference import COMPANY_DIRECTORY
 from trading.infrastructure.reference.sectors import StaticSectorMap
@@ -77,15 +79,27 @@ _DEV_PRICES = {
 def build_dependencies(settings: Settings) -> AppDeps:
     clock = SystemClock()
 
+    # Event store (system of record) + read model (CQRS read side). The read model is kept
+    # current on every append so hot reads query maintained projections, not a full-log replay.
     inner_store: EventStorePort
+    read_model: ReadModelPort
     if settings.database_url:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from trading.infrastructure.persistence.postgres import PostgresEventStore
+        from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
 
-        inner_store = PostgresEventStore(create_async_engine(settings.database_url))
+        engine = create_async_engine(settings.database_url)
+        pg_read_model = PostgresReadModel(engine)
+        # Read-model rows are written in the append transaction, atomically with the event.
+        inner_store = PostgresEventStore(engine, on_append=pg_read_model.apply)
+        read_model = pg_read_model
     else:
-        inner_store = InMemoryEventStore(clock)
+        # Default path stays fully in-memory: a projecting wrapper folds each appended event
+        # into the in-memory read model synchronously (read-after-write consistency).
+        memory_read_model = InMemoryReadModel()
+        inner_store = ProjectingEventStore(InMemoryEventStore(clock), memory_read_model)
+        read_model = memory_read_model
     # Wrap the store so appended events fan out to live WebSocket subscribers (FR-API-1).
     event_bus = BroadcastingEventStore(inner_store)
     event_store: EventStorePort = event_bus
@@ -267,7 +281,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
     backtest = Backtest(env_factory=InMemoryBacktestEnvFactory())
 
     async def run_backtest() -> BacktestResult:
-        recorded = signals_from_events(await event_store.read_all())
+        recorded = list(await read_model.all_signals())
         symbols = sorted({s.ticker for s in recorded})
         times = sorted({s.created_at for s in recorded})
         # Date range: bound by the recorded signal timestamps, widened to at least
@@ -289,6 +303,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     deps = AppDeps(
         event_store=event_store,
+        read_model=read_model,
         kill_switch=kill_switch,
         sleeve_registry=registry,
         evaluators=evaluators,

@@ -6,11 +6,26 @@ The event log is the system of record; these are rebuildable at any time (spec s
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from trading.domain.events import EventType, StoredEvent
 from trading.domain.orders import Fill, OrderSide
 from trading.domain.positions import HeldPosition, Portfolio
 from trading.domain.signals import Signal, SignalSource
+
+
+def _signal_from_payload(payload: dict[str, Any]) -> Signal:
+    return Signal(
+        id=str(payload["signal_id"]),
+        created_at=datetime.fromisoformat(str(payload["created_at"])),
+        source_type=SignalSource(str(payload["source_type"])),
+        ticker=str(payload["ticker"]),
+        politician_id=(None if payload["politician_id"] is None else str(payload["politician_id"])),
+        sentiment=float(payload["sentiment"]),
+        politician_weight=float(payload["politician_weight"]),
+        source_reliability=float(payload["source_reliability"]),
+        raw_payload=dict(payload.get("raw_payload", {})),
+    )
 
 
 def signals_from_events(
@@ -29,25 +44,10 @@ def signals_from_events(
     for stored in events:
         if stored.event.event_type != EventType.SIGNAL_RECEIVED:
             continue
-        payload = stored.event.payload
-        created_at = datetime.fromisoformat(str(payload["created_at"]))
-        if cutoff is not None and created_at < cutoff:
+        signal = _signal_from_payload(stored.event.payload)
+        if cutoff is not None and signal.created_at < cutoff:
             continue
-        signals.append(
-            Signal(
-                id=str(payload["signal_id"]),
-                created_at=created_at,
-                source_type=SignalSource(str(payload["source_type"])),
-                ticker=str(payload["ticker"]),
-                politician_id=(
-                    None if payload["politician_id"] is None else str(payload["politician_id"])
-                ),
-                sentiment=float(payload["sentiment"]),
-                politician_weight=float(payload["politician_weight"]),
-                source_reliability=float(payload["source_reliability"]),
-                raw_payload=dict(payload.get("raw_payload", {})),
-            )
-        )
+        signals.append(signal)
     return signals
 
 

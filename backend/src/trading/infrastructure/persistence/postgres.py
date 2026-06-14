@@ -4,17 +4,22 @@ Append-only is enforced in the database itself (migration 0001 installs a trigge
 rejects UPDATE/DELETE), not just by convention here.
 """
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from sqlalchemy import Row, func, insert, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from trading.domain.events import DomainEvent, StoredEvent
 from trading.infrastructure.persistence.tables import events_table
 
 _APPEND_RETRIES = 5
+
+# Hook run inside the append transaction, after the event row is inserted, so a read-model
+# update commits atomically with the event (CQRS read side stays consistent with the log).
+# Receives the connection, the stored event, and the global `events.id` of the inserted row.
+AppendHook = Callable[[AsyncConnection, StoredEvent, int], Awaitable[None]]
 
 
 class EventStoreConcurrencyError(Exception):
@@ -22,8 +27,9 @@ class EventStoreConcurrencyError(Exception):
 
 
 class PostgresEventStore:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, *, on_append: AppendHook | None = None) -> None:
         self._engine = engine
+        self._on_append = on_append
 
     async def append(self, event: DomainEvent) -> StoredEvent:
         for _ in range(_APPEND_RETRIES):
@@ -47,10 +53,16 @@ class PostgresEventStore:
                             payload=event.payload,
                             correlation_id=event.correlation_id,
                         )
-                        .returning(events_table.c.recorded_at)
+                        .returning(events_table.c.id, events_table.c.recorded_at)
                     )
-                    recorded_at = result.scalar_one()
-                    return StoredEvent(event=event, seq=int(next_seq), recorded_at=recorded_at)
+                    row = result.one()
+                    stored = StoredEvent(
+                        event=event, seq=int(next_seq), recorded_at=row.recorded_at
+                    )
+                    if self._on_append is not None:
+                        # Same transaction: read-model rows commit with the event, or not at all.
+                        await self._on_append(conn, stored, int(row.id))
+                    return stored
             except IntegrityError:
                 continue  # another writer claimed this seq; retry with a fresh one
         raise EventStoreConcurrencyError(

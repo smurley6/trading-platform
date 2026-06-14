@@ -17,6 +17,8 @@ from trading.domain.sleeves import Sleeve, SleeveStatus, TradingMode
 from trading.infrastructure.brokers.paper import PaperBroker
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
+from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.strategies.trivial import TrivialStrategy
 
 SignalFactory = Callable[..., Signal]
@@ -44,8 +46,15 @@ def market_data(clock: FixedClock) -> StaticMarketData:
 
 
 @pytest.fixture
-def event_store(clock: FixedClock) -> InMemoryEventStore:
-    return InMemoryEventStore(clock)
+def read_model() -> InMemoryReadModel:
+    return InMemoryReadModel()
+
+
+@pytest.fixture
+def event_store(clock: FixedClock, read_model: InMemoryReadModel) -> ProjectingEventStore:
+    # Projecting store keeps the read model current on append (CQRS), exactly as production
+    # wiring does, so tests exercise the same read-after-write path.
+    return ProjectingEventStore(InMemoryEventStore(clock), read_model)
 
 
 @pytest.fixture
@@ -90,13 +99,15 @@ def sleeve_registry(sleeve: Sleeve) -> SleeveRegistry:
 
 @pytest.fixture
 def place_order(
-    broker: PaperBroker, event_store: InMemoryEventStore, clock: FixedClock
+    broker: PaperBroker, event_store: ProjectingEventStore, clock: FixedClock
 ) -> PlaceOrder:
     return PlaceOrder(broker=broker, event_store=event_store, clock=clock)
 
 
 @pytest.fixture
-def reconcile(broker: PaperBroker, event_store: InMemoryEventStore, clock: FixedClock) -> Reconcile:
+def reconcile(
+    broker: PaperBroker, event_store: ProjectingEventStore, clock: FixedClock
+) -> Reconcile:
     return Reconcile(broker=broker, event_store=event_store, clock=clock)
 
 
@@ -107,7 +118,7 @@ def evaluate_signals(
     place_order: PlaceOrder,
     broker: PaperBroker,
     market_data: StaticMarketData,
-    event_store: InMemoryEventStore,
+    event_store: ProjectingEventStore,
     clock: FixedClock,
 ) -> EvaluateSignals:
     return EvaluateSignals(

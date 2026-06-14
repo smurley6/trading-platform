@@ -19,7 +19,8 @@ from trading.application.risk import KillSwitch
 from trading.application.sleeve_registry import SleeveRegistry
 from trading.domain.conviction import ConvictionThresholds
 from trading.domain.sleeves import Sleeve
-from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
+from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.interface.app import AppDeps, create_app
 
 _AS_OF = datetime(2026, 6, 13, 20, 0, tzinfo=UTC)
@@ -48,7 +49,8 @@ class StubQuoteFeed:
 
 def _make_client(
     *,
-    event_store: InMemoryEventStore,
+    event_store: ProjectingEventStore,
+    read_model: InMemoryReadModel,
     kill_switch: KillSwitch,
     sleeve: Sleeve,
     sleeve_registry: SleeveRegistry,
@@ -61,6 +63,7 @@ def _make_client(
     app = create_app(
         AppDeps(
             event_store=event_store,
+            read_model=read_model,
             kill_switch=kill_switch,
             sleeve_registry=sleeve_registry,
             evaluators={sleeve.id: evaluate_signals},
@@ -79,7 +82,8 @@ def _make_client(
 
 @pytest.fixture
 async def enabled_client(
-    event_store: InMemoryEventStore,
+    event_store: ProjectingEventStore,
+    read_model: InMemoryReadModel,
     kill_switch: KillSwitch,
     sleeve: Sleeve,
     sleeve_registry: SleeveRegistry,
@@ -93,6 +97,7 @@ async def enabled_client(
     )
     client = _make_client(
         event_store=event_store,
+        read_model=read_model,
         kill_switch=kill_switch,
         sleeve=sleeve,
         sleeve_registry=sleeve_registry,
@@ -108,7 +113,8 @@ async def enabled_client(
 
 @pytest.fixture
 async def disabled_client(
-    event_store: InMemoryEventStore,
+    event_store: ProjectingEventStore,
+    read_model: InMemoryReadModel,
     kill_switch: KillSwitch,
     sleeve: Sleeve,
     sleeve_registry: SleeveRegistry,
@@ -118,6 +124,7 @@ async def disabled_client(
 ) -> AsyncIterator[httpx.AsyncClient]:
     client = _make_client(
         event_store=event_store,
+        read_model=read_model,
         kill_switch=kill_switch,
         sleeve=sleeve,
         sleeve_registry=sleeve_registry,
