@@ -141,6 +141,24 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         live_aclosers.append(live_client.aclose)
 
+    # Optional Alpaca PAPER venue (real paper account, no real money). One Alpaca account is one
+    # book, so it backs exactly one sleeve (`alpaca_paper_sleeve_id`); that sleeve's execution
+    # and reconciliation then run against the authoritative external broker (FR-REC). Built only
+    # when enabled AND paper/data credentials resolve; otherwise the in-process simulator is used
+    # and no network calls are made. Constructing AlpacaBroker dials nothing.
+    alpaca_paper_broker: BrokerPort | None = None
+    paper_key_id = settings.paper_key_id()
+    paper_secret_key = settings.paper_secret_key()
+    if settings.enable_alpaca_paper and paper_key_id and paper_secret_key:
+        paper_client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
+        alpaca_paper_broker = AlpacaBroker(
+            client=paper_client,
+            key_id=paper_key_id,
+            secret_key=paper_secret_key,
+            base_url=settings.alpaca_paper_base_url,
+        )
+        live_aclosers.append(paper_client.aclose)
+
     # Live quote feed (live stock tracking + live P&L). OFF by construction: built only when
     # enabled AND data credentials resolve (Alpaca data accepts paper or live keys); else the
     # disabled feed keeps `python -m trading.main` network-silent. Reused for /quotes,
@@ -219,13 +237,19 @@ def build_dependencies(settings: Settings) -> AppDeps:
     political_evaluator: EvaluateSignals | None = None
     for sleeve_id, _strategy_id, strategy in sleeve_specs:
         sleeve = registry.get(sleeve_id).sleeve
-        paper_broker = PaperBroker(
-            market_data=market_data, clock=clock, starting_cash=settings.starting_cash
-        )
+        # The designated sleeve executes paper orders on the real Alpaca paper account when
+        # configured; every other sleeve uses the in-process simulator (isolated capital).
+        paper_venue: BrokerPort
+        if alpaca_paper_broker is not None and sleeve_id == settings.alpaca_paper_sleeve_id:
+            paper_venue = alpaca_paper_broker
+        else:
+            paper_venue = PaperBroker(
+                market_data=market_data, clock=clock, starting_cash=settings.starting_cash
+            )
         # One broker handle per sleeve that routes to paper or live by current mode, so the
         # paper->live switch never touches strategy, risk, or execution code (spec §11).
         router = ModeRoutingBroker(
-            paper=paper_broker,
+            paper=paper_venue,
             live=live_broker,
             mode=partial(registry.mode, sleeve_id),
         )

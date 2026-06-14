@@ -34,6 +34,9 @@ def _default_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         "ALPACA_DATA_SECRET_KEY",
         "ALPACA_LIVE_KEY_ID",
         "ALPACA_LIVE_SECRET_KEY",
+        "ENABLE_ALPACA_PAPER",
+        "ALPACA_PAPER_KEY_ID",
+        "ALPACA_PAPER_SECRET_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
     return Settings(_env_file=None)

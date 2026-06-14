@@ -71,12 +71,33 @@ class Settings(BaseSettings):
     enable_historical_data: bool = False
     backtest_lookback_days: int = 180
 
+    # Alpaca PAPER trading venue (FR-EXE-1, FR-REC-1). A REAL paper account — no real money,
+    # distinct from the live venue. When enabled (and paper or data credentials resolve), the
+    # `alpaca_paper_sleeve_id` sleeve executes against your Alpaca paper account instead of the
+    # in-process simulator, so reconciliation diffs local state against an authoritative
+    # external broker. OFF by construction: disabled -> the in-memory PaperBroker, no network.
+    # One Alpaca account is one book, so exactly ONE sleeve routes here (others stay simulated)
+    # to keep per-sleeve reconciliation meaningful.
+    enable_alpaca_paper: bool = False
+    alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_paper_key_id: str | None = None
+    alpaca_paper_secret_key: str | None = None
+    alpaca_paper_sleeve_id: str = "sleeve-political"
+
     def data_key_id(self) -> str | None:
         """Resolved market-data key: the dedicated data key, else the live broker key."""
         return self.alpaca_data_key_id or self.alpaca_live_key_id
 
     def data_secret_key(self) -> str | None:
         return self.alpaca_data_secret_key or self.alpaca_live_secret_key
+
+    def paper_key_id(self) -> str | None:
+        """Paper trading key: the dedicated paper key, else the data key — an Alpaca paper key
+        pair serves both trading and data, so reusing the data key 'just works'."""
+        return self.alpaca_paper_key_id or self.alpaca_data_key_id
+
+    def paper_secret_key(self) -> str | None:
+        return self.alpaca_paper_secret_key or self.alpaca_data_secret_key
 
     # Data sources (FR-ING). External sources default OFF so a bare `python -m trading.main`
     # makes no network calls; configure these to enable the political pipeline.
