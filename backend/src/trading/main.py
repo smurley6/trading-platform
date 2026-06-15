@@ -24,6 +24,7 @@ from trading.application.ports.read_model import ReadModelPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
+from trading.application.sync_orders import SyncOrders
 from trading.config import Settings
 from trading.domain.conviction import ConvictionThresholds
 from trading.domain.sectors import Sector
@@ -235,6 +236,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     evaluators: dict[str, EvaluateSignals] = {}
     reconcilers_by_id: dict[str, Reconcile] = {}
+    order_syncs_by_id: dict[str, SyncOrders] = {}  # per-sleeve: ingest async broker fills
     brokers_by_id: dict[str, BrokerPort] = {}  # per-sleeve routing broker, for manual cancel
     political_evaluator: EvaluateSignals | None = None
     for sleeve_id, _strategy_id, strategy in sleeve_specs:
@@ -270,9 +272,13 @@ def build_dependencies(settings: Settings) -> AppDeps:
         reconcilers_by_id[sleeve_id] = Reconcile(
             broker=router, event_store=event_store, clock=clock, sleeve_id=sleeve_id
         )
+        order_syncs_by_id[sleeve_id] = SyncOrders(
+            broker=router, event_store=event_store, clock=clock, sleeve_id=sleeve_id
+        )
         if sleeve_id == "sleeve-political":
             political_evaluator = evaluator
     reconcilers = list(reconcilers_by_id.values())
+    order_syncs = list(order_syncs_by_id.values())
     cancel_order = CancelOrder(
         brokers=brokers_by_id,
         event_store=event_store,
@@ -352,6 +358,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         evaluators=evaluators,
         default_sleeve_id="sleeve-political",
         reconcilers=reconcilers,
+        order_syncs=order_syncs,
         clock=clock,
         conviction_thresholds=thresholds,
         conviction_window_days=settings.corroboration_window_days,
@@ -367,6 +374,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         event_bus=event_bus,
         reconcile_interval_seconds=settings.reconcile_interval_seconds,
         ingest_interval_seconds=settings.ingest_interval_seconds,
+        order_sync_interval_seconds=settings.order_sync_interval_seconds,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)

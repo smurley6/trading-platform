@@ -29,6 +29,7 @@ from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
+from trading.application.sync_orders import SyncOrders
 from trading.domain.conviction import ConvictionThresholds, compute_conviction
 from trading.domain.events import DomainEvent, EventType
 from trading.domain.positions import mark_positions
@@ -46,6 +47,7 @@ from trading.interface.schemas import (
     LivePositionsOut,
     LiveReadinessOut,
     OrderOut,
+    OrderSyncOut,
     QuoteOut,
     QuotesOut,
     ReconcileOut,
@@ -69,6 +71,7 @@ class AppDeps:
     evaluators: dict[str, EvaluateSignals]  # keyed by sleeve_id
     default_sleeve_id: str  # target for manual signal pushes
     reconcilers: list[Reconcile]  # one per sleeve (broker is per-sleeve)
+    order_syncs: list[SyncOrders]  # one per sleeve: ingest async broker fills (FR-REC)
     clock: ClockPort
     conviction_thresholds: ConvictionThresholds
     conviction_window_days: int
@@ -83,6 +86,7 @@ class AppDeps:
     event_bus: EventBroadcasterPort | None = None  # live WebSocket fan-out (FR-API-1)
     reconcile_interval_seconds: int = 0  # 0 disables the scheduler (tests)
     ingest_interval_seconds: int = 0
+    order_sync_interval_seconds: int = 0  # 0 disables the scheduled order-sync job
     # Long-running background coroutines started on startup and cancelled on shutdown (e.g. the
     # Alpaca quote-stream consumer). Each is a factory so nothing runs until the app starts —
     # when empty (the default) startup launches no task and opens no socket.
@@ -311,6 +315,10 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def run_reconcile() -> list[ReconcileOut]:
         return [ReconcileOut.from_report(await r.execute()) for r in deps.reconcilers]
 
+    @app.post("/orders/sync", response_model=list[OrderSyncOut])
+    async def sync_orders() -> list[OrderSyncOut]:
+        return [OrderSyncOut.from_report(await s.execute()) for s in deps.order_syncs]
+
     @app.post("/orders/{client_order_id}/cancel", response_model=CancelOut)
     async def cancel_order(
         client_order_id: str,
@@ -427,12 +435,19 @@ async def _reconcile_all(deps: AppDeps) -> None:
         await reconciler.execute()
 
 
+async def _sync_orders_all(deps: AppDeps) -> None:
+    for sync in deps.order_syncs:
+        await sync.execute()
+
+
 def _scheduled_jobs(deps: AppDeps) -> list[tuple[Any, int]]:
     jobs: list[tuple[Any, int]] = []
     if deps.reconcile_interval_seconds > 0 and deps.reconcilers:
         jobs.append((lambda: _reconcile_all(deps), deps.reconcile_interval_seconds))
     if deps.ingest_interval_seconds > 0 and deps.political_cycle is not None:
         jobs.append((deps.political_cycle.execute, deps.ingest_interval_seconds))
+    if deps.order_sync_interval_seconds > 0 and deps.order_syncs:
+        jobs.append((lambda: _sync_orders_all(deps), deps.order_sync_interval_seconds))
     return jobs
 
 

@@ -85,6 +85,7 @@ async def client(
             evaluators={sleeve.id: evaluate_signals},
             default_sleeve_id=sleeve.id,
             reconcilers=[reconcile],
+            order_syncs=[],
             clock=clock,
             conviction_thresholds=ConvictionThresholds(),
             conviction_window_days=21,

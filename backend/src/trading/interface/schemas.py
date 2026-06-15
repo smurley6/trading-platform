@@ -15,6 +15,7 @@ from trading.application.ports.market_data import Quote
 from trading.application.ports.read_model import SignalRecord
 from trading.application.reconcile import ReconciliationReport
 from trading.application.sleeve_registry import SleeveState
+from trading.application.sync_orders import SyncReport
 from trading.domain.events import StoredEvent
 from trading.domain.positions import MarkedPosition
 from trading.domain.signals import Signal, SignalSource
@@ -352,5 +353,23 @@ class ReconcileOut(BaseModel):
                 for d in report.drifts
             ],
             checked_positions=report.checked_positions,
+            checked_orders=report.checked_orders,
+        )
+
+
+class OrderSyncOut(BaseModel):
+    correlation_id: str
+    sleeve_id: str
+    fills_emitted: int
+    status_changes_emitted: int
+    checked_orders: int
+
+    @classmethod
+    def from_report(cls, report: SyncReport) -> "OrderSyncOut":
+        return cls(
+            correlation_id=report.correlation_id,
+            sleeve_id=report.sleeve_id,
+            fills_emitted=report.fills_emitted,
+            status_changes_emitted=report.status_changes_emitted,
             checked_orders=report.checked_orders,
         )

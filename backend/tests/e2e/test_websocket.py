@@ -26,6 +26,7 @@ def test_websocket_streams_events_live() -> None:
         evaluators={},
         default_sleeve_id="sleeve-political",
         reconcilers=[],
+        order_syncs=[],
         clock=clock,
         conviction_thresholds=ConvictionThresholds(),
         conviction_window_days=21,

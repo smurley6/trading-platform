@@ -63,6 +63,7 @@ def _deps(clock: FixedClock, stream: FakeQuoteStream | None, watchlist: list[str
         evaluators={},
         default_sleeve_id="sleeve-political",
         reconcilers=[],
+        order_syncs=[],
         clock=clock,
         conviction_thresholds=ConvictionThresholds(),
         conviction_window_days=21,

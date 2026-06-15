@@ -113,5 +113,10 @@ class Settings(BaseSettings):
     reconcile_interval_seconds: int = 300
     # 0 disables the scheduled political cycle; set > 0 to poll sources on an interval.
     ingest_interval_seconds: int = 0
+    # Order sync (FR-REC, FR-EXE): pull the broker's order state and emit the lifecycle events
+    # the local log is missing — closes the loop for the async-filling Alpaca venue. 0 disables
+    # the scheduled job (the default); set > 0 (seconds) to run it on an interval. Harmless with
+    # the in-process PaperBroker (fills are already recorded synchronously, so it emits nothing).
+    order_sync_interval_seconds: int = 0
 
     log_level: str = "INFO"
