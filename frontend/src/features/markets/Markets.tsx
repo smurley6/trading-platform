@@ -12,6 +12,7 @@
 
 import { Card, H3, StackLayout, Text } from "@salt-ds/core";
 import { useMemo, useState } from "react";
+import { AnimatedPrice } from "../../components/AnimatedPrice";
 import { MarketOverview } from "../../components/MarketOverview";
 import { MiniSymbolChart } from "../../components/MiniSymbolChart";
 import { SymbolChart } from "../../components/SymbolChart";
@@ -179,9 +180,11 @@ function WatchlistItem({
       <span style={{ fontWeight: 600, fontSize: 14 }}>{symbol}</span>
       {quote ? (
         <span style={{ textAlign: "right", lineHeight: 1.3 }}>
-          <span style={{ fontSize: 14, fontWeight: 600 }}>
-            {Number.isNaN(last) ? "—" : formatNumber(last, 2)}
-          </span>
+          <AnimatedPrice
+            value={last}
+            decimals={2}
+            style={{ fontSize: 14, fontWeight: 600, display: "inline-block" }}
+          />
           <br />
           <span style={{ fontSize: 11, color: "#94a3b8" }}>
             {Number.isNaN(bid) ? "—" : formatNumber(bid, 2)} /{" "}

@@ -13,6 +13,8 @@ import { api } from "./api";
 import type { Quote } from "./types";
 
 const POLL_INTERVAL_MS = 4_000;
+// Throttle the live stream's render cadence: apply buffered ticks to state twice a second.
+const FLUSH_INTERVAL_MS = 500;
 const MAX_BACKOFF_MS = 10_000;
 const INITIAL_BACKOFF_MS = 500;
 
@@ -106,6 +108,32 @@ export function useQuoteStream(symbols: readonly string[]): QuoteStream {
     // double-sourcing the same quotes.
     let streaming = false;
 
+    // Coalesce the high-frequency stream: buffer the newest quote per symbol and flush to React
+    // state at ~1 Hz, so the watchlist updates smoothly once a second instead of flickering on
+    // every raw tick. No flush happens in a second with no ticks (no wasted re-render).
+    const pending = new Map<string, Quote>();
+    let flushTimer: number | undefined;
+
+    const flushPending = (): void => {
+      if (disposed || pending.size === 0) return;
+      setQuotes((prev) => {
+        const next = new Map(prev);
+        for (const [sym, q] of pending) next.set(sym, q);
+        return next;
+      });
+      pending.clear();
+    };
+    const startFlush = (): void => {
+      if (flushTimer === undefined) flushTimer = window.setInterval(flushPending, FLUSH_INTERVAL_MS);
+    };
+    const clearFlush = (): void => {
+      if (flushTimer !== undefined) {
+        window.clearInterval(flushTimer);
+        flushTimer = undefined;
+      }
+      pending.clear();
+    };
+
     const clearPoll = (): void => {
       if (pollTimer !== undefined) {
         window.clearInterval(pollTimer);
@@ -172,33 +200,33 @@ export function useQuoteStream(symbols: readonly string[]): QuoteStream {
         if (frame.type === "status") {
           setEnabled(frame.enabled);
           if (frame.enabled) {
-            // Live stream is the active source: drop the poll, start with a clean slate.
+            // Live stream is the active source: drop the poll, start the 1 Hz flush.
             streaming = true;
             clearPoll();
+            startFlush();
           } else {
             // Feed reported off: stay dormant exactly like today (charts-only / FEED OFF).
             streaming = false;
+            clearFlush();
             setQuotes(new Map());
           }
           return;
         }
-        // frame.type === "quote": merge into the live map.
-        setQuotes((prev) => {
-          const next = new Map(prev);
-          next.set(frame.symbol, {
-            symbol: frame.symbol,
-            bid: frame.bid,
-            ask: frame.ask,
-            last: frame.last,
-            as_of: frame.as_of,
-          });
-          return next;
+        // frame.type === "quote": buffer the newest value per symbol; `flushPending` applies it
+        // to state at ~1 Hz so the UI updates once a second, not on every raw tick.
+        pending.set(frame.symbol, {
+          symbol: frame.symbol,
+          bid: frame.bid,
+          ask: frame.ask,
+          last: frame.last,
+          as_of: frame.as_of,
         });
       };
 
       socket.onclose = () => {
         setConnected(false);
         streaming = false;
+        clearFlush();
         socket = null;
         if (disposed) return;
         if (opened) {
@@ -223,6 +251,7 @@ export function useQuoteStream(symbols: readonly string[]): QuoteStream {
       disposed = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
       clearPoll();
+      clearFlush();
       if (socket) {
         socket.onclose = null;
         socket.onerror = null;
