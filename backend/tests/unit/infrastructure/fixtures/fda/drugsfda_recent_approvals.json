@@ -1,0 +1,186 @@
+{
+  "meta": {
+    "disclaimer": "Do not rely on openFDA to make decisions regarding medical care. While we make every effort to ensure that data is accurate, you should assume all results are unvalidated.",
+    "terms": "https://open.fda.gov/terms/",
+    "license": "https://open.fda.gov/license/",
+    "last_updated": "2026-06-12",
+    "results": {
+      "skip": 0,
+      "limit": 5,
+      "total": 4
+    }
+  },
+  "results": [
+    {
+      "submissions": [
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20260603",
+          "review_priority": "PRIORITY",
+          "submission_class_code": "TYPE 1",
+          "submission_class_code_description": "Type 1 - New Molecular Entity"
+        }
+      ],
+      "application_number": "NDA218950",
+      "sponsor_name": "PFIZER INC",
+      "openfda": {
+        "application_number": ["NDA218950"],
+        "brand_name": ["ZALTREXion"],
+        "generic_name": ["EXAMPLENIB"],
+        "manufacturer_name": ["Pfizer Inc."],
+        "product_ndc": ["0069-0291"],
+        "product_type": ["HUMAN PRESCRIPTION DRUG"],
+        "route": ["ORAL"],
+        "substance_name": ["EXAMPLENIB MALEATE"],
+        "spl_set_id": ["a1b2c3d4-0000-1111-2222-333344445555"]
+      },
+      "products": [
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "ZALTREXION",
+          "active_ingredients": [
+            {
+              "name": "EXAMPLENIB MALEATE",
+              "strength": "50MG"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET",
+          "route": "ORAL",
+          "marketing_status": "Prescription"
+        }
+      ]
+    },
+    {
+      "submissions": [
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20260528",
+          "review_priority": "STANDARD",
+          "submission_class_code": "TYPE 1",
+          "submission_class_code_description": "Type 1 - New Molecular Entity"
+        }
+      ],
+      "application_number": "BLA761444",
+      "sponsor_name": "ELI LILLY AND CO",
+      "openfda": {
+        "application_number": ["BLA761444"],
+        "brand_name": ["LILUMAB"],
+        "generic_name": ["EXAMPLIZUMAB"],
+        "manufacturer_name": ["Eli Lilly and Company"],
+        "product_type": ["HUMAN PRESCRIPTION DRUG"],
+        "route": ["SUBCUTANEOUS"],
+        "substance_name": ["EXAMPLIZUMAB"]
+      },
+      "products": [
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "LILUMAB",
+          "active_ingredients": [
+            {
+              "name": "EXAMPLIZUMAB",
+              "strength": "100MG/ML"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "INJECTION, SOLUTION",
+          "route": "SUBCUTANEOUS",
+          "marketing_status": "Prescription"
+        }
+      ]
+    },
+    {
+      "submissions": [
+        {
+          "submission_type": "SUPPL",
+          "submission_number": "12",
+          "submission_status": "AP",
+          "submission_status_date": "20260515",
+          "review_priority": "STANDARD",
+          "submission_class_code": "EFFICACY",
+          "submission_class_code_description": "Efficacy"
+        },
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20180101"
+        }
+      ],
+      "application_number": "NDA210800",
+      "sponsor_name": "ABBVIE INC",
+      "openfda": {
+        "application_number": ["NDA210800"],
+        "brand_name": ["ABBVEXA"],
+        "generic_name": ["EXAMPLACITINIB"],
+        "manufacturer_name": ["AbbVie Inc."],
+        "product_type": ["HUMAN PRESCRIPTION DRUG"],
+        "route": ["ORAL"],
+        "substance_name": ["EXAMPLACITINIB"]
+      },
+      "products": [
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "ABBVEXA",
+          "active_ingredients": [
+            {
+              "name": "EXAMPLACITINIB",
+              "strength": "15MG"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET, EXTENDED RELEASE",
+          "route": "ORAL",
+          "marketing_status": "Prescription"
+        }
+      ]
+    },
+    {
+      "submissions": [
+        {
+          "submission_type": "ORIG",
+          "submission_number": "1",
+          "submission_status": "AP",
+          "submission_status_date": "20260601",
+          "review_priority": "STANDARD",
+          "submission_class_code": "TYPE 3",
+          "submission_class_code_description": "Type 3 - New Dosage Form"
+        }
+      ],
+      "application_number": "ANDA215999",
+      "sponsor_name": "AUROBINDO PHARMA LTD",
+      "openfda": {
+        "application_number": ["ANDA215999"],
+        "brand_name": ["GENERIXOL"],
+        "generic_name": ["EXAMPLOFEN"],
+        "manufacturer_name": ["Aurobindo Pharma Limited"],
+        "product_type": ["HUMAN PRESCRIPTION DRUG"],
+        "route": ["ORAL"]
+      },
+      "products": [
+        {
+          "product_number": "001",
+          "reference_drug": "No",
+          "brand_name": "GENERIXOL",
+          "active_ingredients": [
+            {
+              "name": "EXAMPLOFEN",
+              "strength": "200MG"
+            }
+          ],
+          "reference_standard": "No",
+          "dosage_form": "TABLET",
+          "route": "ORAL",
+          "marketing_status": "Prescription"
+        }
+      ]
+    }
+  ]
+}

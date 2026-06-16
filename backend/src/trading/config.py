@@ -134,6 +134,26 @@ class Settings(BaseSettings):
     disclosed_trade_leg_enabled: bool = False
     congress_trades_endpoint: str | None = None
     fmp_api_key: str | None = None
+
+    # Official free government-disclosure adapters (FR-ING-2). All OFF by default. House/Senate
+    # PTRs attach to the REAL congress roster (need ENABLE_CONGRESS_ROSTER) and are lagged
+    # corroboration. SEC Form 4 (corporate insider), LDA lobbying, and openFDA approvals stand
+    # alone (no politician). Every emitted Signal is stamped Provenance.REAL.
+    house_disclosures_enabled: bool = False
+    house_disclosures_lookback_days: int = 30
+    house_disclosures_max_filings: int = 50
+    senate_efd_enabled: bool = False
+    senate_efd_lookback_days: int = 30
+    sec_form4_enabled: bool = False
+    sec_form4_user_agent: str | None = None  # REQUIRED when enabled (SEC 403s without a UA)
+    sec_form4_lookback_days: int = 3
+    lobbying_enabled: bool = False
+    lobbying_lookback_days: int = 30
+    lda_api_key: str | None = None
+    fda_approvals_enabled: bool = False
+    fda_lookback_days: int = 30
+    openfda_api_key: str | None = None
+
     http_timeout_seconds: float = 10.0
 
     # Jobs

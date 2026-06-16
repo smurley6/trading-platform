@@ -1,0 +1,76 @@
+{
+  "count": 4,
+  "next": null,
+  "previous": "https://lda.senate.gov/api/v1/filings/?filing_year=2024&ordering=-dt_posted&page=1",
+  "results": [
+    {
+      "url": "https://lda.senate.gov/api/v1/filings/3f9c1a2e-5555-4b0a-9f01-eeeeeeeeeeee/",
+      "filing_uuid": "3f9c1a2e-5555-4b0a-9f01-eeeeeeeeeeee",
+      "filing_type": "Q4",
+      "filing_type_display": "4th Quarter - Report",
+      "filing_year": 2024,
+      "filing_period": "fourth_quarter",
+      "filing_period_display": "Q4 (October 1 - December 31)",
+      "filing_document_url": "https://lda.senate.gov/filings/public/filing/3f9c1a2e-5555-4b0a-9f01-eeeeeeeeeeee/print/",
+      "income": null,
+      "expenses": "1200000.00",
+      "expenses_method": "c",
+      "expenses_method_display": "Method C",
+      "posted_by_name": "Patricia N. Hill",
+      "dt_posted": "2024-12-02T14:30:00.000000-05:00",
+      "termination_date": null,
+      "registrant": {
+        "id": 400555,
+        "url": "https://lda.senate.gov/api/v1/registrants/400555/",
+        "house_registrant_id": 355555,
+        "name": "RTX CORPORATION",
+        "description": "Aerospace and defense systems",
+        "address_1": "1000 Wilson Boulevard",
+        "address_2": null,
+        "city": "Arlington",
+        "state": "VA",
+        "state_display": "Virginia",
+        "zip": "22209",
+        "country": "USA",
+        "country_display": "United States of America",
+        "ppb_country": "USA",
+        "ppb_country_display": "United States of America",
+        "contact_name": "Patricia N. Hill",
+        "contact_telephone": "+1 703-555-0123",
+        "dt_updated": "2024-12-02T14:30:00.000000-05:00"
+      },
+      "client": {
+        "id": 500666,
+        "url": "https://lda.senate.gov/api/v1/clients/500666/",
+        "client_id": 500666,
+        "name": "RAYTHEON COMPANY",
+        "general_description": "Defense and aerospace systems",
+        "client_government_entity": null,
+        "client_self_select": true,
+        "state": "VA",
+        "state_display": "Virginia",
+        "country": "USA",
+        "country_display": "United States of America",
+        "ppb_state": "VA",
+        "ppb_state_display": "Virginia",
+        "ppb_country": "USA",
+        "ppb_country_display": "United States of America"
+      },
+      "lobbying_activities": [
+        {
+          "general_issue_area_code": "DEF",
+          "general_issue_area_display": "Defense",
+          "description": "Missile defense systems procurement and foreign military sales.",
+          "foreign_entity_issues": "",
+          "lobbyists": [],
+          "government_entities": [
+            {"id": 6, "name": "Department of Defense (DOD)"}
+          ]
+        }
+      ],
+      "conviction_disclosures": [],
+      "foreign_entities": [],
+      "affiliated_organizations": []
+    }
+  ]
+}

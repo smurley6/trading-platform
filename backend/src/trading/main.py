@@ -42,7 +42,12 @@ from trading.infrastructure.brokers.routing import ModeRoutingBroker
 from trading.infrastructure.brokers.trade_updates_stream import AlpacaTradeUpdatesStream
 from trading.infrastructure.clock import SystemClock
 from trading.infrastructure.data_sources.congress_trades import CongressTradesSource
+from trading.infrastructure.data_sources.fda_approvals import FdaApprovalsSource
+from trading.infrastructure.data_sources.house_disclosures import HouseDisclosuresSource
+from trading.infrastructure.data_sources.lobbying import LobbyingSource
 from trading.infrastructure.data_sources.news import NewsSource
+from trading.infrastructure.data_sources.sec_form4 import SecForm4Source
+from trading.infrastructure.data_sources.senate_efd import SenateEfdSource
 from trading.infrastructure.data_sources.usaspending import UsaSpendingSource
 from trading.infrastructure.market_data.alpaca import AlpacaMarketData
 from trading.infrastructure.market_data.alpaca_history import AlpacaHistoricalData
@@ -491,14 +496,30 @@ def _build_sources(
         and settings.congress_trades_endpoint
         and settings.fmp_api_key
     )
-    if not (news_enabled or settings.usaspending_enabled or trades_enabled):
+    house_enabled = settings.house_disclosures_enabled
+    senate_enabled = settings.senate_efd_enabled
+    sec_enabled = bool(settings.sec_form4_enabled and settings.sec_form4_user_agent)
+    lobbying_enabled = settings.lobbying_enabled
+    fda_enabled = settings.fda_approvals_enabled
+    # House/Senate PTRs attach to the roster, so they count as politician-using sources too.
+    politician_source_enabled = news_enabled or trades_enabled or house_enabled or senate_enabled
+    if not (
+        news_enabled
+        or settings.usaspending_enabled
+        or trades_enabled
+        or house_enabled
+        or senate_enabled
+        or sec_enabled
+        or lobbying_enabled
+        or fda_enabled
+    ):
         return [], []
 
     client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
     entity_resolver = GazetteerEntityResolver()
     sentiment = LexiconSentiment()
     politicians: PoliticianRepositoryPort
-    if settings.enable_congress_roster and (news_enabled or trades_enabled):
+    if settings.enable_congress_roster and politician_source_enabled:
         # Opt-in REAL roster (fetched once at startup; sync composition -> asyncio.run). With it,
         # news/disclosed-trade signals attach to REAL members and can pass the guard; without it,
         # the synthetic seed roster yields SYNTHETIC, guard-blocked signals.
@@ -540,6 +561,57 @@ def _build_sources(
                 politicians=politicians,
                 sector_map=sector_map,
                 clock=clock,
+            )
+        )
+    if house_enabled:
+        sources.append(
+            HouseDisclosuresSource(
+                client=client,
+                politicians=politicians,
+                sector_map=sector_map,
+                clock=clock,
+                lookback_days=settings.house_disclosures_lookback_days,
+                max_filings=settings.house_disclosures_max_filings,
+            )
+        )
+    if senate_enabled:
+        sources.append(
+            SenateEfdSource(
+                client=client,
+                politicians=politicians,
+                sector_map=sector_map,
+                clock=clock,
+                lookback_days=settings.senate_efd_lookback_days,
+            )
+        )
+    if sec_enabled:
+        assert settings.sec_form4_user_agent is not None
+        sources.append(
+            SecForm4Source(
+                client=client,
+                clock=clock,
+                user_agent=settings.sec_form4_user_agent,
+                lookback_days=settings.sec_form4_lookback_days,
+            )
+        )
+    if lobbying_enabled:
+        sources.append(
+            LobbyingSource(
+                client=client,
+                entity_resolver=entity_resolver,
+                clock=clock,
+                lookback_days=settings.lobbying_lookback_days,
+                api_key=settings.lda_api_key,
+            )
+        )
+    if fda_enabled:
+        sources.append(
+            FdaApprovalsSource(
+                client=client,
+                entity_resolver=entity_resolver,
+                clock=clock,
+                lookback_days=settings.fda_lookback_days,
+                api_key=settings.openfda_api_key,
             )
         )
     return sources, [client.aclose]

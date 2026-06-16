@@ -11,9 +11,11 @@ name: Trading cycle
 # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
 
 on:
-  schedule:
-    # Every 20 minutes. Cron is UTC. May be delayed by GitHub under load (see note above).
-    - cron: "*/20 * * * *"
+  # PAUSED by request: the automatic 20-minute schedule is disabled so the cron does NOT
+  # auto-trade. Re-enable by uncommenting the two lines below. Manual runs still work via the
+  # Actions tab (workflow_dispatch).
+  # schedule:
+  #   - cron: "*/20 * * * *"
   workflow_dispatch: {}
 
 # One book, one broker account: never let two cycles run at once (would double-place
@@ -69,7 +71,9 @@ jobs:
       # ---- Alpaca market data (live quotes / live P&L marks) -------------------------------
       # The data API accepts paper OR live keys. If you leave ALPACA_DATA_* unset it falls back
       # to the live broker key (also unset here), so set ENABLE_LIVE_QUOTES only with data creds.
-      ENABLE_LIVE_QUOTES: ${{ secrets.ENABLE_LIVE_QUOTES || 'false' }}
+      # On: decisions/position-sizing use REAL Alpaca quotes (not static dev prices). Reuses the
+      # ALPACA_DATA_* secrets below (a paper key doubles as a data key).
+      ENABLE_LIVE_QUOTES: ${{ secrets.ENABLE_LIVE_QUOTES || 'true' }}
       ENABLE_HISTORICAL_DATA: ${{ secrets.ENABLE_HISTORICAL_DATA || 'false' }}
       ALPACA_DATA_KEY_ID: ${{ secrets.ALPACA_DATA_KEY_ID }}
       ALPACA_DATA_SECRET_KEY: ${{ secrets.ALPACA_DATA_SECRET_KEY }}
@@ -83,6 +87,20 @@ jobs:
       USASPENDING_LOOKBACK_DAYS: ${{ secrets.USASPENDING_LOOKBACK_DAYS || '30' }}
       ENABLE_CONGRESS_ROSTER: ${{ secrets.ENABLE_CONGRESS_ROSTER || 'true' }}
       NEWS_FEED_URLS: ${{ secrets.NEWS_FEED_URLS || '[]' }}
+
+      # ---- Official free government-disclosure adapters (REAL, no/low cost) -----------------
+      # House PTRs default ON (free, keyless, live-validated; attaches to the REAL roster above).
+      # Senate eFD defaults OFF (its endpoint blocks automated access). SEC Form 4 / lobbying /
+      # FDA default OFF — flip the *_ENABLED secret to 'true' to add each leg.
+      HOUSE_DISCLOSURES_ENABLED: ${{ secrets.HOUSE_DISCLOSURES_ENABLED || 'true' }}
+      HOUSE_DISCLOSURES_LOOKBACK_DAYS: ${{ secrets.HOUSE_DISCLOSURES_LOOKBACK_DAYS || '30' }}
+      SENATE_EFD_ENABLED: ${{ secrets.SENATE_EFD_ENABLED || 'false' }}
+      SEC_FORM4_ENABLED: ${{ secrets.SEC_FORM4_ENABLED || 'false' }}
+      SEC_FORM4_USER_AGENT: ${{ secrets.SEC_FORM4_USER_AGENT }}
+      LOBBYING_ENABLED: ${{ secrets.LOBBYING_ENABLED || 'false' }}
+      LDA_API_KEY: ${{ secrets.LDA_API_KEY }}
+      FDA_APPROVALS_ENABLED: ${{ secrets.FDA_APPROVALS_ENABLED || 'false' }}
+      OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
 
       # ---- Data integrity (anti-placeholder) -----------------------------------------------
       # Auto-engages to true when a real Alpaca account is wired (ENABLE_ALPACA_PAPER); set here

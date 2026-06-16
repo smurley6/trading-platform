@@ -1,0 +1,32 @@
+{
+    "directory": {
+        "item": [
+            {
+                "name": "0000789019-26-000045-index-headers.html",
+                "type": "text.gif",
+                "size": "",
+                "last-modified": "2026-06-12 16:12:44"
+            },
+            {
+                "name": "0000789019-26-000045.txt",
+                "type": "text.gif",
+                "size": "6512",
+                "last-modified": "2026-06-12 16:12:44"
+            },
+            {
+                "name": "form4_microsoft_sale.xml",
+                "type": "text.gif",
+                "size": "5840",
+                "last-modified": "2026-06-12 16:12:44"
+            },
+            {
+                "name": "xslF345X05/form4_microsoft_sale.xml",
+                "type": "text.gif",
+                "size": "7330",
+                "last-modified": "2026-06-12 16:12:44"
+            }
+        ],
+        "name": "/Archives/edgar/data/789019/000078901926000045",
+        "parent-dir": "../"
+    }
+}

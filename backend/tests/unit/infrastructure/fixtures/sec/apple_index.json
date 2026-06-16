@@ -1,0 +1,32 @@
+{
+    "directory": {
+        "item": [
+            {
+                "name": "0000320193-26-000077-index-headers.html",
+                "type": "text.gif",
+                "size": "",
+                "last-modified": "2026-06-12 16:30:11"
+            },
+            {
+                "name": "0000320193-26-000077.txt",
+                "type": "text.gif",
+                "size": "5421",
+                "last-modified": "2026-06-12 16:30:11"
+            },
+            {
+                "name": "form4_apple_purchase.xml",
+                "type": "text.gif",
+                "size": "4123",
+                "last-modified": "2026-06-12 16:30:11"
+            },
+            {
+                "name": "xslF345X05/form4_apple_purchase.xml",
+                "type": "text.gif",
+                "size": "6201",
+                "last-modified": "2026-06-12 16:30:11"
+            }
+        ],
+        "name": "/Archives/edgar/data/320193/000032019326000077",
+        "parent-dir": "../"
+    }
+}

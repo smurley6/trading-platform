@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest Filings - Type 4</title>
+  <link rel="alternate" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&amp;type=4"/>
+  <link rel="self" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&amp;type=4&amp;output=atom"/>
+  <id>https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent</id>
+  <author>
+    <name>Webmaster</name>
+    <email>webmaster@sec.gov</email>
+  </author>
+  <updated>2026-06-12T16:31:05-04:00</updated>
+  <entry>
+    <title>4 - APPLE INC (0000320193) (Issuer)</title>
+    <link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/320193/000032019326000077/0000320193-26-000077-index.htm"/>
+    <summary type="html">&lt;b&gt;Filed:&lt;/b&gt; 2026-06-12 &lt;b&gt;AccNo:&lt;/b&gt; 0000320193-26-000077 &lt;b&gt;Size:&lt;/b&gt; 5 KB</summary>
+    <updated>2026-06-12T16:30:11-04:00</updated>
+    <category scheme="https://www.sec.gov/" label="form type" term="4"/>
+    <id>urn:tag:sec.gov,2008:accession-number=0000320193-26-000077</id>
+  </entry>
+  <entry>
+    <title>4 - MICROSOFT CORP (0000789019) (Issuer)</title>
+    <link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/789019/000078901926000045/0000789019-26-000045-index.htm"/>
+    <summary type="html">&lt;b&gt;Filed:&lt;/b&gt; 2026-06-12 &lt;b&gt;AccNo:&lt;/b&gt; 0000789019-26-000045 &lt;b&gt;Size:&lt;/b&gt; 6 KB</summary>
+    <updated>2026-06-12T16:12:44-04:00</updated>
+    <category scheme="https://www.sec.gov/" label="form type" term="4"/>
+    <id>urn:tag:sec.gov,2008:accession-number=0000789019-26-000045</id>
+  </entry>
+</feed>

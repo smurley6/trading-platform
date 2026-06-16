@@ -1,0 +1,28 @@
+{
+  "draw": 1,
+  "recordsTotal": 3,
+  "recordsFiltered": 3,
+  "data": [
+    [
+      "Frank",
+      "Delgado",
+      "<a href=\"/search/view/ptr/aa11bb22-3344-5566-7788-99aabbccddee/\">Delgado, Frank (Senator)</a>",
+      "<a href=\"/search/view/ptr/aa11bb22-3344-5566-7788-99aabbccddee/\">Periodic Transaction Report</a>",
+      "06/10/2026"
+    ],
+    [
+      "Margaret",
+      "Holt",
+      "<a href=\"/search/view/ptr/ffeeddcc-bbaa-9988-7766-554433221100/\">Holt, Margaret (Senator)</a>",
+      "<a href=\"/search/view/ptr/ffeeddcc-bbaa-9988-7766-554433221100/\">Periodic Transaction Report</a>",
+      "06/09/2026"
+    ],
+    [
+      "Walter",
+      "Boyd",
+      "<a href=\"/search/view/paper/12340000-0000-0000-0000-000000004321/\">Boyd, Walter (Senator)</a>",
+      "<a href=\"/search/view/paper/12340000-0000-0000-0000-000000004321/\">Periodic Transaction Report (Paper)</a>",
+      "06/08/2026"
+    ]
+  ]
+}
