@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from functools import partial
@@ -517,6 +518,25 @@ async def _load_congress_roster(settings: Settings) -> CongressLegislatorsReposi
         return CongressLegislatorsRepository(await fetch_and_parse_roster(client))
 
 
+def _load_roster_blocking(settings: Settings) -> CongressLegislatorsRepository:
+    """Drive the async roster fetch from the synchronous composition root, in any context.
+
+    ``build_dependencies`` is synchronous but may run either with no event loop (the FastAPI
+    entrypoint / tests) or from *inside* one — the cron job builds deps within
+    ``asyncio.run(run_cycle())``. ``asyncio.run`` cannot nest in a running loop, so when one is
+    already running we fetch on a dedicated worker thread with its own loop. The fetch is
+    self-contained (its own short-lived client) and returns plain in-memory data, so no async
+    object crosses the thread/loop boundary; blocking on the result here is fine because the
+    composition root hasn't scheduled any other loop work yet.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_load_congress_roster(settings))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_load_congress_roster(settings))).result()
+
+
 def _build_sources(
     settings: Settings, clock: SystemClock
 ) -> tuple[list[DataSourcePort], list[Callable[[], Awaitable[None]]]]:
@@ -554,7 +574,7 @@ def _build_sources(
         # Opt-in REAL roster (fetched once at startup; sync composition -> asyncio.run). With it,
         # news/disclosed-trade signals attach to REAL members and can pass the guard; without it,
         # the synthetic seed roster yields SYNTHETIC, guard-blocked signals.
-        politicians = asyncio.run(_load_congress_roster(settings))
+        politicians = _load_roster_blocking(settings)
     else:
         politicians = StaticPoliticianRepository()
     sector_map = StaticSectorMap()
