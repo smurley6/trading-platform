@@ -25,6 +25,24 @@ class TestEntityResolution:
     def test_deduplicates_repeated_mentions(self) -> None:
         assert self.resolver.resolve_tickers("Apple, Apple, $AAPL") == ["AAPL"]
 
+    def test_resolves_expanded_companies(self) -> None:
+        assert "TSLA" in self.resolver.resolve_tickers("a Tesla gigafactory tax break")
+        assert "MRK" in self.resolver.resolve_tickers("Merck pricing hearing")
+
+    def test_resolves_possessive(self) -> None:
+        assert "NVDA" in self.resolver.resolve_tickers("concerns over Nvidia's exports")
+
+    def test_resolves_multiple_companies(self) -> None:
+        got = self.resolver.resolve_tickers("the bill affects Microsoft and Pfizer")
+        assert "MSFT" in got
+        assert "PFE" in got
+
+    def test_common_words_do_not_false_positive(self) -> None:
+        # Common-word / single-letter tickers (V, F, T, C, MA, GM, ...) use only distinctive
+        # multi-word aliases, so ordinary prose must resolve to nothing.
+        text = "All the key members met on time; it was a fine session at the capitol."
+        assert self.resolver.resolve_tickers(text) == []
+
 
 class TestSentiment:
     def setup_method(self) -> None:
@@ -45,3 +63,9 @@ class TestSentiment:
     def test_score_is_bounded(self) -> None:
         loud = "support boost approve fund award win strong growth praise"
         assert -1.0 <= self.sentiment.score(loud, "AAPL") <= 1.0
+
+    def test_real_headline_positive(self) -> None:
+        assert self.sentiment.score("Senator applauds Boeing investment", "BA") > 0
+
+    def test_real_headline_negative(self) -> None:
+        assert self.sentiment.score("Senator slams the deal and threatens a probe", "BA") < 0

@@ -462,6 +462,11 @@ def build_dependencies(settings: Settings) -> AppDeps:
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)
+    # Release the Postgres connection pool on shutdown (FastAPI lifespan) and on a one-shot
+    # job teardown (trading.jobs.cycle). `AsyncEngine.dispose` is awaitable, matching the
+    # aclosers signature, so both teardown paths close the pool with no special-casing.
+    if db_engine is not None:
+        deps.aclosers.append(db_engine.dispose)
     return deps
 
 

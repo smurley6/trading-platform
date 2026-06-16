@@ -6,7 +6,9 @@ weight. Items without a recognized politician or ticker are skipped (but a real 
 may want to record raw misses too). RSS is parsed with the stdlib — no extra dependency.
 """
 
+import html
 import logging
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -67,8 +69,8 @@ class NewsSource:
 
         signals: list[Signal] = []
         for item in root.iter("item"):
-            title = _text(item, "title")
-            description = _text(item, "description")
+            title = _strip_html(_text(item, "title"))
+            description = _strip_html(_text(item, "description"))
             text = f"{title} {description}".strip()
             if not text:
                 continue
@@ -110,6 +112,15 @@ class NewsSource:
                     )
                 )
         return signals
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(value: str) -> str:
+    """Reduce RSS HTML to visible text so aggregator link-soup (e.g. a Google News item's own
+    `news.google.com` links) cannot pollute entity/politician matching with false hits."""
+    return html.unescape(_TAG_RE.sub(" ", value)).strip()
 
 
 def _text(item: ElementTree.Element, tag: str) -> str:

@@ -1,0 +1,111 @@
+name: Trading cycle
+
+# Always-on, FREE scheduled trading cycle.
+#
+# Runs one ingest -> evaluate -> place-orders pass (`python -m trading.jobs.cycle`)
+# against a managed Postgres on a 20-minute cron, plus on-demand via the Actions tab.
+#
+# NOTE: GitHub frequently DELAYS scheduled runs under load (often by several minutes,
+# occasionally skipping a tick during peak times). Treat "every 20 minutes" as a
+# best-effort upper bound on frequency, not a hard guarantee. See:
+# https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
+
+on:
+  schedule:
+    # Every 20 minutes. Cron is UTC. May be delayed by GitHub under load (see note above).
+    - cron: "*/20 * * * *"
+  workflow_dispatch: {}
+
+# One book, one broker account: never let two cycles run at once (would double-place
+# orders / race the event store). A newer scheduled tick waits rather than overlapping.
+concurrency:
+  group: trading-cycle
+  cancel-in-progress: false
+
+# Least privilege: the job only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    # A single pass (install + migrate + ingest/evaluate/place) is fast; cap it so a hung
+    # network call to a data/broker API can't burn free Actions minutes.
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        # alembic, the package install, and the cycle module all run from backend/.
+        working-directory: backend
+
+    env:
+      # ---- Database (REQUIRED) -------------------------------------------------------------
+      # Async SQLAlchemy URL: postgresql+asyncpg://USER:PASS@HOST/DB  (see docs/DEPLOY.md).
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # ---- Mode / account ------------------------------------------------------------------
+      MODE_DEFAULT: paper
+      STARTING_CASH: "100000"
+
+      # ---- Risk caps (REQUIRED — the app refuses to start without all three) ---------------
+      MAX_TRADE_PCT_OF_SLEEVE: ${{ secrets.MAX_TRADE_PCT_OF_SLEEVE }}
+      MAX_POSITION_CONCENTRATION_PCT: ${{ secrets.MAX_POSITION_CONCENTRATION_PCT }}
+      MAX_DRAWDOWN_PCT: ${{ secrets.MAX_DRAWDOWN_PCT }}
+
+      # ---- Conviction thresholds (optional — defaults match the spec; override via secret) --
+      TRADE_THRESHOLD: ${{ secrets.TRADE_THRESHOLD || '70' }}
+      WATCH_THRESHOLD: ${{ secrets.WATCH_THRESHOLD || '40' }}
+      CORROBORATION_WINDOW_DAYS: ${{ secrets.CORROBORATION_WINDOW_DAYS || '21' }}
+
+      # ---- Alpaca PAPER trading venue (real paper account; NOT real money) -----------------
+      # When ENABLE_ALPACA_PAPER is true the political sleeve executes on Alpaca paper instead
+      # of the in-process simulator. Wiring a real Alpaca account auto-engages REQUIRE_REAL_DATA.
+      ENABLE_ALPACA_PAPER: ${{ secrets.ENABLE_ALPACA_PAPER || 'true' }}
+      ALPACA_PAPER_KEY_ID: ${{ secrets.ALPACA_PAPER_KEY_ID }}
+      ALPACA_PAPER_SECRET_KEY: ${{ secrets.ALPACA_PAPER_SECRET_KEY }}
+      ALPACA_PAPER_BASE_URL: ${{ secrets.ALPACA_PAPER_BASE_URL || 'https://paper-api.alpaca.markets' }}
+      ALPACA_PAPER_SLEEVE_ID: ${{ secrets.ALPACA_PAPER_SLEEVE_ID || 'sleeve-political' }}
+
+      # ---- Alpaca market data (live quotes / live P&L marks) -------------------------------
+      # The data API accepts paper OR live keys. If you leave ALPACA_DATA_* unset it falls back
+      # to the live broker key (also unset here), so set ENABLE_LIVE_QUOTES only with data creds.
+      ENABLE_LIVE_QUOTES: ${{ secrets.ENABLE_LIVE_QUOTES || 'false' }}
+      ENABLE_HISTORICAL_DATA: ${{ secrets.ENABLE_HISTORICAL_DATA || 'false' }}
+      ALPACA_DATA_KEY_ID: ${{ secrets.ALPACA_DATA_KEY_ID }}
+      ALPACA_DATA_SECRET_KEY: ${{ secrets.ALPACA_DATA_SECRET_KEY }}
+      ALPACA_DATA_BASE_URL: ${{ secrets.ALPACA_DATA_BASE_URL || 'https://data.alpaca.markets' }}
+
+      # ---- Data sources / feature flags (the political pipeline) ---------------------------
+      # USASpending is FREE and needs no key — the strongest free REAL signal. Congress roster
+      # attaches news/disclosed-trade signals to REAL members so they pass the anti-placeholder
+      # guard. NEWS_FEED_URLS is a JSON array string, e.g. '["https://host/politics.rss"]'.
+      USASPENDING_ENABLED: ${{ secrets.USASPENDING_ENABLED || 'true' }}
+      USASPENDING_LOOKBACK_DAYS: ${{ secrets.USASPENDING_LOOKBACK_DAYS || '30' }}
+      ENABLE_CONGRESS_ROSTER: ${{ secrets.ENABLE_CONGRESS_ROSTER || 'true' }}
+      NEWS_FEED_URLS: ${{ secrets.NEWS_FEED_URLS || '[]' }}
+
+      # ---- Data integrity (anti-placeholder) -----------------------------------------------
+      # Auto-engages to true when a real Alpaca account is wired (ENABLE_ALPACA_PAPER); set here
+      # for clarity. Only REAL-provenance signals can ever trade — synthetic data is refused.
+      REQUIRE_REAL_DATA: ${{ secrets.REQUIRE_REAL_DATA || 'true' }}
+
+      LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend package
+        run: pip install -e .
+
+      - name: Run database migrations (idempotent)
+        run: alembic upgrade head
+
+      - name: Run trading cycle (ingest -> evaluate -> place orders)
+        run: python -m trading.jobs.cycle

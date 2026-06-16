@@ -21,9 +21,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # TimescaleDB powers the equity-curve hypertable. The CI integration image
-    # (timescale/timescaledb:latest-pg16) ships the extension.
-    op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+    bind = op.get_bind()
+    # TimescaleDB powers the equity-curve hypertable WHEN available (the CI image
+    # timescale/timescaledb:latest-pg16 ships it). On a stock Postgres (e.g. the Neon / Supabase
+    # free tier) the extension is absent, so we skip it and leave portfolio_snapshots a plain
+    # table — fully functional, just not time-partitioned. This keeps the migration portable so
+    # the scheduled deployment can run on any free Postgres.
+    has_timescale = (
+        bind.execute(
+            sa.text("SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")
+        ).scalar()
+        is not None
+    )
+    if has_timescale:
+        op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb;")
 
     op.create_table(
         "rm_signals",
@@ -70,10 +81,12 @@ def upgrade() -> None:
         "portfolio_snapshots",
         ["sleeve_id", "taken_at"],
     )
-    # Time-series storage: convert to a hypertable partitioned on the time column.
-    op.execute(
-        "SELECT create_hypertable('portfolio_snapshots', 'taken_at', if_not_exists => TRUE);"
-    )
+    # Time-series storage: convert to a hypertable when TimescaleDB is present; on stock Postgres
+    # the plain table above is used as-is (the read model queries it identically).
+    if has_timescale:
+        op.execute(
+            "SELECT create_hypertable('portfolio_snapshots', 'taken_at', if_not_exists => TRUE);"
+        )
 
 
 def downgrade() -> None:
