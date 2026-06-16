@@ -9,6 +9,8 @@ import type {
   LivePositionsResult,
   LiveReadiness,
   OrderCancelResult,
+  ProposalsExecuteResult,
+  ProposalsResult,
   QuotesResult,
   ReconcileReport,
   SignalFeedItem,
@@ -67,6 +69,17 @@ export const api = {
 
   ingest: () => request<IngestResult>("/ingest", { method: "POST" }),
   reconcile: () => request<ReconcileReport[]>("/reconcile", { method: "POST" }),
+
+  // Daily-cycle proposals: the actionable trades the cycle found, the watch-tier candidates it
+  // expects to act on next, and the current cycle mode (auto/manual).
+  proposals: () => request<ProposalsResult>("/proposals"),
+  // Approve & place proposals. Omit `symbols` (or pass []) to execute ALL current proposals.
+  // The live event stream then drives the cross-screen refresh, same as other writes.
+  executeProposals: (symbols: string[] = []) =>
+    request<ProposalsExecuteResult>("/proposals/execute", {
+      method: "POST",
+      body: JSON.stringify({ symbols }),
+    }),
   // POST /backtest replays recorded signals through the strategy + risk + execution path.
   // Returns 409 ("backtesting is not configured") when no historical market-data adapter is
   // wired; callers surface that as an explanatory empty state (see Backtest.tsx).

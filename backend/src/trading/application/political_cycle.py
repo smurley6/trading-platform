@@ -30,16 +30,20 @@ class PoliticalCycle:
         event_store: EventStorePort,
         clock: ClockPort,
         window_days: int,
+        trade_mode: str = "auto",
     ) -> None:
         self._ingest = ingest
         self._evaluate = evaluate
         self._event_store = event_store
         self._clock = clock
         self._window_days = window_days
+        self._trade_mode = trade_mode
 
     async def execute(self) -> CycleResult:
         ingestion = await self._ingest.execute()
         events = await self._event_store.read_all()
         window = signals_from_events(events, now=self._clock.now(), window_days=self._window_days)
-        evaluation = await self._evaluate.execute(window)
+        # AUTO places orders automatically; MANUAL records the decisions for audit but places
+        # nothing — actionable trades are surfaced as proposals (/proposals) for human approval.
+        evaluation = await self._evaluate.execute(window, place=self._trade_mode == "auto")
         return CycleResult(ingestion=ingestion, evaluation=evaluation)

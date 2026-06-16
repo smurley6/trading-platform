@@ -14,6 +14,8 @@ export interface Sleeve {
   status: SleeveStatus;
 }
 
+export type Provenance = "REAL" | "SYNTHETIC";
+
 export interface SignalFeedItem {
   signal_id: string;
   occurred_at: string;
@@ -23,6 +25,9 @@ export interface SignalFeedItem {
   sentiment: number;
   politician_weight: number;
   source_reliability: number;
+  // Origin trust level (REAL vs SYNTHETIC). Optional: older backends omit it from the feed
+  // schema, so consumers must treat an absent value as "unknown" and render a neutral label.
+  provenance?: Provenance;
 }
 
 export interface ConvictionItem {
@@ -201,4 +206,42 @@ export interface LivePosition {
 export interface LivePositionsResult {
   enabled: boolean;
   positions: LivePosition[];
+}
+
+// Daily-cycle proposals (GET /proposals). The cycle `mode` decides whether the actionable
+// `proposals` are awaiting manual approval ("manual") or have already been placed ("auto",
+// in which case these rows preview the next round). Numeric quantities arrive as Decimal
+// strings — format with Number(...)/formatNumber for display.
+export type CycleMode = "auto" | "manual";
+
+export interface ProposalItem {
+  symbol: string;
+  side: "buy" | "sell";
+  quantity: string;
+  target_quantity: string;
+  current_quantity: string;
+  conviction_score: number;
+  action: "trade";
+  contributing_signal_ids: string[];
+  rationale: string;
+}
+
+export interface PredictedItem {
+  symbol: string;
+  conviction_score: number;
+  action: "watch";
+  distinct_source_types: string[];
+  contributing_signal_ids: string[];
+}
+
+export interface ProposalsResult {
+  mode: CycleMode;
+  proposals: ProposalItem[];
+  predicted: PredictedItem[];
+}
+
+// POST /proposals/execute response. Mirrors EvaluateResult's order shape (OrderOut).
+export interface ProposalsExecuteResult {
+  correlation_id: string;
+  orders: OrderDto[];
 }

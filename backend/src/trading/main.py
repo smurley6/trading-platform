@@ -26,6 +26,7 @@ from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort,
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.ports.trade_updates import TradeUpdatesStreamPort
+from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
@@ -114,7 +115,14 @@ def build_dependencies(settings: Settings) -> AppDeps:
         from trading.infrastructure.persistence.postgres import PostgresEventStore
         from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
 
-        db_engine = create_async_engine(settings.database_url)
+        # pool_pre_ping issues a lightweight liveness check (SELECT 1) before handing out a
+        # pooled connection, transparently discarding ones the server has since dropped. Neon
+        # scales compute to zero when idle, which silently kills pooled connections; without
+        # pre-ping the next read on a long-running server hits a stale socket and 500s with
+        # ConnectionResetError. The short-lived cron job rarely sees this, but the always-on
+        # API does, so pre-ping is the correct fix for the served app (cost: one cheap round-trip
+        # per checkout after an idle gap).
+        db_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
         pg_read_model = PostgresReadModel(db_engine)
         # Read-model rows are written in the append transaction, atomically with the event.
         inner_store = PostgresEventStore(db_engine, on_append=pg_read_model.apply)
@@ -407,6 +415,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
             event_store=event_store,
             clock=clock,
             window_days=settings.corroboration_window_days,
+            trade_mode=settings.cycle_trade_mode,
         )
 
     # Backtesting (FR-BT): replay the recorded signals through the political strategy and the
@@ -434,6 +443,25 @@ def build_dependencies(settings: Settings) -> AppDeps:
             )
         )
 
+    # Proposals (FR-EXE): a read-only conviction scan (TRADE -> proposals, WATCH -> predicted)
+    # and a manual execute path that reuses the real evaluate -> risk -> place pipeline.
+    scan_proposals = ScanProposals(
+        strategy=political_strategy,
+        read_model=read_model,
+        clock=clock,
+        thresholds=thresholds,
+        conviction_params=strategy_config.conviction_params(),
+        window_days=settings.corroboration_window_days,
+        top_n=settings.proposal_top_n,
+    )
+    execute_proposals = ExecuteProposals(
+        evaluators=evaluators,
+        default_sleeve_id="sleeve-political",
+        read_model=read_model,
+        clock=clock,
+        window_days=settings.corroboration_window_days,
+    )
+
     deps = AppDeps(
         event_store=event_store,
         read_model=read_model,
@@ -452,6 +480,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
         background_tasks=background_tasks,
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
+        cycle_trade_mode=settings.cycle_trade_mode,
+        scan_proposals=scan_proposals,
+        execute_proposals=execute_proposals,
         backtest_runner=run_backtest,
         assess_readiness=assess_readiness,
         request_live=request_live,

@@ -11,11 +11,13 @@ name: Trading cycle
 # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule
 
 on:
-  # PAUSED by request: the automatic 20-minute schedule is disabled so the cron does NOT
-  # auto-trade. Re-enable by uncommenting the two lines below. Manual runs still work via the
-  # Actions tab (workflow_dispatch).
-  # schedule:
-  #   - cron: "*/20 * * * *"
+  # Autonomous DATA COLLECTION, once every 24h. The cycle ingests + classifies every free
+  # source and builds trade proposals, but does NOT auto-trade: CYCLE_TRADE_MODE defaults to
+  # 'manual' below, so each run records decisions/proposals for review in the UI and places
+  # ZERO orders. Flip the CYCLE_TRADE_MODE secret to 'auto' to let the cron place paper orders
+  # itself. 13:00 UTC ≈ 09:00 ET (near US market open, after fresh disclosures post).
+  schedule:
+    - cron: "0 13 * * *"
   workflow_dispatch: {}
 
 # One book, one broker account: never let two cycles run at once (would double-place
@@ -48,6 +50,13 @@ jobs:
       # ---- Mode / account ------------------------------------------------------------------
       MODE_DEFAULT: paper
       STARTING_CASH: "100000"
+
+      # ---- Cron trade mode -----------------------------------------------------------------
+      # 'manual' (default): each scheduled run collects + classifies data and computes the
+      # top-N trade proposals, but places NO orders — you approve them in the Proposals UI.
+      # 'auto': the run also places the proposed paper orders itself. Defaults to 'manual' so
+      # autonomous data collection never silently auto-trades.
+      CYCLE_TRADE_MODE: ${{ secrets.CYCLE_TRADE_MODE || 'manual' }}
 
       # ---- Risk caps (REQUIRED — the app refuses to start without all three) ---------------
       MAX_TRADE_PCT_OF_SLEEVE: ${{ secrets.MAX_TRADE_PCT_OF_SLEEVE }}

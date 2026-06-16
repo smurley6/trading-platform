@@ -9,6 +9,7 @@ import { Backtest } from "./features/backtest/Backtest";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
 import { Markets } from "./features/markets/Markets";
+import { Proposals } from "./features/proposals/Proposals";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { SignalFeed } from "./features/signals/SignalFeed";
 import { api } from "./lib/api";
@@ -20,6 +21,7 @@ type View =
   | "dashboard"
   | "algorithms"
   | "markets"
+  | "proposals"
   | "signals"
   | "blotter"
   | "backtest"
@@ -29,6 +31,7 @@ const NAV: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
   { id: "algorithms", label: "Algorithms" },
   { id: "markets", label: "Markets" },
+  { id: "proposals", label: "Proposals" },
   { id: "signals", label: "Signal feed" },
   { id: "blotter", label: "Blotter" },
   { id: "backtest", label: "Backtest" },
@@ -145,6 +148,8 @@ function Screen({
       return <Algorithms refreshKey={refreshKey} sleeves={sleeves} />;
     case "markets":
       return <Markets refreshKey={refreshKey} />;
+    case "proposals":
+      return <Proposals refreshKey={refreshKey} />;
     case "signals":
       return <SignalFeed refreshKey={refreshKey} />;
     case "blotter":

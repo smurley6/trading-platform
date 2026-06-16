@@ -7,7 +7,7 @@ what market context" (spec section 12).
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -65,7 +65,12 @@ class EvaluateSignals:
         self._peak_equity = Decimal("0")
 
     async def execute(
-        self, signals: Sequence[Signal], *, correlation_id: str | None = None
+        self,
+        signals: Sequence[Signal],
+        *,
+        correlation_id: str | None = None,
+        only_symbols: Collection[str] | None = None,
+        place: bool = True,
     ) -> EvaluationResult:
         correlation_id = correlation_id or str(uuid4())
 
@@ -88,6 +93,9 @@ class EvaluateSignals:
         orders: list[BrokerOrder] = []
         for proposal in self._strategy.evaluate(signals, portfolio):
             target = proposal.target
+            # Execute-proposal path: restrict to the explicitly chosen symbols (None = all).
+            if only_symbols is not None and target.symbol not in only_symbols:
+                continue
             current = portfolio.quantity(target.symbol)
             delta = target.quantity - current
             if delta == 0:
@@ -159,6 +167,10 @@ class EvaluateSignals:
                 )
                 continue
 
+            if not place:
+                # Manual mode: the decision + risk verdict are recorded for audit, but no order
+                # is placed — the trade is surfaced as a proposal for human approval instead.
+                continue
             broker_order = await self._place_order.execute(
                 PlaceOrderRequest(
                     sleeve_id=self._sleeve.id,

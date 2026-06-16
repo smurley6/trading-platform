@@ -4,6 +4,7 @@ Risk caps have no defaults on purpose: the process refuses to start without them
 """
 
 from decimal import Decimal
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +38,15 @@ class Settings(BaseSettings):
     conviction_min_sources_for_full_corroboration: int = 1
     conviction_max_corroboration_factor: float | None = None
     conviction_scale: float = 25.0
+
+    # Cron trade mode (FR-EXE). 'auto' = the daily cycle places orders automatically when
+    # conviction clears the trade threshold. 'manual' = the cycle only ingests; actionable trades
+    # are surfaced as PROPOSALS via /proposals for human approval (individual or blanket buy).
+    # Both modes run the same (daily) cron cadence and surface predicted/incoming (watch-tier)
+    # candidates + the classified-signal feed in the UI.
+    cycle_trade_mode: Literal["auto", "manual"] = "auto"
+    # Max actionable proposals surfaced per scan (the "top N" reviewed/bought in manual mode).
+    proposal_top_n: int = 10
 
     # Risk caps — required at startup, no defaults (FR-RISK-2)
     max_trade_pct_of_sleeve: Decimal

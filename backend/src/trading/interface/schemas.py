@@ -13,6 +13,7 @@ from trading.application.live_trading import LiveReadinessReport
 from trading.application.ports.broker import BrokerOrder
 from trading.application.ports.market_data import Quote
 from trading.application.ports.read_model import SignalRecord
+from trading.application.proposals import PredictedCandidate, ProposalCandidate
 from trading.application.reconcile import ReconciliationReport
 from trading.application.sleeve_registry import SleeveState
 from trading.application.sync_orders import SyncReport
@@ -175,6 +176,65 @@ class ConvictionItem(BaseModel):
     score: float
     action: str
     contributing_signal_ids: list[str]
+
+
+class ProposalItem(BaseModel):
+    symbol: str
+    side: str
+    quantity: Decimal
+    target_quantity: Decimal
+    current_quantity: Decimal
+    conviction_score: float
+    action: str
+    contributing_signal_ids: list[str]
+    rationale: str
+
+    @classmethod
+    def from_candidate(cls, c: ProposalCandidate) -> "ProposalItem":
+        return cls(
+            symbol=c.symbol,
+            side=c.side,
+            quantity=c.quantity,
+            target_quantity=c.target_quantity,
+            current_quantity=c.current_quantity,
+            conviction_score=c.conviction_score,
+            action=c.action,
+            contributing_signal_ids=list(c.contributing_signal_ids),
+            rationale=c.rationale,
+        )
+
+
+class PredictedItem(BaseModel):
+    symbol: str
+    conviction_score: float
+    action: str
+    distinct_source_types: list[str]
+    contributing_signal_ids: list[str]
+
+    @classmethod
+    def from_candidate(cls, c: PredictedCandidate) -> "PredictedItem":
+        return cls(
+            symbol=c.symbol,
+            conviction_score=c.conviction_score,
+            action=c.action,
+            distinct_source_types=list(c.distinct_source_types),
+            contributing_signal_ids=list(c.contributing_signal_ids),
+        )
+
+
+class ProposalsOut(BaseModel):
+    mode: str
+    proposals: list[ProposalItem]
+    predicted: list[PredictedItem]
+
+
+class ExecuteProposalsIn(BaseModel):
+    symbols: list[str] | None = None
+
+
+class ExecuteProposalsOut(BaseModel):
+    correlation_id: str
+    orders: list[OrderOut]
 
 
 class IngestOut(BaseModel):

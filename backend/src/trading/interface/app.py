@@ -28,6 +28,7 @@ from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.ports.trade_updates import TradeUpdatesStreamPort
+from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
 from trading.application.signal_recording import record_signals
@@ -47,6 +48,8 @@ from trading.interface.schemas import (
     ConvictionItem,
     EvaluateOut,
     EventOut,
+    ExecuteProposalsIn,
+    ExecuteProposalsOut,
     IngestOut,
     KillSwitchIn,
     KillSwitchOut,
@@ -55,6 +58,9 @@ from trading.interface.schemas import (
     LiveReadinessOut,
     OrderOut,
     OrderSyncOut,
+    PredictedItem,
+    ProposalItem,
+    ProposalsOut,
     QuoteOut,
     QuotesOut,
     ReconcileOut,
@@ -91,6 +97,11 @@ class AppDeps:
     trade_updates_stream: TradeUpdatesStreamPort | None = None
     default_watchlist: list[str] = field(default_factory=list)
     political_cycle: PoliticalCycle | None = None
+    # Trade mode + proposals (FR-EXE): 'auto' auto-places via the cron; 'manual' surfaces
+    # actionable trades as proposals for human approval. Scan is read-only; execute places.
+    cycle_trade_mode: str = "auto"
+    scan_proposals: ScanProposals | None = None
+    execute_proposals: ExecuteProposals | None = None
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
     assess_readiness: AssessLiveReadiness | None = None
     request_live: RequestLiveTrading | None = None
@@ -257,6 +268,30 @@ def create_app(deps: AppDeps) -> FastAPI:
                 )
             )
         return items
+
+    @app.get("/proposals", response_model=ProposalsOut)
+    async def proposals() -> ProposalsOut:
+        # Read-only conviction scan: TRADE-tier -> actionable proposals (manual-approve / buy),
+        # WATCH-tier -> predicted/incoming ("about to buy"). Empty until real data is collected.
+        if deps.scan_proposals is None:
+            return ProposalsOut(mode=deps.cycle_trade_mode, proposals=[], predicted=[])
+        scan = await deps.scan_proposals.execute()
+        return ProposalsOut(
+            mode=deps.cycle_trade_mode,
+            proposals=[ProposalItem.from_candidate(c) for c in scan.proposals],
+            predicted=[PredictedItem.from_candidate(c) for c in scan.predicted],
+        )
+
+    @app.post("/proposals/execute", response_model=ExecuteProposalsOut, dependencies=protected)
+    async def execute_proposals(body: ExecuteProposalsIn) -> ExecuteProposalsOut:
+        # Manual buy: individual (symbols=[...]) or blanket (symbols omitted -> all proposals).
+        if deps.execute_proposals is None:
+            raise HTTPException(status_code=409, detail="trading is not configured")
+        result = await deps.execute_proposals.execute(symbols=body.symbols)
+        return ExecuteProposalsOut(
+            correlation_id=result.correlation_id,
+            orders=[OrderOut.from_broker(o) for o in result.orders],
+        )
 
     @app.get("/quotes", response_model=QuotesOut)
     async def quotes(symbols: Annotated[str | None, Query()] = None) -> QuotesOut:
