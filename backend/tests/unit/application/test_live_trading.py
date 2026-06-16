@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from tests.conftest import FixedClock
+from tests.conftest import FixedClock, SignalFactory
 from trading.application.live_trading import (
     AssessLiveReadiness,
     LiveTradingError,
@@ -12,8 +12,10 @@ from trading.application.live_trading import (
 )
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskLimits
+from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry
 from trading.domain.events import EventType
+from trading.domain.provenance import Provenance
 from trading.domain.sleeves import TradingMode
 from trading.infrastructure.persistence.memory import InMemoryEventStore
 
@@ -72,6 +74,7 @@ async def test_ready_when_all_checks_pass(
         "risk_caps_hardened",
         "kill_switch_operational",
         "reconciliation_clean",
+        "data_provenance_real",
     }
     # The kill-switch self-test restored the original (disengaged) state.
     assert kill_switch.engaged is False
@@ -110,6 +113,38 @@ async def test_not_ready_lists_failures(
     assert not report.ready
     failed = {c.name for c in report.checks if not c.passed}
     assert {"master_switch", "live_credentials", "risk_caps_hardened"} <= failed
+
+
+async def test_not_ready_when_synthetic_signal_in_window(
+    kill_switch: KillSwitch,
+    reconcile: Reconcile,
+    event_store: InMemoryEventStore,
+    clock: FixedClock,
+    make_signal: SignalFactory,
+) -> None:
+    # A SYNTHETIC/placeholder signal in the corroboration window must block go-live, even when
+    # every other check passes.
+    await record_signals(
+        event_store=event_store,
+        clock=clock,
+        signals=[make_signal(provenance=Provenance.SYNTHETIC)],
+        correlation_id="seed",
+    )
+    assessor = _assessor(
+        allow_live=True,
+        live_configured=True,
+        configured=_TIGHT,
+        kill_switch=kill_switch,
+        reconcile=reconcile,
+        event_store=event_store,
+        clock=clock,
+    )
+
+    report = await assessor.assess("sleeve-test")
+
+    assert not report.ready
+    provenance_check = next(c for c in report.checks if c.name == "data_provenance_real")
+    assert not provenance_check.passed
 
 
 async def test_enable_requires_confirmation(

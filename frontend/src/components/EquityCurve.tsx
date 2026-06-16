@@ -1,16 +1,27 @@
 // Equity curve via TradingView Lightweight Charts (FR-UI-2). Attribution is required and
 // rendered below the chart.
 
-import { type IChartApi, type UTCTimestamp, ColorType, createChart } from "lightweight-charts";
+import {
+  type IChartApi,
+  type UTCTimestamp,
+  ColorType,
+  LineStyle,
+  createChart,
+} from "lightweight-charts";
 import { useEffect, useRef } from "react";
 import type { EquityPoint } from "../lib/projections";
 
 interface EquityCurveProps {
   data: EquityPoint[];
   height?: number;
+  /**
+   * Optional benchmark series, drawn as a muted line over the equity area (used by the backtest
+   * view to compare strategy equity against a benchmark). Omit it and the chart is unchanged.
+   */
+  benchmark?: EquityPoint[];
 }
 
-export function EquityCurve({ data, height = 280 }: EquityCurveProps) {
+export function EquityCurve({ data, height = 280, benchmark }: EquityCurveProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -37,6 +48,14 @@ export function EquityCurve({ data, height = 280 }: EquityCurveProps) {
       bottomColor: "rgba(76,154,255,0.02)",
     });
     series.setData(data.map((p) => ({ time: p.time as UTCTimestamp, value: p.value })));
+    if (benchmark && benchmark.length > 0) {
+      const benchSeries = chart.addLineSeries({
+        color: "#94a3b8",
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+      });
+      benchSeries.setData(benchmark.map((p) => ({ time: p.time as UTCTimestamp, value: p.value })));
+    }
     chart.timeScale().fitContent();
     chartRef.current = chart;
 
@@ -50,7 +69,7 @@ export function EquityCurve({ data, height = 280 }: EquityCurveProps) {
       chart.remove();
       chartRef.current = null;
     };
-  }, [data, height]);
+  }, [data, height, benchmark]);
 
   return (
     <div>

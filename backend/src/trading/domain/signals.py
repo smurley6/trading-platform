@@ -5,6 +5,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from trading.domain.provenance import Provenance
+
 
 class SignalSource(StrEnum):
     STATEMENT = "statement"
@@ -23,6 +25,9 @@ class Signal:
     politician_weight: float
     source_reliability: float  # 0 .. 1
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    # Origin trust level. Defaults to SYNTHETIC (fail-closed): a Signal that does not explicitly
+    # declare itself REAL can never drive a real order. Only live data adapters stamp REAL.
+    provenance: Provenance = Provenance.SYNTHETIC
 
     def __post_init__(self) -> None:
         if not -1.0 <= self.sentiment <= 1.0:

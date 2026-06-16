@@ -203,21 +203,49 @@ class BacktestOut(BaseModel):
     ending_equity: float
     total_return_pct: float
     max_drawdown_pct: float
+    # Risk/return metrics (always present; 0.0 when undefined, e.g. a no-trade run).
+    sharpe: float
+    sortino: float
+    annualized_return_pct: float
+    volatility: float
+    benchmark_total_return_pct: float
+    # Trade stats — null when the run realised no round-trips (frontend renders "—").
+    win_rate: float | None
+    profit_factor: float | None
+    avg_win: float | None
+    avg_loss: float | None
+    num_trades: int
     decision_count: int
     equity_curve: list[BacktestPointOut]
+    benchmark_curve: list[BacktestPointOut]
     trades: list[BacktestTradeOut]
 
     @classmethod
     def from_result(cls, result: BacktestResult) -> "BacktestOut":
+        stats = result.trade_stats
         return cls(
             starting_equity=float(result.starting_equity),
             ending_equity=float(result.ending_equity),
             total_return_pct=result.total_return_pct,
             max_drawdown_pct=result.max_drawdown_pct,
+            sharpe=result.sharpe_ratio,
+            sortino=result.sortino_ratio,
+            annualized_return_pct=result.annualized_return_pct,
+            volatility=result.return_volatility,
+            benchmark_total_return_pct=result.benchmark_total_return_pct,
+            win_rate=stats.win_rate if stats else None,
+            profit_factor=stats.profit_factor if stats else None,
+            avg_win=float(stats.average_win) if stats else None,
+            avg_loss=float(stats.average_loss) if stats else None,
+            num_trades=len(result.trades),
             decision_count=result.decision_count,
             equity_curve=[
                 BacktestPointOut(time=int(p.when.timestamp()), equity=float(p.equity))
                 for p in result.equity_curve
+            ],
+            benchmark_curve=[
+                BacktestPointOut(time=int(p.when.timestamp()), equity=float(p.equity))
+                for p in result.benchmark_curve
             ],
             trades=[
                 BacktestTradeOut(

@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from trading.application.data_integrity import ensure_real_signals
 from trading.application.place_order import PlaceOrder, PlaceOrderRequest
 from trading.application.ports.broker import BrokerOrder, BrokerPort
 from trading.application.ports.clock import ClockPort
@@ -49,6 +50,7 @@ class EvaluateSignals:
         market_data: MarketDataPort,
         event_store: EventStorePort,
         clock: ClockPort,
+        require_real_data: bool = False,
     ) -> None:
         self._strategy = strategy
         self._sleeve = sleeve
@@ -58,12 +60,19 @@ class EvaluateSignals:
         self._market_data = market_data
         self._event_store = event_store
         self._clock = clock
+        # When True (a real broker is in play), refuse to evaluate on any non-REAL signal.
+        self._require_real_data = require_real_data
         self._peak_equity = Decimal("0")
 
     async def execute(
         self, signals: Sequence[Signal], *, correlation_id: str | None = None
     ) -> EvaluationResult:
         correlation_id = correlation_id or str(uuid4())
+
+        # Anti-placeholder guard (fail-closed): with a real broker, a single SYNTHETIC signal in
+        # the window aborts the whole evaluation — no real order is ever driven by fake data.
+        if self._require_real_data:
+            ensure_real_signals(signals)
 
         account = await self._broker.get_account()
         portfolio = Portfolio(

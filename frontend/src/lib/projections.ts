@@ -1,7 +1,7 @@
 // Client-side projections over the event log — the same idea as the backend's
 // application/projections.py: current-state views derived from immutable events.
 
-import type { StoredEventDto } from "./types";
+import type { BacktestPoint, StoredEventDto } from "./types";
 
 export interface BlotterRow {
   occurred_at: string;
@@ -134,6 +134,33 @@ export function latestSnapshots(events: StoredEventDto[]): Map<string, SleeveSna
     });
   }
   return latest;
+}
+
+/**
+ * Normalize a backtest curve (strategy or benchmark) into EquityPoint[] for the EquityCurve
+ * chart. Accepts both the legacy `{ time: <unix seconds>, equity }` and the new
+ * `{ t: <ISO timestamp>, equity }` point shapes, coerces `equity` from string-or-number, and
+ * forces strictly increasing timestamps (lightweight-charts requires it; backtest snapshots can
+ * share a timestamp). Points whose time/equity can't be parsed are skipped.
+ */
+export function backtestCurve(points: BacktestPoint[] | undefined): EquityPoint[] {
+  const out: EquityPoint[] = [];
+  let lastTime = 0;
+  for (const p of points ?? []) {
+    const rawTime =
+      typeof p.time === "number"
+        ? p.time
+        : p.t
+          ? Math.floor(new Date(p.t).getTime() / 1000)
+          : NaN;
+    const value = Number(p.equity);
+    if (!Number.isFinite(rawTime) || !Number.isFinite(value)) continue;
+    let time = rawTime;
+    if (time <= lastTime) time = lastTime + 1;
+    lastTime = time;
+    out.push({ time, value });
+  }
+  return out;
 }
 
 /** Equity curve for one sleeve from its portfolio snapshots, oldest-first, de-duplicated. */

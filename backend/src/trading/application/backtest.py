@@ -21,7 +21,22 @@ from trading.application.projections import signals_from_events
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.signal_recording import record_signals
 from trading.domain.events import EventType
-from trading.domain.metrics import EquityPoint, max_drawdown_pct, total_return_pct
+from trading.domain.metrics import (
+    DEFAULT_ANNUALIZATION,
+    EquityPoint,
+    TradeStats,
+    benchmark_total_return_pct,
+    buy_and_hold_curve,
+    cagr_pct,
+    max_drawdown_pct,
+    period_returns,
+    return_volatility,
+    round_trips,
+    sharpe_ratio,
+    sortino_ratio,
+    total_return_pct,
+    trade_stats,
+)
 from trading.domain.prices import PriceSeries
 from trading.domain.signals import Signal
 from trading.domain.sleeves import Sleeve, SleeveStatus, TradingMode
@@ -49,6 +64,15 @@ class BacktestRequest:
 
 @dataclass(frozen=True, slots=True)
 class BacktestResult:
+    """Backtest outcome: the existing equity/return/drawdown/trade summary (FR-BT-2) plus
+    risk-adjusted ratios, trade statistics, and a passive buy-and-hold benchmark.
+
+    Every metric is computed by a pure function in ``domain.metrics`` from the equity curve
+    and realised fills the harness already records (FR-BT-1); see ``Backtest._summarize``.
+    The annualization assumption (one equity point per trading day -> 252) and the FIFO P&L
+    pairing rule are documented on those functions.
+    """
+
     starting_equity: Decimal
     ending_equity: Decimal
     total_return_pct: float
@@ -56,6 +80,19 @@ class BacktestResult:
     equity_curve: tuple[EquityPoint, ...]
     trades: tuple[Trade, ...]
     decision_count: int
+    # Risk-adjusted return (annualized, risk-free = 0; 0.0 when undefined). FR-BT-2.
+    sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    # Annualized return / CAGR over the curve's wall-clock span, as a percentage. FR-BT-2.
+    annualized_return_pct: float = 0.0
+    # Annualized stdev of the equity curve's period returns. FR-BT-2.
+    return_volatility: float = 0.0
+    # Realised round-trip trade statistics (win rate, profit factor, ...). FR-BT-2.
+    trade_stats: TradeStats | None = None
+    # Passive buy-and-hold benchmark valued on the strategy's timeline (FR-BT-2): the curve
+    # and its total return vs. the same starting cash, for strategy-vs-passive comparison.
+    benchmark_curve: tuple[EquityPoint, ...] = ()
+    benchmark_total_return_pct: float = 0.0
 
 
 class Backtest:
@@ -101,11 +138,12 @@ class Backtest:
             result = await evaluate.execute(window)
             decision_count += len(result.decisions)
 
-        return await self._summarize(env, request.starting_cash, decision_count)
+        return await self._summarize(env, request, decision_count)
 
     async def _summarize(
-        self, env: BacktestEnv, starting_cash: Decimal, decision_count: int
+        self, env: BacktestEnv, request: BacktestRequest, decision_count: int
     ) -> BacktestResult:
+        starting_cash = request.starting_cash
         events = await env.event_store.read_all()
         curve = tuple(
             EquityPoint(s.event.occurred_at, Decimal(str(s.event.payload["equity"])))
@@ -125,6 +163,17 @@ class Backtest:
         )
         ending = curve[-1].equity if curve else starting_cash
         values = [p.equity for p in curve] or [starting_cash]
+
+        # All risk/return/trade metrics are pure functions of the curve and fills (FR-BT-2).
+        returns = period_returns(values)
+        stats = trade_stats(round_trips(trades))
+
+        # Passive benchmark over the same timeline: hold the full priced universe equally.
+        timeline = [p.when for p in curve]
+        bench_curve = buy_and_hold_curve(
+            request.prices.symbols(), request.prices, timeline, starting_cash
+        )
+
         return BacktestResult(
             starting_equity=starting_cash,
             ending_equity=ending,
@@ -133,4 +182,11 @@ class Backtest:
             equity_curve=curve,
             trades=trades,
             decision_count=decision_count,
+            sharpe_ratio=sharpe_ratio(returns, annualization=DEFAULT_ANNUALIZATION),
+            sortino_ratio=sortino_ratio(returns, annualization=DEFAULT_ANNUALIZATION),
+            annualized_return_pct=cagr_pct(curve),
+            return_volatility=return_volatility(returns, annualization=DEFAULT_ANNUALIZATION),
+            trade_stats=stats,
+            benchmark_curve=bench_curve,
+            benchmark_total_return_pct=benchmark_total_return_pct(bench_curve, starting_cash),
         )

@@ -66,6 +66,23 @@ describe("api request building", () => {
     expect(init?.body).toBe(JSON.stringify({ engaged: true }));
   });
 
+  it("POSTs to the cancel route with the encoded client order id", async () => {
+    fetchMock.mockResolvedValue(okResponse({ client_order_id: "o/1", status: "canceled" }));
+    const result = await api.cancelOrder("o/1");
+    expect(result).toEqual({ client_order_id: "o/1", status: "canceled" });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/orders/o%2F1/cancel");
+    expect(init?.method).toBe("POST");
+  });
+
+  it("POSTs to /backtest", async () => {
+    fetchMock.mockResolvedValue(okResponse({ trades: [] }));
+    await api.backtest();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/backtest");
+    expect(init?.method).toBe("POST");
+  });
+
   it("encodes path segments for sleeve-scoped routes", async () => {
     fetchMock.mockResolvedValue(okResponse({ sleeve_id: "a/b", ready: true, checks: [] }));
     await api.liveReadiness("a/b");
@@ -89,6 +106,11 @@ describe("api error handling", () => {
     await expect(api.listSleeves()).rejects.toBeInstanceOf(ApiError);
     await expect(api.listSleeves()).rejects.toMatchObject({ status: 500 });
     await expect(api.listSleeves()).rejects.toThrow(/boom/);
+  });
+
+  it("throws a 409 ApiError for an unconfigured backtest so the UI can show an empty state", async () => {
+    fetchMock.mockResolvedValue(errorResponse(409, "backtesting is not configured"));
+    await expect(api.backtest()).rejects.toMatchObject({ status: 409 });
   });
 });
 

@@ -1,6 +1,7 @@
 """FastAPI application. Receives fully wired dependencies from the composition root."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -8,7 +9,8 @@ from decimal import Decimal
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 
 from trading.application.backtest import BacktestResult
 from trading.application.cancel_order import CancelFailedError, CancelOrder
@@ -25,6 +27,7 @@ from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.read_model import ReadModelPort
+from trading.application.ports.trade_updates import TradeUpdatesStreamPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
 from trading.application.signal_recording import record_signals
@@ -34,6 +37,10 @@ from trading.domain.conviction import ConvictionThresholds, compute_conviction
 from trading.domain.events import DomainEvent, EventType
 from trading.domain.positions import mark_positions
 from trading.domain.sleeves import TradingMode
+from trading.infrastructure.observability.metrics import MetricsRegistry
+from trading.infrastructure.persistence.health import DatabaseReadiness
+from trading.interface.auth import ApiKeyAuth
+from trading.interface.middleware.observability import ObservabilityMiddleware
 from trading.interface.schemas import (
     BacktestOut,
     CancelOut,
@@ -61,6 +68,8 @@ from trading.interface.schemas import (
 
 _USER_ACTION_STREAM = "user-actions"
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class AppDeps:
@@ -77,6 +86,9 @@ class AppDeps:
     conviction_window_days: int
     quote_feed: QuoteFeedPort | None = None  # live tracking/marks; None => disabled
     quote_stream: QuoteStreamPort | None = None  # /ws/quotes real-time push; None => disabled
+    # Real-time broker trade-updates stream (records fills/status as events); disabled => no
+    # socket. Run as a background task by the composition root, not driven by any HTTP route.
+    trade_updates_stream: TradeUpdatesStreamPort | None = None
     default_watchlist: list[str] = field(default_factory=list)
     political_cycle: PoliticalCycle | None = None
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
@@ -87,9 +99,17 @@ class AppDeps:
     reconcile_interval_seconds: int = 0  # 0 disables the scheduler (tests)
     ingest_interval_seconds: int = 0
     order_sync_interval_seconds: int = 0  # 0 disables the scheduled order-sync job
+    # Observability (spec §15). Always present; the registry backs /metrics and the request
+    # middleware. `enable_metrics` toggles the /metrics route's exposure only.
+    metrics: MetricsRegistry = field(default_factory=MetricsRegistry)
+    enable_metrics: bool = True
+    # Readiness: probes DB connectivity when DATABASE_URL is configured (else trivially ready).
+    db_readiness: DatabaseReadiness | None = None
+    # Auth: API-key guard for mutating/sensitive endpoints. None => open (dev default).
+    api_key: str | None = None
     # Long-running background coroutines started on startup and cancelled on shutdown (e.g. the
-    # Alpaca quote-stream consumer). Each is a factory so nothing runs until the app starts —
-    # when empty (the default) startup launches no task and opens no socket.
+    # Alpaca quote-stream consumer and the trade-updates stream). Each is a factory so nothing
+    # runs until the app starts — when empty (the default) startup launches no task, no socket.
     background_tasks: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     # Resources to release on shutdown (e.g. the shared HTTP client for data sources).
     aclosers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
@@ -124,10 +144,51 @@ def create_app(deps: AppDeps) -> FastAPI:
                 await aclose()
 
     app = FastAPI(title="Trading Platform", version="0.2.0", lifespan=lifespan)
+    # Structured JSON access logging + request/latency metrics + a propagated request id.
+    app.add_middleware(ObservabilityMiddleware, metrics=deps.metrics)
+
+    # API-key guard for mutating/sensitive endpoints. Unset => open (dev default; auth logs a
+    # single startup warning). Set => protected routes require the key. GET reads stay open.
+    auth = ApiKeyAuth(deps.api_key)
+    protected = [Depends(auth)]
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/healthz")
+    async def liveness() -> dict[str, str]:
+        # Liveness: the process is up and serving. No dependency checks (those are /readyz).
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readiness() -> dict[str, object]:
+        # Readiness: safe to receive traffic. Probes the database when one is configured; the
+        # in-memory default has no external dependency and is trivially ready.
+        checks: dict[str, str] = {}
+        ready = True
+        if deps.db_readiness is not None and deps.db_readiness.configured:
+            try:
+                await deps.db_readiness.check()
+                checks["database"] = "ok"
+            except Exception:
+                # Surface any DB failure as not-ready (503), not a 500.
+                logger.warning("readiness: database check failed", exc_info=True)
+                checks["database"] = "error"
+                ready = False
+        if not ready:
+            raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+        return {"status": "ready", "checks": checks}
+
+    @app.get("/metrics")
+    async def metrics() -> PlainTextResponse:
+        if not deps.enable_metrics:
+            raise HTTPException(status_code=404, detail="metrics are disabled")
+        # Prometheus text-exposition format (hand-rolled; no client-library dependency).
+        return PlainTextResponse(
+            deps.metrics.render(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.get("/events", response_model=list[EventOut])
     async def list_events(
@@ -143,7 +204,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             stored = await deps.event_store.read_all(limit=limit)
         return [EventOut.from_stored(s) for s in stored[-limit:]]
 
-    @app.post("/signals", response_model=EvaluateOut)
+    @app.post("/signals", response_model=EvaluateOut, dependencies=protected)
     async def submit_signals(
         signals: list[SignalIn],
         sleeve_id: Annotated[str | None, Query()] = None,
@@ -233,7 +294,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             positions=[LivePositionOut.from_marked(m) for m in marked],
         )
 
-    @app.post("/ingest", response_model=IngestOut)
+    @app.post("/ingest", response_model=IngestOut, dependencies=protected)
     async def ingest() -> IngestOut:
         if deps.political_cycle is None:
             raise HTTPException(
@@ -248,7 +309,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             orders=[OrderOut.from_broker(o) for o in cycle.evaluation.orders],
         )
 
-    @app.post("/backtest", response_model=BacktestOut)
+    @app.post("/backtest", response_model=BacktestOut, dependencies=protected)
     async def run_backtest() -> BacktestOut:
         if deps.backtest_runner is None:
             raise HTTPException(status_code=409, detail="backtesting is not configured")
@@ -258,7 +319,11 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def list_sleeves() -> list[SleeveOut]:
         return [SleeveOut.from_state(s) for s in deps.sleeve_registry.all()]
 
-    @app.post("/sleeves/{sleeve_id}/readiness", response_model=LiveReadinessOut)
+    @app.post(
+        "/sleeves/{sleeve_id}/readiness",
+        response_model=LiveReadinessOut,
+        dependencies=protected,
+    )
     async def assess_readiness(sleeve_id: str) -> LiveReadinessOut:
         if deps.assess_readiness is None:
             raise HTTPException(status_code=409, detail="live trading is not configured")
@@ -266,7 +331,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         report = await deps.assess_readiness.assess(sleeve_id)
         return LiveReadinessOut.from_report(report)
 
-    @app.post("/sleeves/{sleeve_id}/mode", response_model=SleeveModeOut)
+    @app.post("/sleeves/{sleeve_id}/mode", response_model=SleeveModeOut, dependencies=protected)
     async def set_sleeve_mode(sleeve_id: str, body: SleeveModeIn) -> SleeveModeOut:
         if deps.request_live is None:
             raise HTTPException(status_code=409, detail="live trading is not configured")
@@ -287,7 +352,7 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def get_kill_switch() -> KillSwitchOut:
         return KillSwitchOut(engaged=deps.kill_switch.engaged)
 
-    @app.post("/kill-switch", response_model=KillSwitchOut)
+    @app.post("/kill-switch", response_model=KillSwitchOut, dependencies=protected)
     async def set_kill_switch(body: KillSwitchIn) -> KillSwitchOut:
         correlation_id = str(uuid4())
         if body.engaged:
@@ -311,15 +376,15 @@ def create_app(deps: AppDeps) -> FastAPI:
         )
         return KillSwitchOut(engaged=deps.kill_switch.engaged)
 
-    @app.post("/reconcile", response_model=list[ReconcileOut])
+    @app.post("/reconcile", response_model=list[ReconcileOut], dependencies=protected)
     async def run_reconcile() -> list[ReconcileOut]:
         return [ReconcileOut.from_report(await r.execute()) for r in deps.reconcilers]
 
-    @app.post("/orders/sync", response_model=list[OrderSyncOut])
+    @app.post("/orders/sync", response_model=list[OrderSyncOut], dependencies=protected)
     async def sync_orders() -> list[OrderSyncOut]:
         return [OrderSyncOut.from_report(await s.execute()) for s in deps.order_syncs]
 
-    @app.post("/orders/{client_order_id}/cancel", response_model=CancelOut)
+    @app.post("/orders/{client_order_id}/cancel", response_model=CancelOut, dependencies=protected)
     async def cancel_order(
         client_order_id: str,
         sleeve_id: Annotated[str | None, Query()] = None,

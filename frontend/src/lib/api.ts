@@ -8,6 +8,7 @@ import type {
   KillSwitchState,
   LivePositionsResult,
   LiveReadiness,
+  OrderCancelResult,
   QuotesResult,
   ReconcileReport,
   SignalFeedItem,
@@ -66,7 +67,17 @@ export const api = {
 
   ingest: () => request<IngestResult>("/ingest", { method: "POST" }),
   reconcile: () => request<ReconcileReport[]>("/reconcile", { method: "POST" }),
+  // POST /backtest replays recorded signals through the strategy + risk + execution path.
+  // Returns 409 ("backtesting is not configured") when no historical market-data adapter is
+  // wired; callers surface that as an explanatory empty state (see Backtest.tsx).
   backtest: () => request<BacktestResult>("/backtest", { method: "POST" }),
+
+  // Cancel a still-open order by its client order id. Backend records it as an order event,
+  // so the live event stream drives the blotter refresh.
+  cancelOrder: (clientOrderId: string) =>
+    request<OrderCancelResult>(`/orders/${encodeURIComponent(clientOrderId)}/cancel`, {
+      method: "POST",
+    }),
 
   liveReadiness: (sleeveId: string) =>
     request<LiveReadiness>(`/sleeves/${encodeURIComponent(sleeveId)}/readiness`, {

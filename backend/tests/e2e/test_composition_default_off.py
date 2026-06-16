@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from trading.config import Settings
+from trading.infrastructure.brokers.disabled_trade_updates import DisabledTradeUpdatesStream
 from trading.infrastructure.market_data.disabled import DisabledQuoteFeed, DisabledQuoteStream
 from trading.interface.app import create_app
 from trading.main import build_dependencies
@@ -37,6 +38,8 @@ def _default_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         "ENABLE_ALPACA_PAPER",
         "ALPACA_PAPER_KEY_ID",
         "ALPACA_PAPER_SECRET_KEY",
+        "ENABLE_TRADE_UPDATES_STREAM",
+        "API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
     return Settings(_env_file=None)
@@ -49,6 +52,18 @@ def test_default_settings_inject_disabled_stream_and_feed(monkeypatch: pytest.Mo
     assert deps.quote_stream.enabled is False
     # Nothing to start on startup => no connect/consume task, no socket.
     assert deps.background_tasks == []
+
+
+def test_default_settings_inject_disabled_trade_updates_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = build_dependencies(_default_settings(monkeypatch))
+    assert isinstance(deps.trade_updates_stream, DisabledTradeUpdatesStream)
+    assert deps.trade_updates_stream.enabled is False
+    # No api key by default => mutating endpoints open (dev), readiness trivially ready.
+    assert deps.api_key is None
+    assert deps.db_readiness is not None
+    assert deps.db_readiness.configured is False
 
 
 def test_startup_opens_no_socket_when_default(monkeypatch: pytest.MonkeyPatch) -> None:

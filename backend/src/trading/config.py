@@ -26,10 +26,31 @@ class Settings(BaseSettings):
     watch_threshold: float = 40.0
     corroboration_window_days: int = 21
 
+    # Conviction scoring tunables (FR-POL-4/5, spec section 12). Defaults reproduce the M1
+    # formula EXACTLY (decay off => equal weights, min-sources=1, bonus 0.25, scale 25), so
+    # platform behavior is unchanged until you deliberately tune them. Time decay weights more
+    # recent signals more heavily within the corroboration window (half-life in days; <= 0
+    # disables decay). `min_sources_for_full_corroboration` raises the bar for high conviction;
+    # `max_corroboration_factor` caps the multi-source bonus. This is the core algorithm surface.
+    conviction_decay_half_life_days: float = 0.0
+    conviction_corroboration_bonus_per_source: float = 0.25
+    conviction_min_sources_for_full_corroboration: int = 1
+    conviction_max_corroboration_factor: float | None = None
+    conviction_scale: float = 25.0
+
     # Risk caps — required at startup, no defaults (FR-RISK-2)
     max_trade_pct_of_sleeve: Decimal
     max_position_concentration_pct: Decimal
     max_drawdown_pct: Decimal
+
+    # Data integrity (anti-placeholder). When True the platform refuses to let SYNTHETIC / fake /
+    # placeholder / seeded data reach a real decision: synthetic signals are dropped at ingestion,
+    # a real-broker evaluation aborts on any non-REAL signal, and a real sleeve will not boot
+    # without real market data. The composition root turns this ON AUTOMATICALLY whenever a real
+    # Alpaca account is wired (ENABLE_ALPACA_PAPER or ALLOW_LIVE) — you cannot trade a real account
+    # on fakes — and you may set it True explicitly to enforce the same on the in-process
+    # simulator. Tests and backtests run with it OFF (synthetic by design, never a real broker).
+    require_real_data: bool = False
 
     # Live trading (M5, spec sections 11 & 13). Live is OFF by construction: the master
     # switch defaults false, live credentials are unset, and a sleeve can only go live by
@@ -102,6 +123,12 @@ class Settings(BaseSettings):
     # Data sources (FR-ING). External sources default OFF so a bare `python -m trading.main`
     # makes no network calls; configure these to enable the political pipeline.
     news_feed_urls: list[str] = []
+    # Real congressional roster (FR-POL-3). When true, the unitedstates/congress-legislators
+    # dataset is fetched at startup so news / disclosed-trade signals attach to REAL politicians
+    # (Provenance.REAL) and can pass the anti-placeholder guard. Off => the synthetic seed roster,
+    # whose signals are SYNTHETIC and blocked from real decisions. Only fetched when a
+    # politician-using source (news or disclosed trades) is enabled.
+    enable_congress_roster: bool = False
     usaspending_enabled: bool = False
     usaspending_lookback_days: int = 30
     disclosed_trade_leg_enabled: bool = False
@@ -120,3 +147,39 @@ class Settings(BaseSettings):
     order_sync_interval_seconds: int = 0
 
     log_level: str = "INFO"
+
+    # --- Hardening: auth (interface/composition agent) --------------------------------------
+    # API key guarding the MUTATING/sensitive endpoints (POST /signals, /ingest, /backtest,
+    # /orders/sync, /orders/{id}/cancel, /reconcile, /kill-switch, /sleeves/{id}/mode and
+    # /sleeves/{id}/readiness). UNSET (the default) => those endpoints stay OPEN, and the app
+    # logs a single startup warning so an unprotected deployment is never silent. SET => callers
+    # must present it via `Authorization: Bearer <key>` or the `X-API-Key` header; a mismatch is
+    # 401. GET read endpoints stay open regardless. Env-only, NEVER commit a real key.
+    api_key: str | None = None
+
+    # --- Hardening: observability (interface/composition agent) -----------------------------
+    # Structured JSON request logging + Prometheus-text /metrics are always on (dependency-light,
+    # hand-rolled). This flag only toggles the /metrics endpoint's exposure should an operator
+    # want to hide it (e.g. behind a separate scrape network). Liveness (/healthz) and readiness
+    # (/readyz) are always present.
+    enable_metrics: bool = True
+
+    # --- Hardening: real-time trade-updates stream (interface/composition agent) -------------
+    # Alpaca paper trade-updates WebSocket (account stream): records fills/status changes as
+    # events in REAL TIME, complementing the 30s polling order-sync (which stays as the
+    # reconciliation fallback). OFF by construction: even with ENABLE_ALPACA_PAPER on, this is
+    # only dialed when ENABLE_TRADE_UPDATES_STREAM=true AND paper credentials resolve. A bare run
+    # opens no socket and makes no network call. The stream URL is derived from
+    # `alpaca_paper_base_url` (https -> wss, + /stream) unless overridden here.
+    enable_trade_updates_stream: bool = False
+    alpaca_trade_updates_stream_url: str | None = None
+
+    def trade_updates_stream_url(self) -> str:
+        """Resolved trade-updates WebSocket URL: explicit override, else derived from the paper
+        base URL (the paper `https://...` host becomes `wss://<host>/stream`)."""
+        if self.alpaca_trade_updates_stream_url:
+            return self.alpaca_trade_updates_stream_url
+        base = self.alpaca_paper_base_url.rstrip("/")
+        scheme = "wss" if base.startswith("https") else "ws"
+        host = base.split("://", 1)[-1]
+        return f"{scheme}://{host}/stream"

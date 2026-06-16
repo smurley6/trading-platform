@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from trading.domain.conviction import (
     ConvictionAction,
+    ConvictionParams,
     ConvictionThresholds,
     compute_conviction,
 )
@@ -28,15 +29,25 @@ class PoliticalSignalStrategy:
     thresholds: ConvictionThresholds = field(default_factory=ConvictionThresholds)
     window_days: int = 21
     position_size: Decimal = Decimal("10")
+    conviction_params: ConvictionParams = field(default_factory=ConvictionParams)
 
     def evaluate(
         self, signals: Sequence[Signal], portfolio: Portfolio
     ) -> Sequence[StrategyProposal]:
         tickers = sorted({s.ticker for s in signals})
+        # Anchor time decay to a single deterministic reference shared across tickers:
+        # the most recent signal in this evaluation batch. This keeps the per-ticker
+        # scores comparable and the whole evaluation reproducible in backtest (FR-BT-1).
+        now = max((s.created_at for s in signals), default=None)
         proposals: list[StrategyProposal] = []
         for ticker in tickers:
             result = compute_conviction(
-                ticker, signals, window_days=self.window_days, thresholds=self.thresholds
+                ticker,
+                signals,
+                window_days=self.window_days,
+                thresholds=self.thresholds,
+                params=self.conviction_params,
+                now=now,
             )
             held = portfolio.quantity(ticker)
             if result.action is ConvictionAction.TRADE:
@@ -65,4 +76,8 @@ class PoliticalSignalStrategy:
 
 @register(STRATEGY_ID)
 def _build(config: StrategyConfig) -> PoliticalSignalStrategy:
-    return PoliticalSignalStrategy(thresholds=config.thresholds, window_days=config.window_days)
+    return PoliticalSignalStrategy(
+        thresholds=config.thresholds,
+        window_days=config.window_days,
+        conviction_params=config.conviction_params(),
+    )

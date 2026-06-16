@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
+from trading.domain.provenance import Provenance
+
 
 class PoliticianRole(StrEnum):
     EXECUTIVE = "executive"
@@ -32,6 +34,9 @@ class Politician:
     party: str
     base_weight: float
     track_record_score: float
+    # SYNTHETIC by default (fail-closed): the fictional seed roster stays synthetic; a real
+    # congressional-roster adapter stamps REAL. A signal is only REAL if its politician is REAL.
+    provenance: Provenance = Provenance.SYNTHETIC
 
     def __post_init__(self) -> None:
         if self.base_weight < 0:

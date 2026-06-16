@@ -18,6 +18,7 @@ from trading.application.ports.clock import ClockPort
 from trading.application.ports.nlp import EntityResolverPort, SentimentAnalyzerPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.reference_data import SectorMapPort
+from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
 from trading.infrastructure.data_sources import RELIABILITY_STATEMENT
 from trading.infrastructure.data_sources.weighting import politician_weight_for
@@ -99,6 +100,13 @@ class NewsSource:
                             "link": _text(item, "link"),
                             "pub_date": _text(item, "pubDate"),
                         },
+                        # REAL only if the matched politician is real. A real RSS feed parsed
+                        # against the fictional roster yields SYNTHETIC -> blocked by the guard.
+                        provenance=(
+                            Provenance.REAL
+                            if politician.provenance is Provenance.REAL
+                            else Provenance.SYNTHETIC
+                        ),
                     )
                 )
         return signals

@@ -18,6 +18,7 @@ from trading.application.ports.clock import ClockPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.reference_data import SectorMapPort
 from trading.domain.politicians import Politician
+from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
 from trading.infrastructure.data_sources import RELIABILITY_DISCLOSED_TRADE
 from trading.infrastructure.data_sources.weighting import politician_weight_for
@@ -79,6 +80,12 @@ class CongressTradesSource:
                     politician_weight=politician_weight_for(politician, ticker, self._sector_map),
                     source_reliability=RELIABILITY_DISCLOSED_TRADE,
                     raw_payload=row,
+                    # REAL only if the matched politician is real (fictional roster -> SYNTHETIC).
+                    provenance=(
+                        Provenance.REAL
+                        if politician.provenance is Provenance.REAL
+                        else Provenance.SYNTHETIC
+                    ),
                 )
             )
         return signals

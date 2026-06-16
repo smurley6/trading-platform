@@ -5,6 +5,7 @@ import { Spinner, Text } from "@salt-ds/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KillSwitchControl } from "./components/KillSwitchControl";
 import { Algorithms } from "./features/algorithms/Algorithms";
+import { Backtest } from "./features/backtest/Backtest";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
 import { Markets } from "./features/markets/Markets";
@@ -15,7 +16,14 @@ import type { Sleeve } from "./lib/types";
 import { useEventStream } from "./lib/useEventStream";
 import { useLoader } from "./lib/useLoader";
 
-type View = "dashboard" | "algorithms" | "markets" | "signals" | "blotter" | "risk";
+type View =
+  | "dashboard"
+  | "algorithms"
+  | "markets"
+  | "signals"
+  | "blotter"
+  | "backtest"
+  | "risk";
 
 const NAV: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
@@ -23,6 +31,7 @@ const NAV: { id: View; label: string }[] = [
   { id: "markets", label: "Markets" },
   { id: "signals", label: "Signal feed" },
   { id: "blotter", label: "Blotter" },
+  { id: "backtest", label: "Backtest" },
   { id: "risk", label: "Risk" },
 ];
 
@@ -140,6 +149,8 @@ function Screen({
       return <SignalFeed refreshKey={refreshKey} />;
     case "blotter":
       return <Blotter refreshKey={refreshKey} />;
+    case "backtest":
+      return <Backtest refreshKey={refreshKey} />;
     case "risk":
       return <RiskDashboard refreshKey={refreshKey} sleeves={sleeves} />;
   }

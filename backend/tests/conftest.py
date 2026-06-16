@@ -12,6 +12,7 @@ from trading.application.place_order import PlaceOrder
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
+from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
 from trading.domain.sleeves import Sleeve, SleeveStatus, TradingMode
 from trading.infrastructure.brokers.paper import PaperBroker
@@ -141,6 +142,7 @@ def make_signal(clock: FixedClock) -> SignalFactory:
         source_type: SignalSource = SignalSource.STATEMENT,
         politician_weight: float = 1.0,
         source_reliability: float = 1.0,
+        provenance: Provenance = Provenance.SYNTHETIC,
     ) -> Signal:
         return Signal(
             id=str(uuid4()),
@@ -152,6 +154,7 @@ def make_signal(clock: FixedClock) -> SignalFactory:
             politician_weight=politician_weight,
             source_reliability=source_reliability,
             raw_payload={"source": "test-fixture"},
+            provenance=provenance,
         )
 
     return _make

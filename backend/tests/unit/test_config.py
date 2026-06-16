@@ -51,3 +51,23 @@ def test_paper_keys_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.paper_key_id() is None
     assert s.paper_secret_key() is None
     assert s.enable_alpaca_paper is False  # off by construction
+
+
+def test_hardening_defaults_are_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _settings(monkeypatch)
+    assert s.api_key is None  # open by default (dev)
+    assert s.enable_trade_updates_stream is False  # no socket by default
+    assert s.enable_metrics is True
+
+
+def test_trade_updates_stream_url_derived_from_paper_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = _settings(monkeypatch)
+    # https paper base -> wss + /stream.
+    assert s.trade_updates_stream_url() == "wss://paper-api.alpaca.markets/stream"
+
+
+def test_trade_updates_stream_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    s = _settings(monkeypatch, ALPACA_TRADE_UPDATES_STREAM_URL="wss://custom/stream")
+    assert s.trade_updates_stream_url() == "wss://custom/stream"

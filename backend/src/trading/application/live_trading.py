@@ -12,8 +12,10 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from trading.application.data_integrity import non_real_signals
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
+from trading.application.projections import signals_from_events
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskContext, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry
@@ -61,6 +63,7 @@ class AssessLiveReadiness:
         reconcilers: dict[str, Reconcile],
         event_store: EventStorePort,
         clock: ClockPort,
+        window_days: int = 21,
     ) -> None:
         self._allow_live = allow_live
         self._live_broker_configured = live_broker_configured
@@ -70,6 +73,7 @@ class AssessLiveReadiness:
         self._reconcilers = reconcilers
         self._event_store = event_store
         self._clock = clock
+        self._window_days = window_days
 
     async def assess(self, sleeve_id: str) -> LiveReadinessReport:
         checks: list[LiveCheck] = [
@@ -88,6 +92,7 @@ class AssessLiveReadiness:
             self._caps_check(),
             self._kill_switch_check(),
             await self._reconciliation_check(sleeve_id),
+            await self._data_provenance_check(),
         ]
         ready = all(c.passed for c in checks)
         await self._record(sleeve_id, ready, checks)
@@ -140,6 +145,26 @@ class AssessLiveReadiness:
             report.clean,
             "no drift vs broker" if report.clean else f"{len(report.drifts)} drift(s) detected",
         )
+
+    async def _data_provenance_check(self) -> LiveCheck:
+        # Anti-placeholder: no SYNTHETIC/placeholder signal may taint the live decision path. An
+        # empty window passes (nothing fake present) — the trade-time guard still blocks any fake
+        # that arrives, and the startup preflight already requires real market data.
+        events = await self._event_store.read_all()
+        window = signals_from_events(events, now=self._clock.now(), window_days=self._window_days)
+        fake = non_real_signals(window)
+        if fake:
+            return LiveCheck(
+                "data_provenance_real",
+                False,
+                f"{len(fake)} SYNTHETIC/placeholder signal(s) in the window — refusing live",
+            )
+        detail = (
+            f"all {len(window)} in-window signal(s) are REAL"
+            if window
+            else "no signals in the window (nothing synthetic present)"
+        )
+        return LiveCheck("data_provenance_real", True, detail)
 
     async def _record(self, sleeve_id: str, ready: bool, checks: list[LiveCheck]) -> None:
         await self._event_store.append(

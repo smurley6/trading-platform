@@ -1,5 +1,6 @@
 """Composition root: the only place where concrete adapters are wired to ports."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from decimal import Decimal
@@ -7,7 +8,9 @@ from functools import partial
 
 import httpx
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from trading.application.apply_trade_update import ApplyTradeUpdate
 from trading.application.backtest import Backtest, BacktestRequest, BacktestResult
 from trading.application.cancel_order import CancelOrder
 from trading.application.evaluate_signals import EvaluateSignals
@@ -20,7 +23,9 @@ from trading.application.ports.data_source import DataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
+from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.read_model import ReadModelPort
+from trading.application.ports.trade_updates import TradeUpdatesStreamPort
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
@@ -31,8 +36,10 @@ from trading.domain.sectors import Sector
 from trading.domain.sleeves import Sleeve, SleeveStatus
 from trading.infrastructure.backtest_env import InMemoryBacktestEnvFactory
 from trading.infrastructure.brokers.alpaca import AlpacaBroker
+from trading.infrastructure.brokers.disabled_trade_updates import DisabledTradeUpdatesStream
 from trading.infrastructure.brokers.paper import PaperBroker
 from trading.infrastructure.brokers.routing import ModeRoutingBroker
+from trading.infrastructure.brokers.trade_updates_stream import AlpacaTradeUpdatesStream
 from trading.infrastructure.clock import SystemClock
 from trading.infrastructure.data_sources.congress_trades import CongressTradesSource
 from trading.infrastructure.data_sources.news import NewsSource
@@ -46,10 +53,17 @@ from trading.infrastructure.market_data.historical import SyntheticHistoricalPri
 from trading.infrastructure.market_data.static import StaticMarketData
 from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
 from trading.infrastructure.nlp.sentiment import LexiconSentiment
+from trading.infrastructure.observability.counting_event_store import CountingEventStore
+from trading.infrastructure.observability.metrics import MetricsRegistry
 from trading.infrastructure.persistence.broadcasting import BroadcastingEventStore
+from trading.infrastructure.persistence.health import DatabaseReadiness
 from trading.infrastructure.persistence.memory import InMemoryEventStore
 from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
 from trading.infrastructure.persistence.projecting import ProjectingEventStore
+from trading.infrastructure.politicians.congress_legislators import (
+    CongressLegislatorsRepository,
+    fetch_and_parse_roster,
+)
 from trading.infrastructure.politicians.repository import StaticPoliticianRepository
 from trading.infrastructure.reference import COMPANY_DIRECTORY
 from trading.infrastructure.reference.sectors import StaticSectorMap
@@ -81,20 +95,24 @@ _DEV_PRICES = {
 def build_dependencies(settings: Settings) -> AppDeps:
     clock = SystemClock()
 
+    # Observability registry: backs /metrics and is bumped on each append (events/orders).
+    metrics = MetricsRegistry()
+
     # Event store (system of record) + read model (CQRS read side). The read model is kept
     # current on every append so hot reads query maintained projections, not a full-log replay.
     inner_store: EventStorePort
     read_model: ReadModelPort
+    db_engine: AsyncEngine | None = None
     if settings.database_url:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from trading.infrastructure.persistence.postgres import PostgresEventStore
         from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
 
-        engine = create_async_engine(settings.database_url)
-        pg_read_model = PostgresReadModel(engine)
+        db_engine = create_async_engine(settings.database_url)
+        pg_read_model = PostgresReadModel(db_engine)
         # Read-model rows are written in the append transaction, atomically with the event.
-        inner_store = PostgresEventStore(engine, on_append=pg_read_model.apply)
+        inner_store = PostgresEventStore(db_engine, on_append=pg_read_model.apply)
         read_model = pg_read_model
     else:
         # Default path stays fully in-memory: a projecting wrapper folds each appended event
@@ -102,9 +120,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
         memory_read_model = InMemoryReadModel()
         inner_store = ProjectingEventStore(InMemoryEventStore(clock), memory_read_model)
         read_model = memory_read_model
-    # Wrap the store so appended events fan out to live WebSocket subscribers (FR-API-1).
+    # /readyz probes DB connectivity when a database is configured; trivially ready otherwise.
+    db_readiness = DatabaseReadiness(db_engine)
+    # Wrap the store so appended events fan out to live WebSocket subscribers (FR-API-1)...
     event_bus = BroadcastingEventStore(inner_store)
-    event_store: EventStorePort = event_bus
+    # ...then count appends for observability (events_appended_total / orders_placed_total).
+    event_store: EventStorePort = CountingEventStore(event_bus, metrics)
 
     # Decision/fill price seam: static dev prices by default, swapped to the live feed below
     # when it is enabled so the strategy decides and the paper broker fills at real prices.
@@ -125,6 +146,11 @@ def build_dependencies(settings: Settings) -> AppDeps:
     strategy_config = StrategyConfig(
         thresholds=thresholds,
         window_days=settings.corroboration_window_days,
+        decay_half_life_days=settings.conviction_decay_half_life_days,
+        corroboration_bonus_per_source=settings.conviction_corroboration_bonus_per_source,
+        min_sources_for_full_corroboration=settings.conviction_min_sources_for_full_corroboration,
+        max_corroboration_factor=settings.conviction_max_corroboration_factor,
+        conviction_scale=settings.conviction_scale,
     )
 
     political_strategy = strategy_registry.create("political_signal", strategy_config)
@@ -234,6 +260,25 @@ def build_dependencies(settings: Settings) -> AppDeps:
         ]
     )
 
+    # --- Anti-placeholder data-integrity gate (no fake/placeholder data in real trades) -------
+    # Engages automatically whenever a REAL Alpaca account is wired (paper or live), or on an
+    # explicit REQUIRE_REAL_DATA opt-in. When on: synthetic signals are dropped at ingestion,
+    # a real-broker evaluation aborts on any non-REAL signal, and — here — startup is refused if a
+    # real broker would trade/mark against synthetic prices. Default off keeps dev/tests unchanged.
+    require_real_data = (
+        settings.require_real_data or settings.enable_alpaca_paper or settings.allow_live
+    )
+    real_market_data = bool(
+        settings.enable_live_quotes and settings.data_key_id() and settings.data_secret_key()
+    )
+    if require_real_data and not real_market_data:
+        raise RuntimeError(
+            "Data integrity: a real broker is wired (or REQUIRE_REAL_DATA is set) but live market "
+            "data is unavailable (need ENABLE_LIVE_QUOTES=true with resolvable Alpaca data "
+            "credentials). A real account must never trade or mark against synthetic prices — "
+            "enable the live feed, or disable the real broker / REQUIRE_REAL_DATA."
+        )
+
     evaluators: dict[str, EvaluateSignals] = {}
     reconcilers_by_id: dict[str, Reconcile] = {}
     order_syncs_by_id: dict[str, SyncOrders] = {}  # per-sleeve: ingest async broker fills
@@ -266,6 +311,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
             market_data=market_data,
             event_store=event_store,
             clock=clock,
+            require_real_data=require_real_data,
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
@@ -279,6 +325,37 @@ def build_dependencies(settings: Settings) -> AppDeps:
             political_evaluator = evaluator
     reconcilers = list(reconcilers_by_id.values())
     order_syncs = list(order_syncs_by_id.values())
+
+    # Real-time trade-updates stream (FR-REC/FR-EXE): the push complement to the 30s polling
+    # order-sync. OFF by construction — built only when the stream is enabled AND the Alpaca
+    # PAPER venue is actually wired for its sleeve AND paper creds resolve; otherwise the
+    # disabled stream opens no socket. Constructing AlpacaTradeUpdatesStream dials NOTHING; its
+    # run() task is started on app startup. It records the SAME ORDER_FILLED/STATUS_CHANGED
+    # events the poller emits, idempotently, for the paper sleeve.
+    trade_updates_stream: TradeUpdatesStreamPort = DisabledTradeUpdatesStream()
+    if (
+        settings.enable_trade_updates_stream
+        and alpaca_paper_broker is not None
+        and paper_key_id
+        and paper_secret_key
+    ):
+        paper_sleeve_id = settings.alpaca_paper_sleeve_id
+        apply_update = ApplyTradeUpdate(
+            event_store=event_store, clock=clock, sleeve_id=paper_sleeve_id
+        )
+        updates_stream = AlpacaTradeUpdatesStream(
+            key_id=paper_key_id,
+            secret_key=paper_secret_key,
+            url=settings.trade_updates_stream_url(),
+            sleeve_id=paper_sleeve_id,
+        )
+        trade_updates_stream = updates_stream
+
+        async def _run_trade_updates() -> None:
+            await updates_stream.run(apply_update)
+
+        background_tasks.append(_run_trade_updates)
+
     cancel_order = CancelOrder(
         brokers=brokers_by_id,
         event_store=event_store,
@@ -300,6 +377,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         reconcilers=reconcilers_by_id,
         event_store=event_store,
         clock=clock,
+        window_days=settings.corroboration_window_days,
     )
     request_live = RequestLiveTrading(
         registry=registry,
@@ -318,6 +396,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
                 event_store=event_store,
                 clock=clock,
                 lookback_start=lookback_start,
+                require_real_data=require_real_data,
             ),
             evaluate=political_evaluator,
             event_store=event_store,
@@ -364,6 +443,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         conviction_window_days=settings.corroboration_window_days,
         quote_feed=quote_feed,
         quote_stream=quote_stream,
+        trade_updates_stream=trade_updates_stream,
         background_tasks=background_tasks,
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
@@ -375,10 +455,25 @@ def build_dependencies(settings: Settings) -> AppDeps:
         reconcile_interval_seconds=settings.reconcile_interval_seconds,
         ingest_interval_seconds=settings.ingest_interval_seconds,
         order_sync_interval_seconds=settings.order_sync_interval_seconds,
+        metrics=metrics,
+        enable_metrics=settings.enable_metrics,
+        db_readiness=db_readiness,
+        api_key=settings.api_key,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)
     return deps
+
+
+async def _load_congress_roster(settings: Settings) -> CongressLegislatorsRepository:
+    """Fetch + parse the REAL congressional roster once at startup (FR-POL-3, anti-placeholder).
+
+    Uses a short-lived client so the fetch is self-contained. The parser stamps every member
+    Provenance.REAL, so the news/disclosed-trade signals they back can clear the data-integrity
+    guard. Only invoked when ``enable_congress_roster`` is set and a politician-using source is on.
+    """
+    async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
+        return CongressLegislatorsRepository(await fetch_and_parse_roster(client))
 
 
 def _build_sources(
@@ -397,7 +492,14 @@ def _build_sources(
     client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
     entity_resolver = GazetteerEntityResolver()
     sentiment = LexiconSentiment()
-    politicians = StaticPoliticianRepository()
+    politicians: PoliticianRepositoryPort
+    if settings.enable_congress_roster and (news_enabled or trades_enabled):
+        # Opt-in REAL roster (fetched once at startup; sync composition -> asyncio.run). With it,
+        # news/disclosed-trade signals attach to REAL members and can pass the guard; without it,
+        # the synthetic seed roster yields SYNTHETIC, guard-blocked signals.
+        politicians = asyncio.run(_load_congress_roster(settings))
+    else:
+        politicians = StaticPoliticianRepository()
     sector_map = StaticSectorMap()
 
     sources: list[DataSourcePort] = []

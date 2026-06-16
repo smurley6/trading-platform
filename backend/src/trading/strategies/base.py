@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from trading.domain.conviction import ConvictionThresholds
+from trading.domain.conviction import ConvictionParams, ConvictionThresholds
 from trading.domain.decisions import TargetPosition
 from trading.domain.positions import Portfolio
 from trading.domain.signals import Signal
@@ -24,10 +24,30 @@ class StrategyConfig:
     Keeps the strategies layer free of `trading.config`: the composition root translates the
     global `Settings` into this small, explicit object so factories depend only on inward
     (domain) types.
+
+    The conviction tunables (decay, corroboration shape) default to values that reproduce
+    the original M1 scoring behaviour, so existing wiring and tests are unaffected until the
+    owner deliberately tunes them. `conviction_params()` assembles them into a single
+    `ConvictionParams` for the conviction engine.
     """
 
     thresholds: ConvictionThresholds = field(default_factory=ConvictionThresholds)
     window_days: int = 21
+    decay_half_life_days: float = 0.0
+    corroboration_bonus_per_source: float = 0.25
+    min_sources_for_full_corroboration: int = 1
+    max_corroboration_factor: float | None = None
+    conviction_scale: float = 25.0
+
+    def conviction_params(self) -> ConvictionParams:
+        """Bundle the conviction tunables into a `ConvictionParams` value object."""
+        return ConvictionParams(
+            scale=self.conviction_scale,
+            corroboration_bonus_per_source=self.corroboration_bonus_per_source,
+            decay_half_life_days=self.decay_half_life_days,
+            min_sources_for_full_corroboration=self.min_sources_for_full_corroboration,
+            max_corroboration_factor=self.max_corroboration_factor,
+        )
 
 
 @dataclass(frozen=True, slots=True)

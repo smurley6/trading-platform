@@ -11,6 +11,7 @@ from typing import Any
 from trading.domain.events import EventType, StoredEvent
 from trading.domain.orders import Fill, OrderSide
 from trading.domain.positions import HeldPosition, Portfolio
+from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
 
 
@@ -25,6 +26,9 @@ def _signal_from_payload(payload: dict[str, Any]) -> Signal:
         politician_weight=float(payload["politician_weight"]),
         source_reliability=float(payload["source_reliability"]),
         raw_payload=dict(payload.get("raw_payload", {})),
+        # Legacy events (recorded before provenance existed) default to SYNTHETIC — fail-closed,
+        # so old data can never be mistaken for real and slip past the trade-time guard.
+        provenance=Provenance(str(payload.get("provenance", Provenance.SYNTHETIC.value))),
     )
 
 

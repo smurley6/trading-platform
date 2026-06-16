@@ -1,10 +1,11 @@
 // Algorithms screen — algorithm selector (cards) + per-algorithm detail: a header with name /
 // mode / status / capital and a performance stats row, a prominent equity curve, then supporting
-// panels (conviction breakdown, signal attribution, trades, market context) and the backtest
-// panel. All analytics are derived client-side from the event log + conviction (see analytics.ts).
+// panels (conviction breakdown, signal attribution, trades, market context). All analytics are
+// derived client-side from the event log + conviction (see analytics.ts). The dedicated Backtest
+// screen (features/backtest) runs and renders historical backtests.
 
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Button, Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
+import { Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
 import { useMemo, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
@@ -12,8 +13,8 @@ import { SymbolChart } from "../../components/SymbolChart";
 import { api } from "../../lib/api";
 import { formatMoney, formatNumber, formatTime } from "../../lib/format";
 import { blotterRows, equitySeries } from "../../lib/projections";
-import type { BlotterRow, EquityPoint } from "../../lib/projections";
-import type { BacktestResult, BacktestTrade, Sleeve } from "../../lib/types";
+import type { BlotterRow } from "../../lib/projections";
+import type { Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 import {
   algoStats,
@@ -200,8 +201,6 @@ export function Algorithms({ refreshKey, sleeves }: AlgorithmsProps) {
               height={280}
             />
           </Card>
-
-          <BacktestPanel />
         </>
       )}
     </StackLayout>
@@ -437,91 +436,3 @@ const tradeColumns: ColDef<BlotterRow>[] = [
   { headerName: "Qty", field: "quantity" },
   { headerName: "Status", field: "status" },
 ];
-
-// --- backtest panel (M4) -----------------------------------------------------------------
-
-const backtestTradeColumns: ColDef<BacktestTrade>[] = [
-  { headerName: "Symbol", field: "symbol" },
-  { headerName: "Side", field: "side" },
-  { headerName: "Qty", field: "quantity" },
-  { headerName: "Price", field: "price", valueFormatter: (p) => formatMoney(p.value as number) },
-];
-
-function BacktestPanel() {
-  const [result, setResult] = useState<BacktestResult | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function run(): Promise<void> {
-    setBusy(true);
-    setError(null);
-    try {
-      setResult(await api.backtest());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Backtest snapshots can share a timestamp; lightweight-charts needs strictly increasing.
-  const curve: EquityPoint[] = [];
-  let last = 0;
-  for (const point of result?.equity_curve ?? []) {
-    const time = point.time <= last ? last + 1 : point.time;
-    last = time;
-    curve.push({ time, value: point.equity });
-  }
-
-  return (
-    <Card>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <H3 style={{ margin: 0 }}>Backtest</H3>
-        <Button disabled={busy} onClick={() => void run()}>
-          {busy ? "Running…" : "Run backtest"}
-        </Button>
-      </div>
-      <Text color="secondary" styleAs="label">
-        Replays recorded signals through the political-signal strategy and the same risk + execution
-        path used live. Prices are illustrative until a historical market-data adapter is added.
-      </Text>
-      {error && <Text color="error">{error}</Text>}
-      {result && (
-        <>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-              gap: 16,
-              margin: "16px 0",
-            }}
-          >
-            <Stat
-              label="Return"
-              value={`${formatNumber(result.total_return_pct, 2)}%`}
-              tone={signTone(result.total_return_pct)}
-            />
-            <Stat
-              label="Max drawdown"
-              value={`${formatNumber(result.max_drawdown_pct, 2)}%`}
-              tone={result.max_drawdown_pct > 0 ? "danger" : "muted"}
-            />
-            <Stat label="Start equity" value={formatMoney(result.starting_equity)} />
-            <Stat label="End equity" value={formatMoney(result.ending_equity)} />
-            <Stat label="Decisions" value={formatNumber(result.decision_count, 0)} />
-          </div>
-          {curve.length > 0 && <EquityCurve data={curve} />}
-          <div style={{ marginTop: 12 }}>
-            <Text styleAs="label">Trades ({result.trades.length})</Text>
-            <DataGrid<BacktestTrade>
-              rows={result.trades}
-              columns={backtestTradeColumns}
-              getRowId={(r) => `${r.symbol}-${r.filled_at}-${r.side}`}
-              height={220}
-            />
-          </div>
-        </>
-      )}
-    </Card>
-  );
-}

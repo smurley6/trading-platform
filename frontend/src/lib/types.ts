@@ -103,27 +103,56 @@ export interface SleeveModeResult {
   readiness: LiveReadiness | null;
 }
 
+// Backtest result (POST /backtest). Numeric fields may arrive as JSON strings from the backend's
+// Decimal serialization, so every consumer coerces with Number(...) (see the Markets watchlist).
+//
+// The curve points support BOTH shapes so the type survives a backend contract change:
+//   - the legacy shape: { time: <unix seconds>, equity }
+//   - the new shape:     { t: <ISO timestamp>, equity }
+// `backtestCurve()` (lib/projections) normalizes either form into EquityPoint[] for EquityCurve.
+export type Numeric = number | string;
+
 export interface BacktestPoint {
-  time: number; // unix seconds
-  equity: number;
+  /** New shape: ISO-8601 timestamp. */
+  t?: string;
+  /** Legacy shape: unix seconds. */
+  time?: number;
+  equity: Numeric;
 }
 
 export interface BacktestTrade {
   symbol: string;
   side: string;
-  price: number;
-  quantity: number;
+  price: Numeric;
+  quantity: Numeric;
   filled_at: string;
 }
 
 export interface BacktestResult {
-  starting_equity: number;
-  ending_equity: number;
-  total_return_pct: number;
-  max_drawdown_pct: number;
+  starting_equity: Numeric;
+  ending_equity: Numeric;
+  total_return_pct: Numeric;
+  max_drawdown_pct: Numeric;
+  sharpe: Numeric | null;
+  sortino: Numeric | null;
+  annualized_return_pct: Numeric | null;
+  volatility: Numeric | null;
+  win_rate: Numeric | null;
+  profit_factor: Numeric | null;
+  avg_win: Numeric | null;
+  avg_loss: Numeric | null;
+  num_trades: number;
   decision_count: number;
+  benchmark_total_return_pct: Numeric | null;
   equity_curve: BacktestPoint[];
+  /** Optional benchmark equity series, plotted alongside the strategy curve. */
+  benchmark_curve?: BacktestPoint[];
   trades: BacktestTrade[];
+}
+
+export interface OrderCancelResult {
+  client_order_id: string;
+  status: string;
 }
 
 export interface SignalInput {

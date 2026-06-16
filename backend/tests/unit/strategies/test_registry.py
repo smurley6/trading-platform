@@ -7,7 +7,7 @@ no direct construction in the composition root.
 
 import pytest
 
-from trading.domain.conviction import ConvictionThresholds
+from trading.domain.conviction import ConvictionParams, ConvictionThresholds
 from trading.strategies import StrategyConfig, registry
 from trading.strategies.political_signal import PoliticalSignalStrategy
 from trading.strategies.trivial import TrivialStrategy
@@ -34,6 +34,35 @@ def test_create_political_applies_config() -> None:
     assert strategy.strategy_id == "political_signal"
     assert strategy.thresholds == config.thresholds
     assert strategy.window_days == config.window_days
+
+
+def test_config_default_conviction_params_match_m1() -> None:
+    params = StrategyConfig().conviction_params()
+    assert params == ConvictionParams()
+
+
+def test_config_threads_conviction_tunables() -> None:
+    config = StrategyConfig(
+        decay_half_life_days=10.0,
+        corroboration_bonus_per_source=0.3,
+        min_sources_for_full_corroboration=2,
+        max_corroboration_factor=1.4,
+        conviction_scale=30.0,
+    )
+    params = config.conviction_params()
+    assert params.decay_half_life_days == 10.0
+    assert params.corroboration_bonus_per_source == 0.3
+    assert params.min_sources_for_full_corroboration == 2
+    assert params.max_corroboration_factor == 1.4
+    assert params.scale == 30.0
+
+
+def test_create_political_applies_conviction_params() -> None:
+    config = StrategyConfig(decay_half_life_days=5.0)
+    strategy = registry.create("political_signal", config)
+    assert isinstance(strategy, PoliticalSignalStrategy)
+    assert strategy.conviction_params == config.conviction_params()
+    assert strategy.conviction_params.decay_half_life_days == 5.0
 
 
 def test_create_unknown_strategy_raises() -> None:

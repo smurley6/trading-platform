@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { blotterRows, equitySeries, latestSnapshots, positionRows, riskRows } from "./projections";
-import type { StoredEventDto } from "./types";
+import {
+  backtestCurve,
+  blotterRows,
+  equitySeries,
+  latestSnapshots,
+  positionRows,
+  riskRows,
+} from "./projections";
+import type { BacktestPoint, StoredEventDto } from "./types";
 
 let seq = 0;
 function evt(
@@ -129,5 +136,45 @@ describe("equitySeries", () => {
     const series = equitySeries(events, "a");
     expect(series.map((p) => p.value)).toEqual([1000, 1100]);
     expect(series[1]!.time).toBe(series[0]!.time + 1);
+  });
+});
+
+describe("backtestCurve", () => {
+  it("returns [] for undefined or empty input", () => {
+    expect(backtestCurve(undefined)).toEqual([]);
+    expect(backtestCurve([])).toEqual([]);
+  });
+
+  it("normalizes the new { t: ISO, equity } shape and coerces string equities", () => {
+    const points: BacktestPoint[] = [
+      { t: "2026-01-01T00:00:00Z", equity: "1000" },
+      { t: "2026-01-02T00:00:00Z", equity: 1100 },
+    ];
+    const curve = backtestCurve(points);
+    expect(curve.map((p) => p.value)).toEqual([1000, 1100]);
+    expect(curve[0]!.time).toBe(Math.floor(Date.parse("2026-01-01T00:00:00Z") / 1000));
+  });
+
+  it("supports the legacy { time, equity } shape", () => {
+    const curve = backtestCurve([{ time: 10, equity: 5 }]);
+    expect(curve).toEqual([{ time: 10, value: 5 }]);
+  });
+
+  it("forces strictly increasing timestamps for shared/duplicate times", () => {
+    const curve = backtestCurve([
+      { time: 100, equity: 1 },
+      { time: 100, equity: 2 },
+      { time: 100, equity: 3 },
+    ]);
+    expect(curve.map((p) => p.time)).toEqual([100, 101, 102]);
+  });
+
+  it("skips points with unparseable time or equity", () => {
+    const curve = backtestCurve([
+      { t: "not-a-date", equity: 5 },
+      { t: "2026-01-01T00:00:00Z", equity: "nope" },
+      { t: "2026-01-01T00:00:00Z", equity: 7 },
+    ]);
+    expect(curve.map((p) => p.value)).toEqual([7]);
   });
 });
