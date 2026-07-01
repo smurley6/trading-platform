@@ -394,15 +394,15 @@ function DecisionRow({ decision }: { decision: DecisionAttribution }) {
             No contributing signals recorded.
           </span>
         ) : (
-          decision.signals.map((sig) =>
+          decision.signals.map((sig, i) =>
             sig.resolved ? (
-              <Badge key={sig.signal_id} tone="muted" title={`signal ${sig.signal_id}`}>
+              <Badge key={`${sig.signal_id}-${i}`} tone="muted" title={`signal ${sig.signal_id}`}>
                 {sig.source_type} · {sig.ticker} ·{" "}
                 <Figure pnl={sig.sentiment}>{formatNumber(sig.sentiment, 2)}</Figure>
               </Badge>
             ) : (
               <Badge
-                key={sig.signal_id}
+                key={`${sig.signal_id}-${i}`}
                 tone="muted"
                 title={`unresolved signal ${sig.signal_id}`}
                 style={{ opacity: 0.7 }}

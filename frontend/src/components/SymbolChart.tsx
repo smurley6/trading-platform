@@ -49,8 +49,12 @@ export function SymbolChart({
   }, [symbol, allowSymbolChange, withDetails]);
 
   return (
-    <div className="tradingview-widget-container" ref={containerRef} style={{ height }}>
-      <div className="tradingview-widget-container__widget" style={{ height }} />
+    <div
+      className="tradingview-widget-container"
+      ref={containerRef}
+      style={{ height, width: "100%" }}
+    >
+      <div className="tradingview-widget-container__widget" style={{ height, width: "100%" }} />
     </div>
   );
 }

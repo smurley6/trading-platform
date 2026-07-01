@@ -289,12 +289,12 @@ export function Proposals({ refreshKey }: ProposalsProps) {
                   gap: space.sm,
                 }}
               >
-                {selectedProposal.contributing_signal_ids.map((id) => {
+                {selectedProposal.contributing_signal_ids.map((id, i) => {
                   const sig = signalsById.get(id);
                   if (!sig) {
                     return (
                       <div
-                        key={id}
+                        key={`${id}-${i}`}
                         style={{
                           padding: `${space.sm}px ${space.md}px`,
                           borderRadius: radius.md,
@@ -311,7 +311,7 @@ export function Proposals({ refreshKey }: ProposalsProps) {
                   }
                   return (
                     <button
-                      key={id}
+                      key={`${id}-${i}`}
                       type="button"
                       onClick={() => setExpandedSignal(sig)}
                       style={{
