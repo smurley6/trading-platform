@@ -5,15 +5,25 @@
 // screen (features/backtest) runs and renders historical backtests.
 
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
+import { StackLayout } from "@salt-ds/core";
 import { useMemo, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
 import { SymbolChart } from "../../components/SymbolChart";
+import {
+  Badge,
+  EmptyState,
+  Figure,
+  LoadingState,
+  MetricTile,
+  Panel,
+  SectionHeader,
+} from "../../components/ui";
 import { api } from "../../lib/api";
 import { formatMoney, formatNumber, formatTime } from "../../lib/format";
 import { blotterRows, equitySeries } from "../../lib/projections";
 import type { BlotterRow } from "../../lib/projections";
+import { color, eyebrowStyle, numeric, radius, space, text, transitions } from "../../lib/tokens";
 import type { Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 import {
@@ -29,6 +39,9 @@ interface AlgorithmsProps {
   refreshKey: number;
   sleeves: Sleeve[];
 }
+
+type MetricTone = "neutral" | "ok" | "danger" | "accent" | "warn";
+type BadgeTone = "accent" | "ok" | "danger" | "warn" | "muted";
 
 export function Algorithms({ refreshKey, sleeves }: AlgorithmsProps) {
   const events = useLoader(() => api.events(1000), [refreshKey]);
@@ -65,100 +78,104 @@ export function Algorithms({ refreshKey, sleeves }: AlgorithmsProps) {
 
   return (
     <StackLayout gap={2}>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
-          gap: 12,
-        }}
-      >
-        {sleeves.map((s) => (
-          <AlgorithmCard
-            key={s.id}
-            sleeve={s}
-            stats={cardStats.get(s.id)}
-            active={s.id === selected?.id}
-            onSelect={() => setSelectedId(s.id)}
-          />
-        ))}
-      </div>
+      <Panel>
+        <SectionHeader
+          eyebrow="Strategy sleeves"
+          title="Algorithms"
+          caption="Select a sleeve to inspect its performance, conviction, and signal attribution."
+        />
+        {sleeves.length === 0 ? (
+          <EmptyState message="No algorithm sleeves are configured yet." />
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+              gap: space.md,
+            }}
+          >
+            {sleeves.map((s) => (
+              <AlgorithmCard
+                key={s.id}
+                sleeve={s}
+                stats={cardStats.get(s.id)}
+                active={s.id === selected?.id}
+                onSelect={() => setSelectedId(s.id)}
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      {events.loading && !selected && <LoadingState label="Loading algorithm activity…" />}
 
       {selected && stats && (
         <>
-          <Card>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "baseline",
-                flexWrap: "wrap",
-                gap: 8,
-              }}
-            >
-              <div>
-                <H2 style={{ margin: 0 }}>{selected.strategy_id}</H2>
-                <Text color="secondary">
-                  Sleeve {selected.id} · {formatMoney(selected.allocated_capital)} allocated
-                </Text>
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <Pill
-                  text={selected.mode.toUpperCase()}
-                  tone={selected.mode === "live" ? "danger" : "info"}
-                />
-                <Pill
-                  text={selected.status}
-                  tone={selected.status === "running" ? "success" : "muted"}
-                />
-              </div>
-            </div>
+          <Panel>
+            <SectionHeader
+              eyebrow={`Sleeve ${selected.id} · ${formatMoney(selected.allocated_capital)} allocated`}
+              title={selected.strategy_id}
+              actions={
+                <>
+                  <Badge tone={selected.mode === "live" ? "danger" : "accent"} dot>
+                    {selected.mode.toUpperCase()}
+                  </Badge>
+                  <Badge tone={selected.status === "running" ? "ok" : "muted"} dot>
+                    {selected.status.toUpperCase()}
+                  </Badge>
+                </>
+              }
+            />
 
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-                gap: 16,
-                margin: "16px 0",
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+                gap: space.lg,
+                marginBottom: space.xl,
               }}
             >
-              <Stat
+              <MetricTile
                 label="Total return"
                 value={`${formatNumber(stats.totalReturnPct, 2)}%`}
-                tone={signTone(stats.totalReturnPct)}
+                tone={signMetricTone(stats.totalReturnPct)}
               />
-              <Stat
+              <MetricTile
                 label="Max drawdown"
                 value={`${formatNumber(stats.maxDrawdownPct, 2)}%`}
-                tone={stats.maxDrawdownPct > 0 ? "danger" : "muted"}
+                tone={stats.maxDrawdownPct > 0 ? "danger" : "neutral"}
               />
-              <Stat
+              <MetricTile
                 label="Realized P&L"
                 value={formatMoney(stats.realizedPnl)}
-                tone={signTone(stats.realizedPnl)}
+                tone={signMetricTone(stats.realizedPnl)}
               />
-              <Stat
+              <MetricTile
                 label="Win rate"
                 value={stats.winRatePct === null ? "—" : `${formatNumber(stats.winRatePct, 0)}%`}
+                hint={stats.closedTrades > 0 ? `${stats.closedTrades} closed` : undefined}
               />
-              <Stat label="Decisions" value={formatNumber(stats.decisionCount, 0)} />
-              <Stat label="Fills" value={formatNumber(stats.fillCount, 0)} />
+              <MetricTile
+                label="Decisions"
+                value={formatNumber(stats.decisionCount, 0)}
+                tone="accent"
+              />
+              <MetricTile label="Fills" value={formatNumber(stats.fillCount, 0)} />
             </div>
 
             {series.length > 0 ? (
               <EquityCurve data={series} />
             ) : (
-              <Text color="secondary">
-                No equity history yet — submit signals to generate activity.
-              </Text>
+              <EmptyState message="No equity history yet — submit signals to generate activity." />
             )}
-          </Card>
+          </Panel>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <Card>
-              <H3 style={{ marginTop: 0 }}>Conviction by ticker</H3>
-              <Text color="secondary" styleAs="label">
-                Current per-ticker conviction; tickers this algo has acted on are marked.
-              </Text>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: space.lg }}>
+            <Panel>
+              <SectionHeader
+                title="Conviction by ticker"
+                caption="Current per-ticker conviction; tickers this algo has acted on are marked."
+              />
               {convictionRows.length > 0 ? (
                 <DataGrid<ConvictionRow>
                   rows={convictionRows}
@@ -167,40 +184,47 @@ export function Algorithms({ refreshKey, sleeves }: AlgorithmsProps) {
                   height={300}
                 />
               ) : (
-                <Text color="secondary">No conviction within the corroboration window.</Text>
+                <EmptyState message="No conviction within the corroboration window." />
               )}
-            </Card>
-            <Card>
-              <H3 style={{ marginTop: 0 }}>Market context</H3>
+            </Panel>
+            <Panel>
+              <SectionHeader
+                title="Market context"
+                caption={`Live chart for ${trades[0]?.symbol ?? "AAPL"}.`}
+              />
               <SymbolChart symbol={`NASDAQ:${trades[0]?.symbol ?? "AAPL"}`} height={300} />
-            </Card>
+            </Panel>
           </div>
 
-          <Card>
-            <H3 style={{ marginTop: 0 }}>Signal attribution</H3>
-            <Text color="secondary" styleAs="label">
-              Each decision and the recorded signals that drove it (source · ticker · sentiment).
-            </Text>
+          <Panel>
+            <SectionHeader
+              title="Signal attribution"
+              caption="Each decision and the recorded signals that drove it (source · ticker · sentiment)."
+            />
             {attribution.length > 0 ? (
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: space.sm }}>
                 {attribution.slice(0, 25).map((d) => (
                   <DecisionRow key={d.decision_id} decision={d} />
                 ))}
               </div>
             ) : (
-              <Text color="secondary">No decisions recorded for this algorithm yet.</Text>
+              <EmptyState message="No decisions recorded for this algorithm yet." />
             )}
-          </Card>
+          </Panel>
 
-          <Card>
-            <H3 style={{ marginTop: 0 }}>Trades</H3>
-            <DataGrid<BlotterRow>
-              rows={trades}
-              columns={tradeColumns}
-              getRowId={(r) => r.client_order_id}
-              height={280}
-            />
-          </Card>
+          <Panel>
+            <SectionHeader title="Trades" caption={`${trades.length} recorded orders.`} />
+            {trades.length > 0 ? (
+              <DataGrid<BlotterRow>
+                rows={trades}
+                columns={tradeColumns}
+                getRowId={(r) => r.client_order_id}
+                height={280}
+              />
+            ) : (
+              <EmptyState message="No trades recorded for this algorithm yet." />
+            )}
+          </Panel>
         </>
       )}
     </StackLayout>
@@ -224,35 +248,40 @@ function AlgorithmCard({
   return (
     <button
       onClick={onSelect}
+      aria-pressed={active}
       style={{
         cursor: "pointer",
         textAlign: "left",
-        color: "inherit",
-        borderRadius: 10,
-        padding: 16,
-        border: `1px solid ${active ? "#4c9aff" : "rgba(255,255,255,0.12)"}`,
-        background: active ? "rgba(76,154,255,0.14)" : "rgba(255,255,255,0.02)",
+        color: color.text,
+        borderRadius: radius.lg,
+        padding: space.lg,
+        border: `1px solid ${active ? color.accentBorder : color.hairline}`,
+        background: active ? color.accentSoft : color.panelSoft,
+        boxShadow: active ? `inset 0 0 0 1px ${color.accentBorder}` : "none",
+        transition: transitions("background", "border-color", "box-shadow"),
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <strong style={{ fontSize: 15 }}>{sleeve.strategy_id}</strong>
-        <Pill text={sleeve.mode.toUpperCase()} tone={sleeve.mode === "live" ? "danger" : "info"} />
+        <strong style={{ ...text.h3, color: color.text }}>{sleeve.strategy_id}</strong>
+        <Badge tone={sleeve.mode === "live" ? "danger" : "accent"}>
+          {sleeve.mode.toUpperCase()}
+        </Badge>
       </div>
-      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
+      <div style={{ ...text.caption, color: color.muted, marginTop: space.xxs }}>
         {sleeve.id} · {sleeve.status}
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: space.md }}>
         <div>
-          <div style={{ fontSize: 11, color: "#94a3b8" }}>Capital</div>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>
+          <div style={eyebrowStyle()}>Capital</div>
+          <Figure color={color.text} style={{ ...text.h3, marginTop: 2, display: "block" }}>
             {formatMoney(sleeve.allocated_capital)}
-          </div>
+          </Figure>
         </div>
         <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 11, color: "#94a3b8" }}>Return</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: toneColor(signTone(ret)) }}>
+          <div style={eyebrowStyle()}>Return</div>
+          <Figure pnl={ret} style={{ ...text.h3, marginTop: 2, display: "block" }}>
             {formatNumber(ret, 2)}%
-          </div>
+          </Figure>
         </div>
       </div>
     </button>
@@ -266,13 +295,13 @@ function ConvictionBarCell(params: ICellRendererParams<ConvictionRow, number>) {
   if (!row) return null;
   const pct = Math.round(row.scorePct * 100);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, height: "100%" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: space.sm, height: "100%" }}>
       <div
         style={{
           flex: 1,
           height: 8,
-          borderRadius: 4,
-          background: "rgba(255,255,255,0.08)",
+          borderRadius: radius.xs,
+          background: color.panelInset,
           overflow: "hidden",
         }}
       >
@@ -280,11 +309,19 @@ function ConvictionBarCell(params: ICellRendererParams<ConvictionRow, number>) {
           style={{
             width: `${pct}%`,
             height: "100%",
-            background: row.traded ? "#4c9aff" : "rgba(148,163,184,0.6)",
+            borderRadius: radius.xs,
+            background: row.traded ? color.accent : color.faint,
           }}
         />
       </div>
-      <span style={{ fontVariantNumeric: "tabular-nums", minWidth: 44, textAlign: "right" }}>
+      <span
+        style={{
+          ...numeric(),
+          minWidth: 44,
+          textAlign: "right",
+          color: row.traded ? color.text : color.textDim,
+        }}
+      >
         {formatNumber(row.score, 1)}
       </span>
     </div>
@@ -313,62 +350,67 @@ const convictionColumns: ColDef<ConvictionRow>[] = [
 
 function DecisionRow({ decision }: { decision: DecisionAttribution }) {
   const score = decision.convictionScore;
+  const sideTone: BadgeTone = decision.side === "sell" ? "danger" : "ok";
   return (
     <div
       style={{
-        border: "1px solid rgba(255,255,255,0.1)",
-        borderRadius: 8,
-        padding: "10px 12px",
-        background: "rgba(255,255,255,0.02)",
+        border: `1px solid ${color.hairline}`,
+        borderRadius: radius.md,
+        padding: `${space.md}px ${space.md}px`,
+        background: color.panelSoft,
       }}
     >
       <div
-        style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
+          gap: space.sm,
+        }}
       >
-        <div>
-          <strong style={{ fontSize: 14 }}>
-            {decision.side.toUpperCase()} {formatNumber(decision.quantity, 0)} {decision.symbol}
-          </strong>{" "}
-          <span style={{ fontSize: 12, color: "#94a3b8" }}>{formatTime(decision.occurred_at)}</span>
+        <div style={{ display: "flex", alignItems: "baseline", gap: space.sm, flexWrap: "wrap" }}>
+          <Badge tone={sideTone}>{decision.side.toUpperCase()}</Badge>
+          <span style={{ ...text.label, color: color.text }}>
+            <Figure color={color.text}>{formatNumber(decision.quantity, 0)}</Figure>{" "}
+            {decision.symbol}
+          </span>
+          <span style={{ ...text.caption, color: color.muted }}>
+            {formatTime(decision.occurred_at)}
+          </span>
         </div>
-        <span style={{ fontSize: 12, color: "#94a3b8" }}>
-          conviction {score === null ? "—" : formatNumber(score, 1)}
+        <span style={{ ...text.caption, color: color.muted }}>
+          conviction{" "}
+          <Figure color={color.textDim}>{score === null ? "—" : formatNumber(score, 1)}</Figure>
         </span>
       </div>
       {decision.rationale && (
-        <div style={{ fontSize: 12, color: "#a3a8b4", marginTop: 4 }}>{decision.rationale}</div>
+        <div style={{ ...text.caption, color: color.textDim, marginTop: space.xs }}>
+          {decision.rationale}
+        </div>
       )}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: space.xs, marginTop: space.sm }}>
         {decision.signals.length === 0 ? (
-          <span style={{ fontSize: 12, color: "#6b7280" }}>No contributing signals recorded.</span>
+          <span style={{ ...text.caption, color: color.faint }}>
+            No contributing signals recorded.
+          </span>
         ) : (
-          decision.signals.map((sig) => (
-            <span
-              key={sig.signal_id}
-              title={
-                sig.resolved ? `signal ${sig.signal_id}` : `unresolved signal ${sig.signal_id}`
-              }
-              style={{
-                fontSize: 11,
-                padding: "2px 8px",
-                borderRadius: 10,
-                border: "1px solid rgba(255,255,255,0.15)",
-                background: sig.resolved ? "rgba(76,154,255,0.12)" : "rgba(148,163,184,0.1)",
-                color: sig.resolved ? "#cbd5e1" : "#94a3b8",
-              }}
-            >
-              {sig.resolved ? (
-                <>
-                  {sig.source_type} · {sig.ticker} ·{" "}
-                  <span style={{ color: toneColor(signTone(sig.sentiment)) }}>
-                    {formatNumber(sig.sentiment, 2)}
-                  </span>
-                </>
-              ) : (
-                "unresolved signal"
-              )}
-            </span>
-          ))
+          decision.signals.map((sig, i) =>
+            sig.resolved ? (
+              <Badge key={`${sig.signal_id}-${i}`} tone="muted" title={`signal ${sig.signal_id}`}>
+                {sig.source_type} · {sig.ticker} ·{" "}
+                <Figure pnl={sig.sentiment}>{formatNumber(sig.sentiment, 2)}</Figure>
+              </Badge>
+            ) : (
+              <Badge
+                key={`${sig.signal_id}-${i}`}
+                tone="muted"
+                title={`unresolved signal ${sig.signal_id}`}
+                style={{ opacity: 0.7 }}
+              >
+                unresolved signal
+              </Badge>
+            ),
+          )
         )}
       </div>
     </div>
@@ -377,62 +419,31 @@ function DecisionRow({ decision }: { decision: DecisionAttribution }) {
 
 // --- shared presentational bits ----------------------------------------------------------
 
-type Tone = "success" | "danger" | "info" | "muted";
-
-function toneColor(tone: Tone): string {
-  switch (tone) {
-    case "success":
-      return "#4ade80";
-    case "danger":
-      return "#f87171";
-    case "info":
-      return "#7cb3ff";
-    case "muted":
-      return "#94a3b8";
-  }
-}
-
-function signTone(value: number): Tone {
-  if (value > 0) return "success";
+function signMetricTone(value: number): MetricTone {
+  if (value > 0) return "ok";
   if (value < 0) return "danger";
-  return "muted";
+  return "neutral";
 }
 
-function Pill({ text, tone }: { text: string; tone: Tone }) {
-  const color = toneColor(tone);
+function StatusCell(params: ICellRendererParams<BlotterRow, string>) {
+  const value = params.value ?? "";
+  const tone: BadgeTone =
+    value === "filled" ? "ok" : value === "rejected" || value === "cancelled" ? "danger" : "muted";
+  return <Badge tone={tone}>{value.toUpperCase()}</Badge>;
+}
+
+function SideCell(params: ICellRendererParams<BlotterRow, string>) {
+  const value = params.value ?? "";
   return (
-    <span
-      style={{
-        padding: "2px 10px",
-        borderRadius: 10,
-        fontSize: 11,
-        fontWeight: 700,
-        color,
-        border: `1px solid ${color}`,
-        background: `${color}22`,
-      }}
-    >
-      {text}
+    <span style={{ color: value === "sell" ? color.dangerText : color.ok, fontWeight: 600 }}>
+      {value.toUpperCase()}
     </span>
-  );
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: Tone }) {
-  return (
-    <div>
-      <Text color="secondary" styleAs="label">
-        {label}
-      </Text>
-      <div style={{ fontSize: 20, fontWeight: 600, color: tone ? toneColor(tone) : undefined }}>
-        {value}
-      </div>
-    </div>
   );
 }
 
 const tradeColumns: ColDef<BlotterRow>[] = [
   { headerName: "Symbol", field: "symbol" },
-  { headerName: "Side", field: "side" },
-  { headerName: "Qty", field: "quantity" },
-  { headerName: "Status", field: "status" },
+  { headerName: "Side", field: "side", cellRenderer: SideCell, maxWidth: 120 },
+  { headerName: "Qty", field: "quantity", type: "rightAlignedColumn" },
+  { headerName: "Status", field: "status", cellRenderer: StatusCell },
 ];

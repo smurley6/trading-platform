@@ -1,30 +1,150 @@
 :root {
   color-scheme: dark;
+
+  /* Mirror of src/lib/tokens.ts for global CSS (body, scrollbars, AG Grid, Perspective). */
+  --tp-accent: #3d8bff;
+  --tp-accent-text: #8fbaff;
+  --tp-ok: #34d399;
+  --tp-danger: #ff6b6b;
+  --tp-bg: #0a0d14;
+  --tp-panel: #111725;
+  --tp-panel-raised: #161d2e;
+  --tp-text: #eef2f9;
+  --tp-text-dim: #c6d0e0;
+  --tp-muted: #8b97ac;
+  --tp-hairline: rgba(255, 255, 255, 0.08);
+  --tp-hairline-strong: rgba(255, 255, 255, 0.14);
+  --tp-faint-border: rgba(148, 163, 184, 0.22);
+
+  --tp-font-sans:
+    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --tp-font-mono:
+    ui-monospace, "SFMono-Regular", "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  background: #0e1014;
-  color: #e6e8ec;
-  font-family:
-    "Open Sans",
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    Helvetica,
-    Arial,
-    sans-serif;
+  color: var(--tp-text-dim);
+  background: radial-gradient(1200px 600px at 50% -10%, #0f1420 0%, transparent 70%), var(--tp-bg);
+  background-attachment: fixed;
+  font-family: var(--tp-font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 a {
-  color: #7cb3ff;
+  color: var(--tp-accent-text);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* Tabular numerals everywhere headings/figures land, so columns of numbers align. */
+h1,
+h2,
+h3 {
+  color: var(--tp-text);
+  letter-spacing: -0.01em;
+}
+
+::selection {
+  background: rgba(61, 139, 255, 0.35);
+  color: #fff;
+}
+
+/* Slim, on-theme scrollbars. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.3) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+  background-clip: content-box;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* Focus-visible ring for keyboard users on the many bare <button>s the app uses. */
+:focus-visible {
+  outline: 2px solid var(--tp-accent);
+  outline-offset: 1px;
+}
+
+/* --- AG Grid (ag-theme-quartz-dark) themed to the palette ------------------------------------ */
+.ag-theme-quartz-dark {
+  --ag-background-color: transparent;
+  --ag-foreground-color: var(--tp-text-dim);
+  --ag-header-background-color: rgba(255, 255, 255, 0.02);
+  --ag-header-foreground-color: var(--tp-muted);
+  --ag-odd-row-background-color: rgba(255, 255, 255, 0.015);
+  --ag-row-hover-color: rgba(61, 139, 255, 0.08);
+  --ag-selected-row-background-color: rgba(61, 139, 255, 0.14);
+  --ag-border-color: var(--tp-hairline);
+  --ag-row-border-color: var(--tp-hairline);
+  --ag-header-column-separator-color: transparent;
+  --ag-input-focus-border-color: var(--tp-accent);
+  --ag-range-selection-border-color: var(--tp-accent);
+  --ag-font-family: var(--tp-font-sans);
+  --ag-font-size: 13px;
+  --ag-grid-size: 5px;
+  --ag-cell-horizontal-padding: 14px;
+  --ag-header-height: 40px;
+  --ag-row-height: 42px;
+  --ag-borders: none;
+  --ag-header-column-resize-handle-color: var(--tp-hairline-strong);
+  --ag-wrapper-border-radius: 12px;
+}
+.ag-theme-quartz-dark .ag-header-cell-text {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+/* Numeric-leaning columns render in the mono/tabular face for aligned figures. */
+.ag-theme-quartz-dark .ag-cell {
+  font-variant-numeric: tabular-nums;
+}
+.ag-theme-quartz-dark .ag-cell.ag-right-aligned-cell,
+.ag-theme-quartz-dark .ag-cell[col-id*="price"],
+.ag-theme-quartz-dark .ag-cell[col-id*="qty"],
+.ag-theme-quartz-dark .ag-cell[col-id*="equity"],
+.ag-theme-quartz-dark .ag-cell[col-id*="pnl"],
+.ag-theme-quartz-dark .ag-cell[col-id*="value"],
+.ag-theme-quartz-dark .ag-cell[col-id*="allocated"] {
+  font-family: var(--tp-font-mono);
 }
 
 perspective-viewer {
   --theme-name: "Pro Dark";
+  border-radius: 12px;
+  overflow: hidden;
 }

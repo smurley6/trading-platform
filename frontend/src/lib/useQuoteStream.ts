@@ -124,7 +124,8 @@ export function useQuoteStream(symbols: readonly string[]): QuoteStream {
       pending.clear();
     };
     const startFlush = (): void => {
-      if (flushTimer === undefined) flushTimer = window.setInterval(flushPending, FLUSH_INTERVAL_MS);
+      if (flushTimer === undefined)
+        flushTimer = window.setInterval(flushPending, FLUSH_INTERVAL_MS);
     };
     const clearFlush = (): void => {
       if (flushTimer !== undefined) {

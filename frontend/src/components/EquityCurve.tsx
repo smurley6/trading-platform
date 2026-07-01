@@ -10,6 +10,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 import type { EquityPoint } from "../lib/projections";
+import { color } from "../lib/tokens";
 
 interface EquityCurveProps {
   data: EquityPoint[];
@@ -33,24 +34,27 @@ export function EquityCurve({ data, height = 280, benchmark }: EquityCurveProps)
       height,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "#a3a8b4",
+        textColor: color.muted,
+        fontFamily:
+          "ui-monospace, SFMono-Regular, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace",
       },
       grid: {
-        vertLines: { color: "rgba(255,255,255,0.06)" },
-        horzLines: { color: "rgba(255,255,255,0.06)" },
+        vertLines: { color: "rgba(255,255,255,0.04)" },
+        horzLines: { color: "rgba(255,255,255,0.05)" },
       },
       timeScale: { timeVisible: true, secondsVisible: false },
-      rightPriceScale: { borderColor: "rgba(255,255,255,0.1)" },
+      rightPriceScale: { borderColor: color.hairline },
     });
     const series = chart.addAreaSeries({
-      lineColor: "#4c9aff",
-      topColor: "rgba(76,154,255,0.35)",
-      bottomColor: "rgba(76,154,255,0.02)",
+      lineColor: color.accent,
+      topColor: "rgba(61,139,255,0.32)",
+      bottomColor: "rgba(61,139,255,0.02)",
+      lineWidth: 2,
     });
     series.setData(data.map((p) => ({ time: p.time as UTCTimestamp, value: p.value })));
     if (benchmark && benchmark.length > 0) {
       const benchSeries = chart.addLineSeries({
-        color: "#94a3b8",
+        color: color.muted,
         lineWidth: 2,
         lineStyle: LineStyle.Dashed,
       });
@@ -74,7 +78,7 @@ export function EquityCurve({ data, height = 280, benchmark }: EquityCurveProps)
   return (
     <div>
       <div ref={containerRef} style={{ width: "100%" }} />
-      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4 }}>
+      <div style={{ fontSize: 11, color: color.faint, marginTop: 4 }}>
         Charts by{" "}
         <a href="https://www.tradingview.com" target="_blank" rel="noreferrer">
           TradingView

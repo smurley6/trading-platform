@@ -155,6 +155,9 @@ class SignalFeedItem(BaseModel):
     sentiment: float
     politician_weight: float
     source_reliability: float
+    # The source record that was analyzed (headline/filing/award details) — surfaced so the UI
+    # can show "the actual text that was analyzed" when a signal row is clicked.
+    raw_payload: dict[str, Any]
 
     @classmethod
     def from_record(cls, record: SignalRecord) -> "SignalFeedItem":
@@ -168,6 +171,7 @@ class SignalFeedItem(BaseModel):
             sentiment=signal.sentiment,
             politician_weight=signal.politician_weight,
             source_reliability=signal.source_reliability,
+            raw_payload=signal.raw_payload,
         )
 
 

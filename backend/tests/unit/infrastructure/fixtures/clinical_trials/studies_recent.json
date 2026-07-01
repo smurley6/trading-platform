@@ -1,0 +1,111 @@
+{
+  "studies": [
+    {
+      "protocolSection": {
+        "identificationModule": {
+          "nctId": "NCT05326464",
+          "briefTitle": "Tofacitinib in Recurrent GBM Patients"
+        },
+        "statusModule": {
+          "overallStatus": "COMPLETED",
+          "lastUpdatePostDateStruct": {
+            "date": "2026-06-29",
+            "type": "ACTUAL"
+          }
+        },
+        "sponsorCollaboratorsModule": {
+          "leadSponsor": {
+            "name": "University of Texas Southwestern Medical Center"
+          },
+          "collaborators": [
+            {
+              "name": "Pfizer"
+            }
+          ]
+        },
+        "designModule": {
+          "studyType": "INTERVENTIONAL",
+          "phases": [
+            "PHASE3"
+          ]
+        }
+      }
+    },
+    {
+      "protocolSection": {
+        "identificationModule": {
+          "nctId": "NCT07470866",
+          "briefTitle": "A Study of an mRNA Investigational Vaccine in Healthy Adults"
+        },
+        "statusModule": {
+          "overallStatus": "TERMINATED",
+          "lastUpdatePostDateStruct": {
+            "date": "2026-06-26",
+            "type": "ACTUAL"
+          }
+        },
+        "sponsorCollaboratorsModule": {
+          "leadSponsor": {
+            "name": "Moderna"
+          }
+        },
+        "designModule": {
+          "studyType": "INTERVENTIONAL",
+          "phases": [
+            "PHASE1"
+          ]
+        }
+      }
+    },
+    {
+      "protocolSection": {
+        "identificationModule": {
+          "nctId": "NCT07619443",
+          "briefTitle": "A Study of an Investigational Vaccine in Healthy Adults"
+        },
+        "statusModule": {
+          "overallStatus": "RECRUITING",
+          "lastUpdatePostDateStruct": {
+            "date": "2026-06-25",
+            "type": "ACTUAL"
+          }
+        },
+        "sponsorCollaboratorsModule": {
+          "leadSponsor": {
+            "name": "Merck Sharp & Dohme LLC"
+          }
+        },
+        "designModule": {
+          "studyType": "INTERVENTIONAL",
+          "phases": [
+            "PHASE1"
+          ]
+        }
+      }
+    },
+    {
+      "protocolSection": {
+        "identificationModule": {
+          "nctId": "NCT07676240",
+          "briefTitle": "An Observational Study of Care Coordination"
+        },
+        "statusModule": {
+          "overallStatus": "RECRUITING",
+          "lastUpdatePostDateStruct": {
+            "date": "2026-06-24",
+            "type": "ACTUAL"
+          }
+        },
+        "sponsorCollaboratorsModule": {
+          "leadSponsor": {
+            "name": "University of Washington"
+          }
+        },
+        "designModule": {
+          "studyType": "OBSERVATIONAL"
+        }
+      }
+    }
+  ],
+  "nextPageToken": null
+}

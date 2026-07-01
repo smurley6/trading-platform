@@ -1,0 +1,31 @@
+{
+  "actions": [
+    {
+      "actionCode": "S05000",
+      "actionDate": "2026-06-04",
+      "committees": [
+        {
+          "name": "Committee on Armed Services",
+          "systemCode": "ssas00",
+          "url": "https://api.congress.gov/v3/committee/senate/ssas00?format=json"
+        }
+      ],
+      "sourceSystem": {
+        "code": 3,
+        "name": "Senate"
+      },
+      "text": "Read twice and referred to the Committee on Armed Services.",
+      "type": "Referral"
+    }
+  ],
+  "pagination": {
+    "count": 1
+  },
+  "request": {
+    "billNumber": "88",
+    "billType": "s",
+    "congress": "118",
+    "contentType": "application/json",
+    "format": "json"
+  }
+}

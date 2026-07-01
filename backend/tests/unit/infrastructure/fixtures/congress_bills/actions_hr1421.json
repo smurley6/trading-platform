@@ -1,0 +1,52 @@
+{
+  "actions": [
+    {
+      "actionCode": "H37100",
+      "actionDate": "2026-06-05",
+      "actionTime": "14:20:11",
+      "recordedVotes": [
+        {
+          "chamber": "House",
+          "congress": 118,
+          "date": "2026-06-05T18:20:11Z",
+          "rollNumber": 210,
+          "sessionNumber": 2,
+          "url": "https://clerk.house.gov/evs/2026/roll210.xml"
+        }
+      ],
+      "sourceSystem": {
+        "code": 2,
+        "name": "House floor actions"
+      },
+      "text": "On passage Passed by the Yeas and Nays: 250 - 180 (Roll no. 210).",
+      "type": "Floor"
+    },
+    {
+      "actionCode": "H11100",
+      "actionDate": "2026-05-20",
+      "committees": [
+        {
+          "name": "Committee on Armed Services",
+          "systemCode": "hsas00",
+          "url": "https://api.congress.gov/v3/committee/house/hsas00?format=json"
+        }
+      ],
+      "sourceSystem": {
+        "code": 2,
+        "name": "House floor actions"
+      },
+      "text": "Referred to the Committee on Armed Services.",
+      "type": "Referral"
+    }
+  ],
+  "pagination": {
+    "count": 2
+  },
+  "request": {
+    "billNumber": "1421",
+    "billType": "hr",
+    "congress": "118",
+    "contentType": "application/json",
+    "format": "json"
+  }
+}

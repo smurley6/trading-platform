@@ -10,9 +10,16 @@ function wsUrl(): string {
   return `${protocol}://${window.location.host}/ws/events`;
 }
 
-export function useEventStream(onEvent: (event: StoredEventDto) => void): void {
+// Optional second argument: a callback invoked whenever the socket opens (true) or
+// closes (false), so callers can surface connection state without owning the socket.
+export function useEventStream(
+  onEvent: (event: StoredEventDto) => void,
+  onConnectionChange?: (connected: boolean) => void,
+): void {
   const handlerRef = useRef(onEvent);
   handlerRef.current = onEvent;
+  const statusRef = useRef(onConnectionChange);
+  statusRef.current = onConnectionChange;
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -24,6 +31,7 @@ export function useEventStream(onEvent: (event: StoredEventDto) => void): void {
       socket = new WebSocket(wsUrl());
       socket.onopen = () => {
         backoffMs = 500;
+        statusRef.current?.(true);
       };
       socket.onmessage = (message: MessageEvent<string>) => {
         try {
@@ -34,6 +42,7 @@ export function useEventStream(onEvent: (event: StoredEventDto) => void): void {
       };
       socket.onclose = () => {
         if (closed) return;
+        statusRef.current?.(false);
         reconnectTimer = window.setTimeout(connect, backoffMs);
         backoffMs = Math.min(backoffMs * 2, 10_000);
       };

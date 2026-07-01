@@ -32,7 +32,13 @@ function evt(
 describe("blotterRows", () => {
   it("folds an order's lifecycle into a single newest-first row", () => {
     const events = [
-      evt("order.intent", { client_order_id: "o1", sleeve_id: "a", symbol: "AAPL", side: "buy", quantity: "10" }),
+      evt("order.intent", {
+        client_order_id: "o1",
+        sleeve_id: "a",
+        symbol: "AAPL",
+        side: "buy",
+        quantity: "10",
+      }),
       evt("order.submitted", { client_order_id: "o1", broker_order_id: "b-123" }),
       evt("order.status_changed", { client_order_id: "o1", status: "filled" }),
     ];
@@ -100,9 +106,21 @@ describe("positionRows", () => {
 describe("riskRows", () => {
   it("projects risk.evaluated events newest-first", () => {
     const events = [
-      evt("risk.evaluated", { decision_id: "d1", verdict: "approved", reason: "ok", requested_quantity: "10", approved_quantity: "10" }),
+      evt("risk.evaluated", {
+        decision_id: "d1",
+        verdict: "approved",
+        reason: "ok",
+        requested_quantity: "10",
+        approved_quantity: "10",
+      }),
       evt("order.filled", { sleeve_id: "a", symbol: "AAPL", side: "buy", quantity: "1" }),
-      evt("risk.evaluated", { decision_id: "d2", verdict: "rejected", reason: "limit", requested_quantity: "100", approved_quantity: "0" }),
+      evt("risk.evaluated", {
+        decision_id: "d2",
+        verdict: "rejected",
+        reason: "limit",
+        requested_quantity: "100",
+        approved_quantity: "0",
+      }),
     ];
     const rows = riskRows(events);
     expect(rows.map((r) => r.decision_id)).toEqual(["d2", "d1"]);
@@ -113,8 +131,18 @@ describe("riskRows", () => {
 describe("latestSnapshots", () => {
   it("keeps the most recent snapshot per sleeve and counts positions", () => {
     const events = [
-      evt("portfolio.snapshot", { sleeve_id: "a", cash: "100", equity: "1000", positions: { AAPL: 1 } }),
-      evt("portfolio.snapshot", { sleeve_id: "a", cash: "50", equity: "1500", positions: { AAPL: 1, MSFT: 2 } }),
+      evt("portfolio.snapshot", {
+        sleeve_id: "a",
+        cash: "100",
+        equity: "1000",
+        positions: { AAPL: 1 },
+      }),
+      evt("portfolio.snapshot", {
+        sleeve_id: "a",
+        cash: "50",
+        equity: "1500",
+        positions: { AAPL: 1, MSFT: 2 },
+      }),
     ];
     const snaps = latestSnapshots(events);
     const a = snaps.get("a");

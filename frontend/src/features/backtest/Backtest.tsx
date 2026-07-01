@@ -7,34 +7,32 @@
 // JSON strings (Decimal serialization), so every value is coerced with Number(...).
 
 import type { ColDef } from "ag-grid-community";
-import { Button, Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
+import { Button, StackLayout } from "@salt-ds/core";
 import { useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
+import {
+  Badge,
+  EmptyState,
+  Figure,
+  LoadingState,
+  MetricTile,
+  Panel,
+  SectionHeader,
+} from "../../components/ui";
 import { ApiError, api } from "../../lib/api";
 import { formatMoney, formatNumber, formatTime } from "../../lib/format";
+import { InfoButton } from "../../components/InfoButton";
 import { backtestCurve } from "../../lib/projections";
+import { color, radius, space, text, transitions } from "../../lib/tokens";
 import type { BacktestResult, BacktestTrade } from "../../lib/types";
 
-type Tone = "success" | "danger" | "info" | "muted";
-
-function toneColor(tone: Tone): string {
-  switch (tone) {
-    case "success":
-      return "#4ade80";
-    case "danger":
-      return "#f87171";
-    case "info":
-      return "#7cb3ff";
-    case "muted":
-      return "#94a3b8";
-  }
-}
+type Tone = "neutral" | "ok" | "danger" | "accent" | "warn";
 
 function signTone(value: number): Tone {
-  if (value > 0) return "success";
+  if (value > 0) return "ok";
   if (value < 0) return "danger";
-  return "muted";
+  return "neutral";
 }
 
 // Format a possibly-null, possibly-string numeric as a percentage, "—" when absent/unparseable.
@@ -58,23 +56,42 @@ function money(value: number | string | null): string {
   return Number.isNaN(n) ? "—" : formatMoney(n);
 }
 
+// Color a trade's side chip: buys read as accent, sells as danger.
+function sideTone(side: string): "accent" | "danger" | "muted" {
+  const s = side.toLowerCase();
+  if (s === "buy" || s === "long") return "accent";
+  if (s === "sell" || s === "short") return "danger";
+  return "muted";
+}
+
 const tradeColumns: ColDef<BacktestTrade>[] = [
   { headerName: "Symbol", field: "symbol", maxWidth: 120 },
-  { headerName: "Side", field: "side", maxWidth: 100 },
+  {
+    headerName: "Side",
+    field: "side",
+    maxWidth: 110,
+    cellRenderer: (p: { value: string | null | undefined }) => {
+      const side = p.value ?? "";
+      return <Badge tone={sideTone(side)}>{side.toUpperCase()}</Badge>;
+    },
+  },
   {
     headerName: "Qty",
     field: "quantity",
     maxWidth: 120,
+    type: "rightAlignedColumn",
     valueFormatter: (p) => formatNumber(Number(p.value), 0),
   },
   {
     headerName: "Price",
     field: "price",
+    type: "rightAlignedColumn",
     valueFormatter: (p) => formatMoney(Number(p.value)),
   },
   {
     headerName: "Filled",
     field: "filled_at",
+    type: "rightAlignedColumn",
     valueFormatter: (p) => formatTime(p.value as string),
   },
 ];
@@ -120,111 +137,155 @@ export function Backtest(_props: BacktestProps) {
 
   return (
     <StackLayout gap={2}>
-      <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <div>
-            <H2 style={{ margin: 0 }}>Backtest</H2>
-            <Text color="secondary" styleAs="label">
-              Replays recorded signals through the strategy and the same risk + execution path used
-              live, then compares strategy equity against a benchmark.
-            </Text>
-          </div>
-          <Button disabled={busy} onClick={() => void run()}>
-            {busy ? "Running…" : "Run backtest"}
-          </Button>
-        </div>
+      <Panel>
+        <SectionHeader
+          eyebrow="Simulation"
+          title="Backtest"
+          caption="Replays recorded signals through the strategy and the same risk + execution path used live, then compares strategy equity against a benchmark."
+          actions={
+            <>
+              <Button disabled={busy} onClick={() => void run()}>
+                {busy ? "Running…" : "Run backtest"}
+              </Button>
+              <InfoButton title="Run backtest" align="right">
+                Replays your recorded political signals through the strategy, the risk checks, and
+                the same execution engine used live — over historical prices — then charts strategy
+                equity vs. a buy-and-hold benchmark and reports Sharpe, max drawdown, win rate, and
+                every simulated trade. It's a SIMULATION: no real or paper orders are placed. Needs
+                a historical market-data adapter on the backend (otherwise you'll see "not
+                configured").
+              </InfoButton>
+            </>
+          }
+        />
         {error && (
-          <Text color="error" style={{ marginTop: 8 }}>
+          <div
+            style={{
+              ...text.body,
+              color: color.dangerText,
+              background: color.dangerSoft,
+              border: `1px solid ${color.danger}`,
+              borderRadius: radius.md,
+              padding: `${space.sm}px ${space.md}px`,
+            }}
+          >
             {error}
-          </Text>
+          </div>
         )}
-      </Card>
+      </Panel>
 
-      {notConfigured && (
-        <Card>
-          <H3 style={{ marginTop: 0 }}>Backtesting is not configured</H3>
-          <Text color="secondary">
-            No historical market-data adapter is wired on the backend, so backtests can't be run
-            yet. Once a data provider is configured, use “Run backtest” to replay recorded signals
-            and see strategy vs. benchmark performance here.
-          </Text>
-        </Card>
+      {busy && !result && (
+        <Panel>
+          <LoadingState label="Running backtest — replaying signals over historical prices…" />
+        </Panel>
       )}
 
-      {!result && !notConfigured && !error && (
-        <Card>
-          <Text color="secondary">
-            Run a backtest to see the equity curve, headline metrics, and the simulated trades.
-          </Text>
-        </Card>
+      {notConfigured && (
+        <Panel>
+          <EmptyState
+            icon="⚙"
+            title="Backtesting is not configured"
+            message="No historical market-data adapter is wired on the backend, so backtests can't be run yet. Once a data provider is configured, use “Run backtest” to replay recorded signals and see strategy vs. benchmark performance here."
+          />
+        </Panel>
+      )}
+
+      {!result && !notConfigured && !error && !busy && (
+        <Panel>
+          <EmptyState
+            icon="▲"
+            title="No backtest yet"
+            message="Run a backtest to see the equity curve, headline metrics, and the simulated trades."
+            action={
+              <Button disabled={busy} onClick={() => void run()}>
+                Run your first backtest
+              </Button>
+            }
+          />
+        </Panel>
       )}
 
       {result && (
         <>
-          <Card>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-              <H3 style={{ marginTop: 0 }}>Equity curve</H3>
-              <div style={{ display: "flex", gap: 16, fontSize: 12, color: "#94a3b8" }}>
-                <LegendDot color="#4c9aff" label="Strategy" />
-                {benchmark.length > 0 && <LegendDot color="#94a3b8" label="Benchmark" />}
-              </div>
-            </div>
+          <Panel>
+            <SectionHeader
+              eyebrow="Performance"
+              title="Equity curve"
+              caption="Strategy equity vs. buy-and-hold benchmark over the replay window."
+              actions={
+                <div style={{ display: "flex", gap: space.md }}>
+                  <LegendDot color={color.accent} label="Strategy" />
+                  {benchmark.length > 0 && <LegendDot color={color.muted} label="Benchmark" />}
+                </div>
+              }
+            />
             {strategyCurve.length > 0 ? (
               <EquityCurve
                 data={strategyCurve}
                 benchmark={benchmark.length > 0 ? benchmark : undefined}
               />
             ) : (
-              <Text color="secondary">No equity history was produced for this backtest.</Text>
+              <EmptyState message="No equity history was produced for this backtest." />
             )}
-          </Card>
+          </Panel>
 
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))",
-              gap: 12,
+              gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+              gap: space.lg,
             }}
           >
-            <StatCard
+            <MetricTile
               label="Total return"
               value={pct(result.total_return_pct)}
               tone={signTone(totalReturn)}
             />
-            <StatCard
+            <MetricTile
               label="Benchmark return"
               value={pct(benchReturn)}
-              tone={benchReturn === null ? "muted" : signTone(Number(benchReturn))}
+              tone={benchReturn === null ? "neutral" : signTone(Number(benchReturn))}
             />
-            <StatCard
+            <MetricTile
               label="Max drawdown"
               value={pct(result.max_drawdown_pct)}
-              tone={maxDrawdown > 0 ? "danger" : "muted"}
+              tone={maxDrawdown > 0 ? "danger" : "neutral"}
             />
-            <StatCard label="Sharpe" value={ratio(result.sharpe)} />
-            <StatCard label="Sortino" value={ratio(result.sortino)} />
-            <StatCard label="Win rate" value={pct(result.win_rate, 0)} />
-            <StatCard label="Profit factor" value={ratio(result.profit_factor)} />
-            <StatCard
+            <MetricTile label="Sharpe" value={ratio(result.sharpe)} tone="accent" />
+            <MetricTile label="Sortino" value={ratio(result.sortino)} tone="accent" />
+            <MetricTile label="Win rate" value={pct(result.win_rate, 0)} />
+            <MetricTile label="Profit factor" value={ratio(result.profit_factor)} />
+            <MetricTile
               label="Annualized return"
               value={pct(result.annualized_return_pct)}
               tone={
                 result.annualized_return_pct === null
-                  ? "muted"
+                  ? "neutral"
                   : signTone(Number(result.annualized_return_pct))
               }
             />
-            <StatCard label="Volatility" value={pct(result.volatility)} />
-            <StatCard label="Avg win" value={money(result.avg_win)} tone="success" />
-            <StatCard label="Avg loss" value={money(result.avg_loss)} tone="danger" />
-            <StatCard label="Trades" value={formatNumber(result.num_trades, 0)} />
-            <StatCard label="Decisions" value={formatNumber(result.decision_count, 0)} />
-            <StatCard label="Start equity" value={money(result.starting_equity)} />
-            <StatCard label="End equity" value={money(result.ending_equity)} />
+            <MetricTile label="Volatility" value={pct(result.volatility)} />
+            <MetricTile label="Avg win" value={money(result.avg_win)} tone="ok" />
+            <MetricTile label="Avg loss" value={money(result.avg_loss)} tone="danger" />
+            <MetricTile label="Trades" value={formatNumber(result.num_trades, 0)} />
+            <MetricTile label="Decisions" value={formatNumber(result.decision_count, 0)} />
+            <MetricTile label="Start equity" value={money(result.starting_equity)} />
+            <MetricTile label="End equity" value={money(result.ending_equity)} />
           </div>
 
-          <Card>
-            <H3 style={{ marginTop: 0 }}>Trades ({result.trades.length})</H3>
+          <Panel>
+            <SectionHeader
+              eyebrow="Executions"
+              title={`Trades (${result.trades.length})`}
+              caption="Every order the strategy would have filled during the replay."
+              actions={
+                result.trades.length > 0 ? (
+                  <Badge tone="muted">
+                    <Figure weight={700}>{result.trades.length}</Figure> fills
+                  </Badge>
+                ) : undefined
+              }
+            />
             {result.trades.length > 0 ? (
               <DataGrid<BacktestTrade>
                 rows={result.trades}
@@ -233,42 +294,37 @@ export function Backtest(_props: BacktestProps) {
                 height={Math.min(420, Math.max(160, 60 + result.trades.length * 44))}
               />
             ) : (
-              <Text color="secondary">No trades were generated in this backtest.</Text>
+              <EmptyState message="No trades were generated in this backtest." />
             )}
-          </Card>
+          </Panel>
         </>
       )}
     </StackLayout>
   );
 }
 
-function LegendDot({ color, label }: { color: string; label: string }) {
+function LegendDot({ color: dotColor, label }: { color: string; label: string }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <span
+      style={{
+        ...text.caption,
+        color: color.muted,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: space.xs,
+      }}
+    >
       <span
-        style={{ width: 10, height: 10, borderRadius: 2, background: color, display: "inline-block" }}
+        style={{
+          width: 10,
+          height: 10,
+          borderRadius: radius.xs,
+          background: dotColor,
+          display: "inline-block",
+          transition: transitions("background"),
+        }}
       />
       {label}
     </span>
-  );
-}
-
-function StatCard({ label, value, tone }: { label: string; value: string; tone?: Tone }) {
-  return (
-    <Card style={{ minWidth: 0 }}>
-      <Text color="secondary" styleAs="label">
-        {label}
-      </Text>
-      <div
-        style={{
-          fontSize: 20,
-          fontWeight: 600,
-          marginTop: 4,
-          color: tone ? toneColor(tone) : undefined,
-        }}
-      >
-        {value}
-      </div>
-    </Card>
   );
 }

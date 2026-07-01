@@ -28,6 +28,9 @@ export interface SignalFeedItem {
   // Origin trust level (REAL vs SYNTHETIC). Optional: older backends omit it from the feed
   // schema, so consumers must treat an absent value as "unknown" and render a neutral label.
   provenance?: Provenance;
+  // The source record that was analyzed (headline/filing/award fields). Optional for backend
+  // compatibility; the UI shows it when a signal row is clicked.
+  raw_payload?: Record<string, unknown>;
 }
 
 export interface ConvictionItem {

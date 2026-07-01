@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     alpaca_data_key_id: str | None = None
     alpaca_data_secret_key: str | None = None
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.
-    default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
+    default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPCX"]
 
     # Real historical bars for backtests (FR-BT). OFF by construction: a bare
     # `python -m trading.main` and the test suite price backtests off the deterministic
@@ -163,6 +163,24 @@ class Settings(BaseSettings):
     fda_approvals_enabled: bool = False
     fda_lookback_days: int = 30
     openfda_api_key: str | None = None
+    # ClinicalTrials.gov API v2 study updates — keyless free API, no key needed.
+    clinical_trials_enabled: bool = False
+    clinical_trials_lookback_days: int = 14
+    # Federal Register (Public Inspection) — keyless free API; api_key optional (raises rate limit).
+    federal_register_enabled: bool = False
+    federal_register_lookback_days: int = 30
+    federal_register_api_key: str | None = None
+    # Congress.gov bill actions — free api.data.gov key REQUIRED when enabled.
+    congress_bills_enabled: bool = False
+    congress_bills_lookback_days: int = 30
+    congress_bills_api_key: str | None = None
+    # Regulations.gov dockets — free api.data.gov key REQUIRED when enabled.
+    regulations_gov_enabled: bool = False
+    regulations_gov_lookback_days: int = 7
+    regulations_gov_api_key: str | None = None
+    # SEC EDGAR "getcurrent" Atom feed (fast Form 4) — reuses sec_form4_user_agent (SEC needs a UA).
+    sec_edgar_atom_enabled: bool = False
+    sec_edgar_atom_max_filings: int = 100
 
     http_timeout_seconds: float = 10.0
 
