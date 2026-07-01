@@ -307,9 +307,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
     shared_paper: BrokerPort = (
         alpaca_paper_broker
         if alpaca_paper_broker is not None
-        else PaperBroker(
-            market_data=market_data, clock=clock, starting_cash=settings.starting_cash
-        )
+        else PaperBroker(market_data=market_data, clock=clock, starting_cash=settings.starting_cash)
     )
 
     evaluators: dict[str, EvaluateSignals] = {}
