@@ -4,10 +4,10 @@
 
 import { useEffect, useRef } from "react";
 import type { StoredEventDto } from "./types";
+import { wsBase } from "./wsBase";
 
 function wsUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws/events`;
+  return `${wsBase()}/ws/events`;
 }
 
 // Optional second argument: a callback invoked whenever the socket opens (true) or

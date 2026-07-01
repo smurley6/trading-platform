@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import type { Quote } from "./types";
+import { wsBase } from "./wsBase";
 
 const POLL_INTERVAL_MS = 4_000;
 // Throttle the live stream's render cadence: apply buffered ticks to state twice a second.
@@ -72,8 +73,7 @@ function parseFrame(data: string): ServerFrame | null {
 }
 
 function quotesWsUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}/ws/quotes`;
+  return `${wsBase()}/ws/quotes`;
 }
 
 export interface QuoteStream {

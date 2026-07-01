@@ -6,9 +6,28 @@ Risk caps have no defaults on purpose: the process refuses to start without them
 from decimal import Decimal
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from trading.domain.sleeves import TradingMode
+
+
+def normalize_async_dsn(url: str) -> str:
+    """Force the asyncpg driver on a Postgres DSN.
+
+    The app connects via SQLAlchemy's ``create_async_engine``, which needs an async
+    driver. A bare ``postgresql://`` (or the legacy ``postgres://``) URL — e.g. the
+    connection string a hosting provider hands you verbatim — routes to psycopg2 (sync)
+    and fails at import. Rewriting the scheme makes either form work; an explicit
+    ``postgresql+<driver>://`` is left untouched.
+    """
+    if url.startswith("postgresql+"):
+        return url
+    if url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://") :]
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://") :]
+    return url
 
 
 class Settings(BaseSettings):
@@ -18,6 +37,11 @@ class Settings(BaseSettings):
 
     # Event store: in-memory when unset (dev), Postgres when set.
     database_url: str | None = None
+
+    @field_validator("database_url")
+    @classmethod
+    def _force_async_pg_driver(cls, v: str | None) -> str | None:
+        return normalize_async_dsn(v) if v else v
 
     # Sleeve / paper account
     starting_cash: Decimal = Decimal("100000")

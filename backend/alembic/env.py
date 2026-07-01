@@ -5,6 +5,7 @@ from alembic import context
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from trading.config import normalize_async_dsn
 from trading.infrastructure.persistence.tables import metadata
 
 config = context.config
@@ -15,7 +16,7 @@ def _database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL must be set to run migrations")
-    return url
+    return normalize_async_dsn(url)
 
 
 def run_migrations_offline() -> None:
