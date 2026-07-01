@@ -1,37 +1,102 @@
 // Risk dashboard (FR-UI-6): risk verdicts, reconciliation drift, and manual controls.
 
-import type { ColDef } from "ag-grid-community";
-import { Button, Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
-import { useState } from "react";
+import type { ColDef, ICellRendererParams } from "ag-grid-community";
+import { Button, StackLayout } from "@salt-ds/core";
+import { useMemo, useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataGrid } from "../../components/DataGrid";
 import { InfoButton } from "../../components/InfoButton";
 import { useToast } from "../../components/Toast";
+import {
+  Badge,
+  EmptyState,
+  LoadingState,
+  MetricTile,
+  Panel,
+  SectionHeader,
+} from "../../components/ui";
 import { Backtest } from "../backtest/Backtest";
 import { ApiError, api } from "../../lib/api";
 import { formatTime } from "../../lib/format";
 import { riskRows } from "../../lib/projections";
 import type { RiskRow } from "../../lib/projections";
+import {
+  color,
+  numeric,
+  pillStyle,
+  radius,
+  shadow,
+  space,
+  text,
+  transitions,
+} from "../../lib/tokens";
 import type { Drift, IngestResult, LiveReadiness, ReconcileReport, Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
+
+// Map a risk verdict string to a semantic pill tone. Approvals read green, rejections red,
+// partial fills amber, anything unknown stays muted.
+type VerdictTone = "ok" | "danger" | "warn" | "muted";
+function verdictTone(verdict: string): VerdictTone {
+  const v = verdict.toLowerCase();
+  if (v.includes("approve") || v.includes("accept") || v.includes("pass")) return "ok";
+  if (v.includes("reject") || v.includes("deny") || v.includes("block") || v.includes("fail"))
+    return "danger";
+  if (v.includes("partial") || v.includes("reduce") || v.includes("scale")) return "warn";
+  return "muted";
+}
+
+const rightNumericClass = "ag-right-aligned-cell";
 
 const riskColumns: ColDef<RiskRow>[] = [
   {
     headerName: "Time",
     field: "occurred_at",
     valueFormatter: (p) => formatTime(p.value as string),
+    maxWidth: 190,
   },
-  { headerName: "Verdict", field: "verdict", maxWidth: 130 },
-  { headerName: "Requested", field: "requested_quantity", maxWidth: 130 },
-  { headerName: "Approved", field: "approved_quantity", maxWidth: 130 },
+  {
+    headerName: "Verdict",
+    field: "verdict",
+    maxWidth: 150,
+    cellRenderer: (p: ICellRendererParams<RiskRow, string>) => {
+      const verdict = p.value ?? "";
+      if (!verdict) return null;
+      return <span style={{ ...pillStyle(verdictTone(verdict)) }}>{verdict.toUpperCase()}</span>;
+    },
+  },
+  {
+    headerName: "Requested",
+    field: "requested_quantity",
+    maxWidth: 140,
+    type: "rightAlignedColumn",
+    cellClass: rightNumericClass,
+  },
+  {
+    headerName: "Approved",
+    field: "approved_quantity",
+    maxWidth: 140,
+    type: "rightAlignedColumn",
+    cellClass: rightNumericClass,
+  },
   { headerName: "Reason", field: "reason", flex: 2 },
 ];
 
 const driftColumns: ColDef<Drift>[] = [
-  { headerName: "Kind", field: "kind" },
+  {
+    headerName: "Kind",
+    field: "kind",
+    cellRenderer: (p: ICellRendererParams<Drift, string>) =>
+      p.value ? <span style={{ ...pillStyle("warn") }}>{p.value.toUpperCase()}</span> : null,
+    maxWidth: 160,
+  },
   { headerName: "Key", field: "key" },
-  { headerName: "Local", field: "local" },
-  { headerName: "Broker", field: "broker" },
+  { headerName: "Local", field: "local", type: "rightAlignedColumn", cellClass: rightNumericClass },
+  {
+    headerName: "Broker",
+    field: "broker",
+    type: "rightAlignedColumn",
+    cellClass: rightNumericClass,
+  },
 ];
 
 interface RiskDashboardProps {
@@ -48,7 +113,21 @@ export function RiskDashboard({ refreshKey, sleeves }: RiskDashboardProps) {
   const [message, setMessage] = useState<string | null>(null);
 
   const drifts: Drift[] = (reports ?? []).flatMap((r) => r.drifts);
-  const verdictRows = riskRows(events.data ?? []);
+  const verdictRows = useMemo(() => riskRows(events.data ?? []), [events.data]);
+
+  // Verdict tallies power the summary tiles at the top of the screen.
+  const tallies = useMemo(() => {
+    let approved = 0;
+    let rejected = 0;
+    for (const row of verdictRows) {
+      const tone = verdictTone(row.verdict);
+      if (tone === "ok") approved += 1;
+      else if (tone === "danger") rejected += 1;
+    }
+    return { approved, rejected, total: verdictRows.length };
+  }, [verdictRows]);
+
+  const liveCount = sleeves.filter((s) => s.mode === "live").length;
 
   async function runReconcile(): Promise<void> {
     setBusy(true);
@@ -91,25 +170,64 @@ export function RiskDashboard({ refreshKey, sleeves }: RiskDashboardProps) {
 
   return (
     <StackLayout gap={2}>
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Live trading</H3>
-        <Text color="secondary" styleAs="label">
-          A sleeve can only go live after passing the readiness preflight (§11). Live trades real
-          money through Alpaca.
-        </Text>
-        <StackLayout gap={1} style={{ marginTop: 8 }}>
+      {/* Summary tiles — verdict tallies + live posture at a glance. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+          gap: space.lg,
+        }}
+      >
+        <MetricTile label="Verdicts" value={tallies.total} hint="Evaluated signals in view" />
+        <MetricTile label="Approved" value={tallies.approved} tone="ok" />
+        <MetricTile label="Rejected" value={tallies.rejected} tone="danger" />
+        <MetricTile
+          label="Live Sleeves"
+          value={liveCount}
+          tone={liveCount > 0 ? "danger" : "neutral"}
+          hint={liveCount > 0 ? "Trading real money" : "All on paper"}
+        />
+      </div>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="Deployment"
+          title="Live trading"
+          caption="A sleeve can only go live after passing the readiness preflight (§11). Live trades real money through Alpaca."
+          actions={
+            liveCount > 0 ? (
+              <Badge tone="danger" dot>
+                {liveCount} LIVE
+              </Badge>
+            ) : (
+              <Badge tone="muted">ALL PAPER</Badge>
+            )
+          }
+        />
+        <StackLayout gap={1}>
           {sleeves.length > 0 ? (
             sleeves.map((s) => <LiveTradingRow key={s.id} sleeve={s} />)
           ) : (
-            <Text color="secondary">No sleeves available to promote to live.</Text>
+            <EmptyState message="No sleeves available to promote to live." />
           )}
         </StackLayout>
-      </Card>
+      </Panel>
 
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Controls</H3>
-        <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+      <Panel>
+        <SectionHeader
+          eyebrow="Operations"
+          title="Controls"
+          caption="Manual, read-only diagnostics — reconcile against the broker or run a single ingest cycle."
+        />
+        <div
+          style={{
+            display: "flex",
+            gap: space.md,
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: space.xs }}>
             <Button disabled={busy} onClick={() => void runReconcile()}>
               Run reconciliation
             </Button>
@@ -119,7 +237,7 @@ export function RiskDashboard({ refreshKey, sleeves }: RiskDashboardProps) {
               detects discrepancies, it never places or cancels anything.
             </InfoButton>
           </div>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: space.xs }}>
             <Button disabled={busy} onClick={() => void runIngest()}>
               Run ingest cycle
             </Button>
@@ -129,40 +247,59 @@ export function RiskDashboard({ refreshKey, sleeves }: RiskDashboardProps) {
               decisions but places NO orders; in auto mode it would place the proposed trades.
             </InfoButton>
           </div>
-          {message && (
-            <Text color="secondary" style={{ alignSelf: "center" }}>
-              {message}
-            </Text>
-          )}
+          {message && <span style={{ ...text.caption, color: color.muted }}>{message}</span>}
         </div>
         {ingestResult && (
-          <Text color="secondary" styleAs="label">
-            Ingested {ingestResult.signals_ingested} signals · {ingestResult.orders.length} orders
-            {ingestResult.failed_sources.length > 0
-              ? ` · failed: ${ingestResult.failed_sources.join(", ")}`
-              : ""}
-          </Text>
+          <div
+            style={{
+              marginTop: space.md,
+              display: "flex",
+              flexWrap: "wrap",
+              gap: space.sm,
+              alignItems: "center",
+            }}
+          >
+            <Badge tone="accent">{ingestResult.signals_ingested} SIGNALS</Badge>
+            <Badge tone="muted">{ingestResult.orders.length} ORDERS</Badge>
+            {ingestResult.failed_sources.length > 0 && (
+              <Badge tone="danger">FAILED: {ingestResult.failed_sources.join(", ")}</Badge>
+            )}
+          </div>
         )}
-      </Card>
+      </Panel>
 
       {drifts.length > 0 && (
-        <Card>
-          <H3 style={{ marginTop: 0 }}>Reconciliation drift</H3>
+        <Panel>
+          <SectionHeader
+            eyebrow="Reconciliation"
+            title="Reconciliation drift"
+            caption="Positions or orders where local state diverges from the broker."
+            actions={<Badge tone="danger" dot>{`${drifts.length} DRIFT`}</Badge>}
+          />
           <DataGrid<Drift>
             rows={drifts}
             columns={driftColumns}
             getRowId={(r) => `${r.kind}|${r.key}`}
             height={200}
           />
-        </Card>
+        </Panel>
       )}
 
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Risk verdicts</H3>
+      <Panel>
+        <SectionHeader
+          eyebrow="Audit"
+          title="Risk verdicts"
+          caption="Every signal that passed through risk evaluation, newest first."
+          actions={
+            verdictRows.length > 0 ? (
+              <Badge tone="muted">{`${verdictRows.length} ROWS`}</Badge>
+            ) : undefined
+          }
+        />
         {events.loading && !events.data ? (
-          <Spinner />
+          <LoadingState label="Loading risk verdicts…" />
         ) : events.error ? (
-          <Text color="error">Could not load risk verdicts: {events.error}</Text>
+          <EmptyState title="Couldn't load risk verdicts" message={events.error} />
         ) : verdictRows.length > 0 ? (
           <DataGrid<RiskRow>
             rows={verdictRows}
@@ -171,11 +308,9 @@ export function RiskDashboard({ refreshKey, sleeves }: RiskDashboardProps) {
             height={420}
           />
         ) : (
-          <Text color="secondary">
-            No risk verdicts yet — they appear here as signals are evaluated.
-          </Text>
+          <EmptyState message="No risk verdicts yet — they appear here as signals are evaluated." />
         )}
-      </Card>
+      </Panel>
 
       <Backtest refreshKey={refreshKey} />
     </StackLayout>
@@ -224,32 +359,27 @@ function LiveTradingRow({ sleeve }: { sleeve: Sleeve }) {
     await setMode("live");
   }
 
+  const passedCount = readiness ? readiness.checks.filter((c) => c.passed).length : 0;
+
   return (
     <div
       style={{
-        border: "1px solid rgba(255,255,255,0.1)",
-        borderRadius: 8,
-        padding: 12,
+        border: `1px solid ${isLive ? color.danger : color.hairline}`,
+        borderRadius: radius.lg,
+        padding: space.lg,
+        background: color.panelSoft,
+        boxShadow: isLive ? shadow.glowDanger : "none",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: space.md,
+        transition: transitions("border-color", "box-shadow"),
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <strong>{sleeve.id}</strong>
-        <span
-          style={{
-            padding: "1px 8px",
-            borderRadius: 10,
-            fontSize: 11,
-            fontWeight: 700,
-            background: isLive ? "rgba(239,68,68,0.2)" : "rgba(76,154,255,0.18)",
-            color: isLive ? "#f87171" : "#7cb3ff",
-            border: `1px solid ${isLive ? "#ef4444" : "#4c9aff"}`,
-          }}
-        >
+      <div style={{ display: "flex", alignItems: "center", gap: space.md }}>
+        <span style={{ ...text.h3, ...numeric(), color: color.text }}>{sleeve.id}</span>
+        <Badge tone={isLive ? "danger" : "accent"} dot={isLive}>
           {isLive ? "LIVE" : "PAPER"}
-        </span>
+        </Badge>
         <div style={{ flex: 1 }} />
         <Button disabled={busy} onClick={() => void check()}>
           Check readiness
@@ -273,18 +403,42 @@ function LiveTradingRow({ sleeve }: { sleeve: Sleeve }) {
           </Button>
         )}
       </div>
-      {error && <Text color="error">{error}</Text>}
+      {error && <span style={{ ...text.caption, color: color.dangerText }}>{error}</span>}
       {readiness && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {readiness.checks.map((c) => (
-            <div key={c.name} style={{ fontSize: 13 }}>
-              <span style={{ color: c.passed ? "#4ade80" : "#f87171" }}>
-                {c.passed ? "✓" : "✗"}
-              </span>{" "}
-              <span style={{ fontWeight: 600 }}>{c.name}</span>{" "}
-              <span style={{ color: "#9ca3af" }}>— {c.detail}</span>
-            </div>
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: space.sm }}>
+          <div style={{ display: "flex", alignItems: "center", gap: space.sm }}>
+            <span style={{ ...eyebrowInline }}>Preflight</span>
+            <Badge tone={readiness.ready ? "ok" : "danger"} dot>
+              {`${passedCount}/${readiness.checks.length} PASSED`}
+            </Badge>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: space.xxs }}>
+            {readiness.checks.map((c) => (
+              <div
+                key={c.name}
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: space.sm,
+                  ...text.caption,
+                }}
+              >
+                <span
+                  style={{
+                    ...numeric(),
+                    color: c.passed ? color.ok : color.dangerText,
+                    fontWeight: 700,
+                    width: 14,
+                    flexShrink: 0,
+                  }}
+                >
+                  {c.passed ? "✓" : "✗"}
+                </span>
+                <span style={{ ...text.label, color: color.textDim, flexShrink: 0 }}>{c.name}</span>
+                <span style={{ color: color.muted }}>— {c.detail}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
       <ConfirmDialog
@@ -299,3 +453,9 @@ function LiveTradingRow({ sleeve }: { sleeve: Sleeve }) {
     </div>
   );
 }
+
+const eyebrowInline = {
+  ...text.micro,
+  textTransform: "uppercase" as const,
+  color: color.muted,
+};

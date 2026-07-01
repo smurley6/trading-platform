@@ -4,13 +4,22 @@
 // drives the authoritative refresh once the backend records the cancellation.
 
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Button, Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
+import { Button, StackLayout } from "@salt-ds/core";
 import { useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
+import {
+  Badge,
+  EmptyState,
+  LoadingState,
+  MetricTile,
+  Panel,
+  SectionHeader,
+} from "../../components/ui";
 import { api } from "../../lib/api";
 import { formatNumber, formatTime } from "../../lib/format";
 import { blotterRows, positionRows } from "../../lib/projections";
 import type { BlotterRow, PositionRow } from "../../lib/projections";
+import { color, numeric, pillStyle, radius, space, text, transitions } from "../../lib/tokens";
 import { useLoader } from "../../lib/useLoader";
 
 // Statuses that mean the order is done — no Cancel action and not part of "open orders".
@@ -28,28 +37,43 @@ function isOpen(row: BlotterRow): boolean {
   return !TERMINAL_STATUSES.has(row.status.toLowerCase());
 }
 
-// Color-code the side as a presentational overlay only — buy green / sell red, matching the
-// tone palette used across the dashboard. Falls back to plain inherited text for any other value.
-const SIDE_COLOR: Record<string, string> = { buy: "#4ade80", sell: "#f87171" };
+// Map a raw order status to a pill tone so the grid reads at a glance. Fills are "ok", hard
+// failures are "danger", cancellations/expiries are muted, and everything still working is accent.
+function statusTone(status: string): "accent" | "ok" | "danger" | "warn" | "muted" {
+  const s = status.toLowerCase();
+  if (s === "filled") return "ok";
+  if (s === "rejected" || s === "submit_failed") return "danger";
+  if (s === "partially_filled") return "warn";
+  if (TERMINAL_STATUSES.has(s)) return "muted";
+  return "accent";
+}
 
+// Side rendered as a tinted pill — buy green / sell red — matching the semantic P&L palette.
 const SideCell = (params: ICellRendererParams<BlotterRow>) => {
   const side = (params.value as string | undefined) ?? params.data?.side;
   if (!side) return null;
-  const color = SIDE_COLOR[side.toLowerCase()];
-  return (
-    <span style={{ color, fontWeight: color ? 600 : undefined, textTransform: "uppercase" }}>
-      {side}
-    </span>
-  );
+  const tone =
+    side.toLowerCase() === "buy" ? "ok" : side.toLowerCase() === "sell" ? "danger" : "muted";
+  return <span style={{ ...pillStyle(tone), textTransform: "uppercase" }}>{side}</span>;
 };
 
 const positionColumns: ColDef<PositionRow>[] = [
   { headerName: "Sleeve", field: "sleeve_id" },
-  { headerName: "Symbol", field: "symbol" },
+  { headerName: "Symbol", field: "symbol", maxWidth: 140 },
   {
     headerName: "Quantity",
     field: "quantity",
+    type: "rightAlignedColumn",
+    maxWidth: 180,
     valueFormatter: (p) => formatNumber(p.value as number, 4),
+    cellRenderer: (p: ICellRendererParams<PositionRow>) => {
+      const qty = p.value as number;
+      return (
+        <span style={{ ...numeric(), color: qty >= 0 ? color.ok : color.dangerText }}>
+          {formatNumber(qty, 4)}
+        </span>
+      );
+    },
   },
 ];
 
@@ -90,6 +114,15 @@ export function Blotter({ refreshKey }: BlotterProps) {
   const stillOpen = new Set(rows.filter(isOpen).map((r) => r.client_order_id));
   const effectiveCanceling = new Set([...canceling].filter((id) => stillOpen.has(id)));
 
+  const StatusCell = (params: ICellRendererParams<BlotterRow>) => {
+    const row = params.data;
+    if (!row) return null;
+    const inFlight = effectiveCanceling.has(row.client_order_id);
+    const label = inFlight ? "canceling…" : row.status;
+    const tone = inFlight ? "warn" : statusTone(row.status);
+    return <Badge tone={tone}>{label}</Badge>;
+  };
+
   const CancelCell = (params: ICellRendererParams<BlotterRow>) => {
     const row = params.data;
     if (!row || !isOpen(row)) return null;
@@ -98,7 +131,12 @@ export function Blotter({ refreshKey }: BlotterProps) {
       <Button
         disabled={inFlight}
         onClick={() => void cancel(row)}
-        style={{ height: 28, padding: "0 12px" }}
+        style={{
+          height: 28,
+          padding: "0 14px",
+          borderRadius: radius.md,
+          transition: transitions("background", "border-color"),
+        }}
       >
         {inFlight ? "Canceling…" : "Cancel"}
       </Button>
@@ -109,15 +147,18 @@ export function Blotter({ refreshKey }: BlotterProps) {
     {
       headerName: "Time",
       field: "occurred_at",
+      maxWidth: 130,
       valueFormatter: (p) => formatTime(p.value as string),
     },
     { headerName: "Sleeve", field: "sleeve_id" },
     { headerName: "Symbol", field: "symbol", maxWidth: 110 },
-    { headerName: "Side", field: "side", maxWidth: 100, cellRenderer: SideCell },
-    { headerName: "Qty", field: "quantity", maxWidth: 110 },
+    { headerName: "Side", field: "side", maxWidth: 110, cellRenderer: SideCell },
+    { headerName: "Qty", field: "quantity", maxWidth: 110, type: "rightAlignedColumn" },
     {
       headerName: "Status",
       field: "status",
+      maxWidth: 170,
+      cellRenderer: StatusCell,
       valueFormatter: (p) =>
         p.data && effectiveCanceling.has(p.data.client_order_id)
           ? "canceling…"
@@ -140,55 +181,108 @@ export function Blotter({ refreshKey }: BlotterProps) {
   const initialLoading = events.loading && !events.data;
   const loadError = events.error;
 
+  // Summary metrics — derived from the current projection for the KPI strip.
+  const openCount = rows.filter(isOpen).length;
+  const filledCount = rows.filter((r) => r.status.toLowerCase() === "filled").length;
+  const rejectedCount = rows.filter((r) =>
+    ["rejected", "submit_failed"].includes(r.status.toLowerCase()),
+  ).length;
+
   return (
     <StackLayout gap={2}>
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Positions</H3>
-        <Text color="secondary" styleAs="label">
-          Net open quantity per sleeve and symbol
-        </Text>
-        <div style={{ marginTop: 12 }}>
-          {initialLoading ? (
-            <Spinner />
-          ) : loadError ? (
-            <Text color="error">Could not load positions: {loadError}</Text>
-          ) : positions.length > 0 ? (
-            <DataGrid<PositionRow>
-              rows={positions}
-              columns={positionColumns}
-              getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
-              height={240}
-            />
-          ) : (
-            <Text color="secondary">No open positions yet — fills will appear here.</Text>
-          )}
-        </div>
-      </Card>
-      <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <H3 style={{ marginTop: 0 }}>Order blotter</H3>
-          {cancelError && <Text color="error">{cancelError}</Text>}
-        </div>
-        <Text color="secondary" styleAs="label">
-          Every order from the event log — open orders can be canceled inline
-        </Text>
-        <div style={{ marginTop: 12 }}>
-          {initialLoading ? (
-            <Spinner />
-          ) : loadError ? (
-            <Text color="error">Could not load orders: {loadError}</Text>
-          ) : rows.length > 0 ? (
-            <DataGrid<BlotterRow>
-              rows={rows}
-              columns={orderColumns}
-              getRowId={(r) => r.client_order_id}
-              height={420}
-            />
-          ) : (
-            <Text color="secondary">No orders yet — submit signals to generate activity.</Text>
-          )}
-        </div>
-      </Card>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+          gap: space.lg,
+        }}
+      >
+        <MetricTile
+          label="Open Orders"
+          value={openCount}
+          tone="accent"
+          hint="Working / cancelable"
+        />
+        <MetricTile label="Filled" value={filledCount} tone="ok" hint="Completed today" />
+        <MetricTile
+          label="Rejected"
+          value={rejectedCount}
+          tone={rejectedCount > 0 ? "danger" : "neutral"}
+          hint="Rejected / failed"
+        />
+        <MetricTile label="Positions" value={positions.length} hint="Sleeve × symbol" />
+      </div>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="Live"
+          title="Positions"
+          caption="Net open quantity per sleeve and symbol"
+          actions={
+            positions.length > 0 ? (
+              <Badge tone="muted">
+                {positions.length} {positions.length === 1 ? "row" : "rows"}
+              </Badge>
+            ) : undefined
+          }
+        />
+        {initialLoading ? (
+          <LoadingState label="Loading positions…" />
+        ) : loadError ? (
+          <EmptyState title="Couldn't load positions" message={loadError} icon="⚠" />
+        ) : positions.length > 0 ? (
+          <DataGrid<PositionRow>
+            rows={positions}
+            columns={positionColumns}
+            getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
+            height={240}
+          />
+        ) : (
+          <EmptyState
+            title="No open positions"
+            message="Fills will appear here as orders execute."
+            icon="◇"
+          />
+        )}
+      </Panel>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="Order flow"
+          title="Order blotter"
+          caption="Every order from the event log — open orders can be canceled inline"
+          actions={
+            <div style={{ display: "flex", alignItems: "center", gap: space.sm }}>
+              {cancelError && (
+                <span style={{ ...text.caption, color: color.dangerText }}>{cancelError}</span>
+              )}
+              {rows.length > 0 && (
+                <Badge tone={openCount > 0 ? "accent" : "muted"} dot={openCount > 0}>
+                  {openCount} open
+                </Badge>
+              )}
+            </div>
+          }
+        />
+        {initialLoading ? (
+          <LoadingState label="Loading orders…" />
+        ) : loadError ? (
+          <EmptyState title="Couldn't load orders" message={loadError} icon="⚠" />
+        ) : rows.length > 0 ? (
+          <DataGrid<BlotterRow>
+            rows={rows}
+            columns={orderColumns}
+            getRowId={(r) => r.client_order_id}
+            height={420}
+          />
+        ) : (
+          <EmptyState
+            title="No orders yet"
+            message="Submit signals to generate order activity."
+            icon="◎"
+          />
+        )}
+      </Panel>
     </StackLayout>
   );
 }

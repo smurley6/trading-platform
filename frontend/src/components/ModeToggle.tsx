@@ -9,6 +9,7 @@
 import { Button, Spinner, Text } from "@salt-ds/core";
 import { useState } from "react";
 import { api } from "../lib/api";
+import { color, radius, shadow, space, z } from "../lib/tokens";
 import type { LiveReadiness, Sleeve } from "../lib/types";
 
 interface ModeToggleProps {
@@ -75,9 +76,9 @@ export function ModeToggle({ sleeves, onChanged }: ModeToggleProps) {
         style={{
           display: "inline-flex",
           padding: 2,
-          borderRadius: 12,
-          background: "rgba(148,163,184,0.12)",
-          border: "1px solid rgba(148,163,184,0.25)",
+          borderRadius: radius.lg,
+          background: color.panelInset,
+          border: `1px solid ${color.hairline}`,
         }}
       >
         <Segment
@@ -106,13 +107,13 @@ export function ModeToggle({ sleeves, onChanged }: ModeToggleProps) {
             position: "absolute",
             top: "calc(100% + 8px)",
             left: 0,
-            zIndex: 50,
+            zIndex: z.popover,
             width: 340,
-            padding: 14,
-            borderRadius: 10,
-            background: "#0f172a",
-            border: "1px solid rgba(148,163,184,0.3)",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+            padding: space.lg,
+            borderRadius: radius.lg,
+            background: color.panelRaised,
+            border: `1px solid ${color.faintBorder}`,
+            boxShadow: shadow.popover,
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -123,7 +124,7 @@ export function ModeToggle({ sleeves, onChanged }: ModeToggleProps) {
                 cursor: "pointer",
                 background: "transparent",
                 border: "none",
-                color: "#94a3b8",
+                color: color.muted,
                 fontSize: 16,
                 lineHeight: 1,
               }}
@@ -148,7 +149,7 @@ export function ModeToggle({ sleeves, onChanged }: ModeToggleProps) {
                 <div key={r.sleeve_id}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <span style={{ fontWeight: 600, fontSize: 13 }}>{r.sleeve_id}</span>
-                    <span style={{ fontSize: 12, color: r.ready ? "#4ade80" : "#f87171" }}>
+                    <span style={{ fontSize: 12, color: r.ready ? color.ok : color.dangerText }}>
                       {r.ready ? "READY" : "NOT READY"}
                     </span>
                   </div>
@@ -159,10 +160,10 @@ export function ModeToggle({ sleeves, onChanged }: ModeToggleProps) {
                         style={{ display: "flex", gap: 8, fontSize: 12, padding: "2px 0" }}
                         title={c.detail}
                       >
-                        <span style={{ color: c.passed ? "#4ade80" : "#f87171" }}>
+                        <span style={{ color: c.passed ? color.ok : color.dangerText }}>
                           {c.passed ? "✓" : "✗"}
                         </span>
-                        <span style={{ color: "#cbd5e1" }}>{c.name}</span>
+                        <span style={{ color: color.textDim }}>{c.name}</span>
                       </li>
                     ))}
                   </ul>
@@ -209,9 +210,9 @@ function Segment({
   disabled: boolean;
   onClick: () => void;
 }) {
-  const activeBg = tone === "live" ? "rgba(239,68,68,0.22)" : "rgba(76,154,255,0.22)";
-  const activeColor = tone === "live" ? "#f87171" : "#7cb3ff";
-  const activeBorder = tone === "live" ? "#ef4444" : "#4c9aff";
+  const activeBg = tone === "live" ? color.dangerSoft : color.accentSoft;
+  const activeColor = tone === "live" ? color.dangerText : color.accentText;
+  const activeBorder = tone === "live" ? color.danger : color.accentBorder;
   return (
     <button
       role="tab"
@@ -220,13 +221,13 @@ function Segment({
       onClick={onClick}
       style={{
         cursor: disabled ? "default" : "pointer",
-        padding: "3px 12px",
-        borderRadius: 10,
+        padding: "4px 14px",
+        borderRadius: radius.md,
         fontSize: 12,
         fontWeight: 700,
-        letterSpacing: 0.4,
+        letterSpacing: "0.04em",
         background: active ? activeBg : "transparent",
-        color: active ? activeColor : "#94a3b8",
+        color: active ? activeColor : color.muted,
         border: `1px solid ${active ? activeBorder : "transparent"}`,
       }}
     >

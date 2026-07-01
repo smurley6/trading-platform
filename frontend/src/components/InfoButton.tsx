@@ -6,6 +6,7 @@
 // scrollable into view. Closes on click-outside or Escape.
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { color, radius, shadow } from "../lib/tokens";
 
 interface InfoButtonProps {
   title: string;
@@ -63,9 +64,9 @@ export function InfoButton({ title, children, align = "left" }: InfoButtonProps)
           fontFamily: "Georgia, 'Times New Roman', serif",
           fontWeight: 700,
           lineHeight: 1,
-          color: open ? "#7cb3ff" : "#94a3b8",
+          color: open ? color.accentText : color.muted,
           background: "transparent",
-          border: `1px solid ${open ? "#4c9aff" : "rgba(148,163,184,0.55)"}`,
+          border: `1px solid ${open ? color.accentBorder : "rgba(148,163,184,0.45)"}`,
         }}
       >
         i
@@ -78,13 +79,13 @@ export function InfoButton({ title, children, align = "left" }: InfoButtonProps)
             width: 360,
             maxWidth: "min(92vw, 520px)",
             padding: 14,
-            borderRadius: 10,
-            background: "#0f172a",
-            border: "1px solid rgba(148,163,184,0.3)",
-            boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
+            borderRadius: radius.lg,
+            background: color.panelRaised,
+            border: `1px solid ${color.faintBorder}`,
+            boxShadow: shadow.popover,
             fontSize: 13,
             lineHeight: 1.5,
-            color: "#cbd5e1",
+            color: color.textDim,
             textAlign: "left",
             cursor: "default",
             whiteSpace: "normal",
@@ -98,7 +99,7 @@ export function InfoButton({ title, children, align = "left" }: InfoButtonProps)
               marginBottom: 8,
             }}
           >
-            <strong style={{ color: "#e2e8f0" }}>{title}</strong>
+            <strong style={{ color: color.text }}>{title}</strong>
             <button
               type="button"
               onClick={() => setOpen(false)}
@@ -107,7 +108,7 @@ export function InfoButton({ title, children, align = "left" }: InfoButtonProps)
                 cursor: "pointer",
                 background: "transparent",
                 border: "none",
-                color: "#94a3b8",
+                color: color.muted,
                 fontSize: 16,
                 lineHeight: 1,
                 padding: 0,

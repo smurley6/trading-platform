@@ -1,12 +1,12 @@
 // App shell: header (paper/live indicator + kill switch), navigation, and the live event
 // stream that drives refreshes across every screen.
 
-import { Spinner, Text } from "@salt-ds/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KillSwitchControl } from "./components/KillSwitchControl";
 import { LiveIndicator } from "./components/LiveIndicator";
 import { ModeToggle } from "./components/ModeToggle";
 import { StatusStrip } from "./components/StatusStrip";
+import { EmptyState, LoadingState } from "./components/ui";
 import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
@@ -15,6 +15,7 @@ import { Proposals } from "./features/proposals/Proposals";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { SignalFeed } from "./features/signals/SignalFeed";
 import { api } from "./lib/api";
+import { color, radius, shadow, space, text, transitions, z } from "./lib/tokens";
 import type { Sleeve, StoredEventDto } from "./lib/types";
 import { useEventStream } from "./lib/useEventStream";
 import { useLoader } from "./lib/useLoader";
@@ -76,55 +77,87 @@ export function App() {
 
   return (
     <div style={{ minHeight: "100vh" }}>
-      <header
+      <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          padding: "12px 20px",
-          borderBottom: "1px solid rgba(255,255,255,0.1)",
-          flexWrap: "wrap",
+          position: "sticky",
+          top: 0,
+          zIndex: z.strip,
+          background: "rgba(10,13,20,0.82)",
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
+          borderBottom: `1px solid ${color.hairline}`,
         }}
       >
-        <strong style={{ fontSize: 18 }}>Trading Platform</strong>
-        <ModeToggle sleeves={sleeveList} onChanged={() => setRefreshKey((k) => k + 1)} />
-        <LiveIndicator connected={connected} signalCount={signalCount} />
-        <div style={{ flex: 1 }} />
-        <KillSwitchControl engaged={engaged} busy={killBusy} onToggle={(n) => void toggleKill(n)} />
-      </header>
+        <header
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: space.lg,
+            padding: "12px 24px",
+            flexWrap: "wrap",
+          }}
+        >
+          <BrandLockup />
+          <ModeToggle sleeves={sleeveList} onChanged={() => setRefreshKey((k) => k + 1)} />
+          <LiveIndicator connected={connected} signalCount={signalCount} />
+          <div style={{ flex: 1 }} />
+          <KillSwitchControl
+            engaged={engaged}
+            busy={killBusy}
+            onToggle={(n) => void toggleKill(n)}
+          />
+        </header>
 
-      <StatusStrip
-        connected={connected}
-        sleeves={sleeveList}
-        killEngaged={engaged}
-        refreshKey={refreshKey}
-      />
+        <StatusStrip
+          connected={connected}
+          sleeves={sleeveList}
+          killEngaged={engaged}
+          refreshKey={refreshKey}
+        />
 
-      <nav style={{ display: "flex", gap: 8, padding: "10px 20px" }}>
-        {NAV.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => setView(item.id)}
-            style={{
-              cursor: "pointer",
-              borderRadius: 6,
-              padding: "6px 14px",
-              fontSize: 14,
-              color: "inherit",
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: view === item.id ? "rgba(76,154,255,0.2)" : "transparent",
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
+        <nav
+          style={{
+            display: "flex",
+            gap: space.xs,
+            padding: "8px 24px",
+            flexWrap: "wrap",
+            borderTop: `1px solid ${color.hairline}`,
+          }}
+        >
+          {NAV.map((item) => {
+            const active = view === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setView(item.id)}
+                aria-current={active ? "page" : undefined}
+                style={{
+                  cursor: "pointer",
+                  borderRadius: radius.md,
+                  padding: "6px 14px",
+                  ...text.label,
+                  fontWeight: active ? 700 : 500,
+                  color: active ? color.accentText : color.muted,
+                  border: `1px solid ${active ? color.accentBorder : "transparent"}`,
+                  background: active ? color.accentSoft : "transparent",
+                  transition: transitions("background", "color", "border-color"),
+                }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+      </div>
 
-      <main style={{ padding: "8px 20px 40px" }}>
+      <main style={{ padding: "24px 24px 56px", maxWidth: 1600, margin: "0 auto" }}>
         {sleeves.loading && !sleeves.data ? (
-          <Spinner />
+          <LoadingState label="Connecting to backend…" />
         ) : sleeves.error ? (
-          <Text color="error">Could not reach backend: {sleeves.error}</Text>
+          <EmptyState
+            title="Backend unreachable"
+            message={`Could not reach backend: ${sleeves.error}`}
+          />
         ) : (
           mountedViews.map((v) => (
             <div key={v} style={{ display: v === view ? "block" : "none" }}>
@@ -133,6 +166,50 @@ export function App() {
           ))
         )}
       </main>
+    </div>
+  );
+}
+
+// Brand lockup: a compact monogram mark + wordmark. Deliberately restrained — the mark carries
+// the accent, the wordmark carries the hierarchy.
+function BrandLockup() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div
+        aria-hidden
+        style={{
+          width: 30,
+          height: 30,
+          borderRadius: radius.md,
+          display: "grid",
+          placeItems: "center",
+          background: `linear-gradient(140deg, ${color.accentStrong}, ${color.accent})`,
+          boxShadow: shadow.glowAccent,
+          color: "#fff",
+          fontWeight: 800,
+          fontSize: 15,
+          letterSpacing: "-0.03em",
+        }}
+      >
+        T
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
+        <strong style={{ ...text.h3, color: color.text, letterSpacing: "-0.01em" }}>
+          Trading Platform
+        </strong>
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.18em",
+            color: color.muted,
+            textTransform: "uppercase",
+            marginTop: 2,
+          }}
+        >
+          Terminal
+        </span>
+      </div>
     </div>
   );
 }

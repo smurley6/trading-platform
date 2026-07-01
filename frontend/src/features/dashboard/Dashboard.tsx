@@ -1,14 +1,26 @@
 // Portfolio dashboard (FR-UI-6): aggregate + per-sleeve, equity curve, paper/live indicator.
 
-import type { ColDef } from "ag-grid-community";
-import { Card, H2, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
+import type { ColDef, ICellRendererParams } from "ag-grid-community";
+import { StackLayout } from "@salt-ds/core";
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
+import {
+  Badge,
+  EmptyState,
+  Figure,
+  LoadingState,
+  MetricTile,
+  Panel,
+  SectionHeader,
+  Segmented,
+} from "../../components/ui";
 import { api } from "../../lib/api";
 import { formatMoney, formatNumber } from "../../lib/format";
 import { equitySeries, latestSnapshots, positionRows } from "../../lib/projections";
 import type { SleeveSnapshot } from "../../lib/projections";
+import { color, pillStyle, space } from "../../lib/tokens";
 import type { LivePosition, LivePositionsResult, Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 
@@ -23,38 +35,88 @@ interface SleeveRow {
   positions: number;
 }
 
+// Right-aligned numeric cell: mono/tabular figure so the design's numeral rule applies in-grid.
+function moneyCell<T>(params: ICellRendererParams<T>): ReactNode {
+  return <Figure color={color.textDim}>{formatMoney(params.value as number | string)}</Figure>;
+}
+
+// P&L cell: mono figure auto-colored green/red by sign.
+function pnlCell<T>(params: ICellRendererParams<T>): ReactNode {
+  const n = Number(params.value);
+  return (
+    <Figure pnl={Number.isNaN(n) ? 0 : n}>{formatMoney(params.value as number | string)}</Figure>
+  );
+}
+
+// Count cell: mono figure in the dim body tone.
+function countCell<T>(params: ICellRendererParams<T>): ReactNode {
+  return <Figure color={color.textDim}>{formatNumber(params.value as number, 0)}</Figure>;
+}
+
+// Mode pill (paper/live) rendered as an on-theme badge inside the grid.
+function modeCell<T>(params: ICellRendererParams<T>): ReactNode {
+  const mode = String(params.value ?? "").toLowerCase();
+  const live = mode === "live";
+  return (
+    <span style={{ ...pillStyle(live ? "danger" : "muted"), fontSize: 10 }}>
+      {mode ? mode.toUpperCase() : "—"}
+    </span>
+  );
+}
+
 const columns: ColDef<SleeveRow>[] = [
-  { headerName: "Sleeve", field: "id" },
-  { headerName: "Strategy", field: "strategy_id" },
-  { headerName: "Mode", field: "mode", maxWidth: 110 },
+  { headerName: "Sleeve", field: "id", minWidth: 140 },
+  { headerName: "Strategy", field: "strategy_id", minWidth: 140 },
+  { headerName: "Mode", field: "mode", maxWidth: 110, cellRenderer: modeCell },
   {
     headerName: "Allocated",
     field: "allocated",
-    valueFormatter: (p) => formatMoney(p.value as string),
+    type: "rightAlignedColumn",
+    cellRenderer: moneyCell,
   },
-  { headerName: "Equity", field: "equity", valueFormatter: (p) => formatMoney(p.value as number) },
-  { headerName: "Positions", field: "positions", maxWidth: 130 },
+  {
+    headerName: "Equity",
+    field: "equity",
+    type: "rightAlignedColumn",
+    cellRenderer: moneyCell,
+  },
+  {
+    headerName: "Positions",
+    field: "positions",
+    maxWidth: 130,
+    type: "rightAlignedColumn",
+    cellRenderer: countCell,
+  },
 ];
 
 const livePositionColumns: ColDef<LivePosition>[] = [
   { headerName: "Symbol", field: "symbol", maxWidth: 120 },
   { headerName: "Sleeve", field: "sleeve_id" },
-  { headerName: "Qty", field: "quantity", maxWidth: 110 },
+  {
+    headerName: "Qty",
+    field: "quantity",
+    maxWidth: 110,
+    type: "rightAlignedColumn",
+    cellRenderer: countCell,
+  },
   {
     headerName: "Avg price",
     field: "avg_price",
-    valueFormatter: (p) => formatMoney(p.value as string),
+    type: "rightAlignedColumn",
+    cellRenderer: moneyCell,
   },
-  { headerName: "Last", field: "last", valueFormatter: (p) => formatMoney(p.value as string) },
+  { headerName: "Last", field: "last", type: "rightAlignedColumn", cellRenderer: moneyCell },
   {
     headerName: "Market value",
     field: "market_value",
-    valueFormatter: (p) => formatMoney(p.value as string),
+    type: "rightAlignedColumn",
+    cellRenderer: moneyCell,
   },
   {
     headerName: "Unrealized P&L",
     field: "unrealized_pnl",
-    valueFormatter: (p) => formatMoney(p.value as string),
+    type: "rightAlignedColumn",
+    cellRenderer: pnlCell,
   },
 ];
 
@@ -111,28 +173,28 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-          gap: 16,
+          gap: space.lg,
         }}
       >
-        <SummaryCard label="Total equity" value={formatMoney(totalEquity)} />
-        <SummaryCard label="Sleeves" value={formatNumber(sleeves.length, 0)} />
-        <SummaryCard label="Open positions" value={formatNumber(openPositions, 0)} />
-        <SummaryCard label="Pending proposals" value={formatNumber(pendingProposals, 0)} />
-        <SummaryCard label="Cycle mode" value={cycleMode} />
-        <SummaryCard
+        <MetricTile label="Total equity" value={formatMoney(totalEquity)} tone="accent" />
+        <MetricTile label="Sleeves" value={formatNumber(sleeves.length, 0)} />
+        <MetricTile label="Open positions" value={formatNumber(openPositions, 0)} />
+        <MetricTile label="Pending proposals" value={formatNumber(pendingProposals, 0)} />
+        <MetricTile label="Cycle mode" value={cycleMode} />
+        <MetricTile
           label="Trading mode"
           value={tradingLive ? "LIVE" : "PAPER"}
           tone={tradingLive ? "danger" : "ok"}
         />
-        <SummaryCard
+        <MetricTile
           label="Kill switch"
           value={killEngaged ? "HALTED" : "ARMED"}
           tone={killEngaged ? "danger" : "ok"}
         />
         {liveOn && (
           <>
-            <SummaryCard label="Live market value" value={formatMoney(liveMarketValue)} />
-            <SummaryCard
+            <MetricTile label="Live market value" value={formatMoney(liveMarketValue)} />
+            <MetricTile
               label="Unrealized P&L"
               value={formatMoney(liveUnrealized)}
               tone={liveUnrealized >= 0 ? "ok" : "danger"}
@@ -142,66 +204,87 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
       </div>
 
       {liveOn && livePositions.length > 0 && (
-        <Card>
-          <H3 style={{ marginTop: 0 }}>Live positions</H3>
-          <DataGrid<LivePosition>
-            rows={livePositions}
-            columns={livePositionColumns}
-            getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
-            height={Math.max(140, 60 + livePositions.length * 44)}
+        <Panel padded={false}>
+          <SectionHeader
+            style={{ padding: `${space.xl}px ${space.xl}px 0` }}
+            eyebrow="Real-time feed"
+            title="Live positions"
+            caption="Marks tracking the live market data feed"
+            actions={
+              <Badge tone="ok" dot>
+                LIVE QUOTES
+              </Badge>
+            }
           />
-        </Card>
+          <div style={{ padding: `0 ${space.xl}px ${space.xl}px` }}>
+            <DataGrid<LivePosition>
+              rows={livePositions}
+              columns={livePositionColumns}
+              getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
+              height={Math.max(140, 60 + livePositions.length * 44)}
+            />
+          </div>
+        </Panel>
       )}
 
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Sleeves</H3>
-        {events.loading && !events.data ? (
-          <Spinner />
-        ) : events.error ? (
-          <Text color="error">Could not load portfolio activity: {events.error}</Text>
-        ) : rows.length > 0 ? (
-          <DataGrid<SleeveRow>
-            rows={rows}
-            columns={columns}
-            getRowId={(r) => r.id}
-            height={Math.max(140, 60 + rows.length * 44)}
-          />
-        ) : (
-          <Text color="secondary">No sleeves configured yet.</Text>
-        )}
-      </Card>
-
-      <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <H3 style={{ marginTop: 0 }}>Equity curve</H3>
-          <div style={{ display: "flex", gap: 8 }}>
-            {sleeves.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => setSelected(s.id)}
-                style={{
-                  cursor: "pointer",
-                  border: "1px solid rgba(255,255,255,0.15)",
-                  background: s.id === activeSleeve ? "rgba(76,154,255,0.2)" : "transparent",
-                  color: "inherit",
-                  borderRadius: 6,
-                  padding: "2px 10px",
-                  fontSize: 12,
-                }}
-              >
-                {s.id}
-              </button>
-            ))}
-          </div>
+      <Panel padded={false}>
+        <SectionHeader
+          style={{ padding: `${space.xl}px ${space.xl}px 0` }}
+          eyebrow="Portfolio"
+          title="Sleeves"
+          caption="Allocation and equity across strategy sleeves"
+          actions={
+            <Badge tone="muted">
+              {sleeves.length} {sleeves.length === 1 ? "sleeve" : "sleeves"}
+            </Badge>
+          }
+        />
+        <div style={{ padding: `0 ${space.xl}px ${space.xl}px` }}>
+          {events.loading && !events.data ? (
+            <LoadingState label="Loading portfolio activity…" />
+          ) : events.error ? (
+            <EmptyState title="Could not load activity" message={events.error} />
+          ) : rows.length > 0 ? (
+            <DataGrid<SleeveRow>
+              rows={rows}
+              columns={columns}
+              getRowId={(r) => r.id}
+              height={Math.max(140, 60 + rows.length * 44)}
+            />
+          ) : (
+            <EmptyState
+              title="No sleeves configured"
+              message="Configure a strategy sleeve to begin allocating capital."
+            />
+          )}
         </div>
+      </Panel>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="Performance"
+          title="Equity curve"
+          caption={activeSleeve ? `Snapshots for ${activeSleeve}` : undefined}
+          actions={
+            sleeves.length > 0 && activeSleeve != null ? (
+              <Segmented
+                size="sm"
+                options={sleeves.map((s) => ({ value: s.id, label: s.id }))}
+                value={activeSleeve}
+                onChange={setSelected}
+              />
+            ) : undefined
+          }
+        />
         {series.length > 0 ? (
           <EquityCurve data={series} />
         ) : (
-          <Text color="secondary">
-            No portfolio snapshots yet — submit signals to generate activity.
-          </Text>
+          <EmptyState
+            title="No snapshots yet"
+            message="Submit signals to generate portfolio activity and plot the equity curve."
+          />
         )}
-      </Card>
+      </Panel>
     </StackLayout>
   );
 }
@@ -240,30 +323,4 @@ function useLivePositions(refreshKey: number): LivePositionsResult {
   }, [refreshKey]);
 
   return state;
-}
-
-const TONE_COLOR: Record<"ok" | "danger", string> = {
-  ok: "#4ade80",
-  danger: "#f87171",
-};
-
-function SummaryCard({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string;
-  tone?: "ok" | "danger" | "neutral";
-}) {
-  return (
-    <Card>
-      <Text color="secondary" styleAs="label">
-        {label}
-      </Text>
-      <H2 style={{ margin: "4px 0 0", color: tone === "neutral" ? undefined : TONE_COLOR[tone] }}>
-        {value}
-      </H2>
-    </Card>
-  );
 }

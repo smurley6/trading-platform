@@ -2,6 +2,7 @@
 // which records it as an immutable user-action event.
 
 import { Button } from "@salt-ds/core";
+import { color, pillStyle } from "../lib/tokens";
 
 interface KillSwitchControlProps {
   engaged: boolean;
@@ -12,18 +13,16 @@ interface KillSwitchControlProps {
 export function KillSwitchControl({ engaged, busy, onToggle }: KillSwitchControlProps) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <span
-        style={{
-          padding: "2px 10px",
-          borderRadius: 12,
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: 0.4,
-          background: engaged ? "rgba(239,68,68,0.18)" : "rgba(34,197,94,0.16)",
-          color: engaged ? "#f87171" : "#4ade80",
-          border: `1px solid ${engaged ? "#ef4444" : "#22c55e"}`,
-        }}
-      >
+      <span style={pillStyle(engaged ? "danger" : "ok")}>
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: engaged ? color.dangerText : color.ok,
+            boxShadow: `0 0 6px ${engaged ? color.dangerText : color.ok}`,
+          }}
+        />
         {engaged ? "ORDERS HALTED" : "TRADING ARMED"}
       </span>
       <Button disabled={busy} onClick={() => onToggle(!engaged)}>

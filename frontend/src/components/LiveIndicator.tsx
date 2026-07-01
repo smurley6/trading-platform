@@ -6,6 +6,7 @@
 // badge showing how many signals arrived in the latest burst.
 
 import { useEffect, useRef, useState } from "react";
+import { color, pillStyle } from "../lib/tokens";
 
 const FADE_MS = 3000;
 
@@ -33,33 +34,24 @@ export function LiveIndicator({
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <span
-        style={{
-          padding: "2px 10px",
-          borderRadius: 12,
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: 0.4,
-          background: connected ? "rgba(34,197,94,0.16)" : "rgba(148,163,184,0.14)",
-          color: connected ? "#4ade80" : "#94a3b8",
-          border: `1px solid ${connected ? "#22c55e" : "#64748b"}`,
-        }}
-      >
+      <span style={pillStyle(connected ? "ok" : "muted")}>
+        {connected && (
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: color.ok,
+              boxShadow: `0 0 6px ${color.ok}`,
+            }}
+          />
+        )}
         {connected ? "LIVE" : "OFFLINE"}
       </span>
       {burst > 0 && (
         <span
           aria-live="polite"
-          style={{
-            padding: "2px 8px",
-            borderRadius: 12,
-            fontSize: 12,
-            fontWeight: 700,
-            background: "rgba(76,154,255,0.2)",
-            color: "#7cb3ff",
-            border: "1px solid #4c9aff",
-            transition: `opacity ${FADE_MS}ms ease-out`,
-          }}
+          style={{ ...pillStyle("accent"), transition: `opacity ${FADE_MS}ms ease-out` }}
         >
           +{burst}
         </span>

@@ -13,15 +13,16 @@
 // first (the DB is freshly collecting real data) — every empty state is an intentional message.
 
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Button, Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
+import { Button, StackLayout } from "@salt-ds/core";
 import { useMemo, useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataGrid } from "../../components/DataGrid";
 import { SignalDetail } from "../../components/SignalDetail";
 import { useToast } from "../../components/Toast";
+import { Badge, EmptyState, Figure, LoadingState, Panel, SectionHeader } from "../../components/ui";
 import { api } from "../../lib/api";
 import { formatNumber, formatTime } from "../../lib/format";
-import { color } from "../../lib/tokens";
+import { color, eyebrowStyle, numeric, radius, space, text, transitions } from "../../lib/tokens";
 import type { PredictedItem, ProposalItem, SignalFeedItem } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 
@@ -135,133 +136,159 @@ export function Proposals({ refreshKey }: ProposalsProps) {
     setExpandedSignal(null);
   };
 
+  const proposalsLoading = proposals.loading && !proposals.data;
+
   return (
     <StackLayout gap={2}>
       {/* ---- Section 1: actionable proposals --------------------------------------------- */}
-      <Card>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <H3 style={{ margin: 0 }}>Proposals</H3>
-            <ModeBadge mode={mode} />
-          </div>
-          {proposalRows.length > 0 && mode === "manual" && (
-            <Button
-              variant="cta"
-              disabled={anyBuying}
-              onClick={() =>
-                requestBuy({
-                  symbols: [],
-                  key: "*",
-                  displaySymbols: proposalRows.map((r) => r.symbol),
-                })
-              }
-              style={{ height: 30 }}
-            >
-              {buying.has("*") ? "Buying…" : `Buy all (${proposalRows.length})`}
-            </Button>
-          )}
-        </div>
+      <Panel>
+        <SectionHeader
+          eyebrow="Daily cycle"
+          title={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: space.md }}>
+              Proposals
+              <ModeBadge mode={mode} />
+            </span>
+          }
+          caption={
+            mode === "manual"
+              ? "Manual — review & approve; nothing trades until you click Buy. Click a row to see why."
+              : "Auto — trades placed automatically; these preview the upcoming round. Click a row to see why."
+          }
+          actions={
+            proposalRows.length > 0 && mode === "manual" ? (
+              <Button
+                variant="cta"
+                disabled={anyBuying}
+                onClick={() =>
+                  requestBuy({
+                    symbols: [],
+                    key: "*",
+                    displaySymbols: proposalRows.map((r) => r.symbol),
+                  })
+                }
+                style={{ height: 32 }}
+              >
+                {buying.has("*") ? "Buying…" : `Buy all (${proposalRows.length})`}
+              </Button>
+            ) : undefined
+          }
+        />
 
-        <Text color="secondary" styleAs="label">
-          {mode === "manual"
-            ? "Manual: review & approve — nothing trades until you click Buy. Click a row to see why."
-            : "Auto: trades placed automatically — these are the upcoming proposals. Click a row to see why."}
-        </Text>
-
-        <div style={{ marginTop: 12 }}>
-          {proposals.loading && !proposals.data ? (
-            <Spinner />
-          ) : proposals.error ? (
-            <Text color="error">Could not load proposals: {proposals.error}</Text>
-          ) : proposalRows.length === 0 ? (
-            <Text color="secondary">
-              No actionable proposals yet — the daily cycle has nothing to trade right now.
-            </Text>
-          ) : (
-            <DataGrid<ProposalItem>
-              rows={proposalRows}
-              columns={proposalColumns(mode, buying, anyBuying, (row) =>
-                requestBuy({
-                  symbols: [row.symbol],
-                  key: row.symbol,
-                  displaySymbols: [row.symbol],
-                }),
-              )}
-              getRowId={(r) => r.symbol}
-              onRowClick={openEvidence}
-              height={Math.min(120 + proposalRows.length * 44, 460)}
-            />
-          )}
-        </div>
-      </Card>
+        {proposalsLoading ? (
+          <LoadingState label="Loading proposals…" />
+        ) : proposals.error ? (
+          <EmptyState
+            title="Couldn’t load proposals"
+            message={proposals.error}
+            icon={<span aria-hidden>⚠</span>}
+          />
+        ) : proposalRows.length === 0 ? (
+          <EmptyState
+            title="No actionable proposals"
+            message="The daily cycle has nothing to trade right now. Candidates will appear here as signals accumulate."
+            icon={<span aria-hidden>◎</span>}
+          />
+        ) : (
+          <DataGrid<ProposalItem>
+            rows={proposalRows}
+            columns={proposalColumns(mode, buying, anyBuying, (row) =>
+              requestBuy({
+                symbols: [row.symbol],
+                key: row.symbol,
+                displaySymbols: [row.symbol],
+              }),
+            )}
+            getRowId={(r) => r.symbol}
+            onRowClick={openEvidence}
+            height={Math.min(120 + proposalRows.length * 44, 460)}
+          />
+        )}
+      </Panel>
 
       {/* ---- Evidence drill-down: "why this proposal?" ----------------------------------- */}
       {selectedProposal && (
-        <Card>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "baseline",
-              gap: 8,
-            }}
-          >
-            <H3 style={{ marginTop: 0 }}>Evidence — why {selectedProposal.symbol}?</H3>
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedProposal(null);
-                setExpandedSignal(null);
-              }}
-              aria-label="Close"
-              style={{
-                cursor: "pointer",
-                background: "transparent",
-                border: "none",
-                color: color.muted,
-                fontSize: 18,
-                lineHeight: 1,
-              }}
-            >
-              ×
-            </button>
-          </div>
+        <Panel raised>
+          <SectionHeader
+            eyebrow="Evidence"
+            title={
+              <span style={{ display: "inline-flex", alignItems: "center", gap: space.sm }}>
+                Why{" "}
+                <Figure color={color.accentText} weight={700}>
+                  {selectedProposal.symbol}
+                </Figure>
+                ?
+              </span>
+            }
+            caption={
+              <span style={{ display: "inline-flex", alignItems: "center", gap: space.sm }}>
+                Conviction
+                <Figure color={color.text}>
+                  {formatNumber(selectedProposal.conviction_score, 1)}
+                </Figure>
+              </span>
+            }
+            actions={
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedProposal(null);
+                  setExpandedSignal(null);
+                }}
+                aria-label="Close evidence"
+                style={{
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 28,
+                  height: 28,
+                  borderRadius: radius.md,
+                  background: "transparent",
+                  border: `1px solid ${color.hairline}`,
+                  color: color.muted,
+                  fontSize: 16,
+                  lineHeight: 1,
+                  transition: transitions("background", "color", "border-color"),
+                }}
+              >
+                ×
+              </button>
+            }
+          />
 
-          <Text styleAs="label" color="secondary">
-            Rationale
-          </Text>
+          <div style={eyebrowStyle()}>Rationale</div>
           <div
             style={{
-              marginTop: 4,
-              padding: 12,
-              borderRadius: 8,
+              marginTop: space.xs,
+              padding: space.md,
+              borderRadius: radius.md,
               background: color.panelSoft,
-              border: `1px solid ${color.faintBorder}`,
-              fontSize: 14,
-              lineHeight: 1.5,
+              border: `1px solid ${color.hairline}`,
+              ...text.body,
+              color: color.textDim,
             }}
           >
             {selectedProposal.rationale || "—"}
           </div>
 
-          <div style={{ marginTop: 16 }}>
-            <Text styleAs="label" color="secondary">
+          <div style={{ marginTop: space.lg }}>
+            <div style={eyebrowStyle()}>
               Contributing signals ({selectedProposal.contributing_signal_ids.length})
-            </Text>
+            </div>
             {selectedProposal.contributing_signal_ids.length === 0 ? (
-              <Text color="secondary" style={{ display: "block", marginTop: 6 }}>
+              <div style={{ ...text.body, color: color.muted, marginTop: space.sm }}>
                 No contributing signals recorded for this proposal.
-              </Text>
+              </div>
             ) : (
-              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div
+                style={{
+                  marginTop: space.sm,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: space.sm,
+                }}
+              >
                 {selectedProposal.contributing_signal_ids.map((id) => {
                   const sig = signalsById.get(id);
                   if (!sig) {
@@ -269,14 +296,16 @@ export function Proposals({ refreshKey }: ProposalsProps) {
                       <div
                         key={id}
                         style={{
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          border: `1px solid ${color.faintBorder}`,
+                          padding: `${space.sm}px ${space.md}px`,
+                          borderRadius: radius.md,
+                          border: `1px solid ${color.hairline}`,
+                          background: color.panelInset,
                           color: color.muted,
-                          fontSize: 13,
+                          ...text.caption,
                         }}
                       >
-                        signal {id} — not in recent feed
+                        signal <span style={numeric({ color: color.textDim })}>{id}</span> — not in
+                        recent feed
                       </div>
                     );
                   }
@@ -288,24 +317,32 @@ export function Proposals({ refreshKey }: ProposalsProps) {
                       style={{
                         textAlign: "left",
                         cursor: "pointer",
-                        padding: "8px 12px",
-                        borderRadius: 8,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: space.sm,
+                        flexWrap: "wrap",
+                        padding: `${space.sm}px ${space.md}px`,
+                        borderRadius: radius.md,
                         background: color.panelSoft,
-                        border: `1px solid ${color.faintBorder}`,
+                        border: `1px solid ${color.hairline}`,
                         color: color.textDim,
-                        fontSize: 13,
-                        lineHeight: 1.45,
+                        ...text.caption,
+                        transition: transitions("background", "border-color"),
                       }}
                     >
-                      <span style={{ color: color.accentText, fontWeight: 700 }}>
-                        {sig.source_type}
+                      <Badge tone="accent">{sig.source_type}</Badge>
+                      <span style={numeric({ color: color.text, fontWeight: 700 })}>
+                        {sig.ticker}
                       </span>
-                      <span style={{ color: color.muted }}> · </span>
-                      <span style={{ fontWeight: 700 }}>{sig.ticker}</span>
-                      <span style={{ color: color.muted }}> · </span>
-                      <span>sentiment {formatNumber(sig.sentiment, 2)}</span>
-                      <span style={{ color: color.muted }}> · </span>
-                      <span style={{ color: color.muted }}>{signalSnippet(sig)}</span>
+                      <span style={{ color: color.faint }}>·</span>
+                      <span style={{ color: color.muted }}>
+                        sentiment{" "}
+                        <Figure pnl={sig.sentiment}>{formatNumber(sig.sentiment, 2)}</Figure>
+                      </span>
+                      <span style={{ color: color.faint }}>·</span>
+                      <span style={{ color: color.muted, flex: 1, minWidth: 160 }}>
+                        {signalSnippet(sig)}
+                      </span>
                     </button>
                   );
                 })}
@@ -314,63 +351,86 @@ export function Proposals({ refreshKey }: ProposalsProps) {
           </div>
 
           {expandedSignal && (
-            <div style={{ marginTop: 12 }}>
+            <div style={{ marginTop: space.md }}>
               <SignalDetail signal={expandedSignal} onClose={() => setExpandedSignal(null)} />
             </div>
           )}
-        </Card>
+        </Panel>
       )}
 
       {/* ---- Section 2: predicted / incoming --------------------------------------------- */}
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Predicted / incoming</H3>
-        <Text color="secondary" styleAs="label">
-          Watch-tier candidates the cycle expects to act on next — likely upcoming buys (foresight
-          between auto-trades). Read-only.
-        </Text>
-        <div style={{ marginTop: 12 }}>
-          {proposals.loading && !proposals.data ? (
-            <Spinner />
-          ) : proposals.error ? (
-            <Text color="error">Could not load predicted candidates: {proposals.error}</Text>
-          ) : predictedRows.length === 0 ? (
-            <Text color="secondary">
-              Nothing incoming yet — no candidates near the trade threshold.
-            </Text>
-          ) : (
-            <DataGrid<PredictedItem>
-              rows={predictedRows}
-              columns={predictedColumns}
-              getRowId={(r) => r.symbol}
-              height={Math.min(120 + predictedRows.length * 44, 400)}
-            />
-          )}
-        </div>
-      </Card>
+      <Panel>
+        <SectionHeader
+          eyebrow="Foresight"
+          title="Predicted / incoming"
+          caption="Watch-tier candidates the cycle expects to act on next — likely upcoming buys. Read-only."
+          actions={
+            predictedRows.length > 0 ? (
+              <Badge tone="muted">{predictedRows.length} watching</Badge>
+            ) : undefined
+          }
+        />
+        {proposalsLoading ? (
+          <LoadingState label="Loading candidates…" />
+        ) : proposals.error ? (
+          <EmptyState
+            title="Couldn’t load candidates"
+            message={proposals.error}
+            icon={<span aria-hidden>⚠</span>}
+          />
+        ) : predictedRows.length === 0 ? (
+          <EmptyState
+            title="Nothing incoming"
+            message="No candidates near the trade threshold yet."
+            icon={<span aria-hidden>◔</span>}
+          />
+        ) : (
+          <DataGrid<PredictedItem>
+            rows={predictedRows}
+            columns={predictedColumns}
+            getRowId={(r) => r.symbol}
+            height={Math.min(120 + predictedRows.length * 44, 400)}
+          />
+        )}
+      </Panel>
 
       {/* ---- Section 3: classified signal feed ------------------------------------------- */}
-      <Card>
-        <H3 style={{ marginTop: 0 }}>Classified signal feed</H3>
-        <Text color="secondary" styleAs="label">
-          Most recent ingested + classified signals.
-        </Text>
-        <div style={{ marginTop: 12 }}>
-          {signals.loading && !signals.data ? (
-            <Spinner />
-          ) : signals.error ? (
-            <Text color="error">Could not load signals: {signals.error}</Text>
-          ) : feed.length === 0 ? (
-            <Text color="secondary">No real data yet — collecting.</Text>
-          ) : (
-            <DataGrid<SignalFeedItem>
-              rows={feed}
-              columns={signalColumns}
-              getRowId={(r) => r.signal_id}
-              height={420}
-            />
-          )}
-        </div>
-      </Card>
+      <Panel>
+        <SectionHeader
+          eyebrow="Live feed"
+          title="Classified signal feed"
+          caption="Most recent ingested + classified signals."
+          actions={
+            feed.length > 0 ? (
+              <Badge tone="accent" dot>
+                {feed.length} signals
+              </Badge>
+            ) : undefined
+          }
+        />
+        {signals.loading && !signals.data ? (
+          <LoadingState label="Loading signals…" />
+        ) : signals.error ? (
+          <EmptyState
+            title="Couldn’t load signals"
+            message={signals.error}
+            icon={<span aria-hidden>⚠</span>}
+          />
+        ) : feed.length === 0 ? (
+          <EmptyState
+            title="No signals yet"
+            message="No real data yet — the collector is gathering and classifying signals."
+            icon={<span aria-hidden>◌</span>}
+          />
+        ) : (
+          <DataGrid<SignalFeedItem>
+            rows={feed}
+            columns={signalColumns}
+            getRowId={(r) => r.signal_id}
+            height={420}
+          />
+        )}
+      </Panel>
 
       {/* ---- Buy confirmation -------------------------------------------------------------- */}
       <ConfirmDialog
@@ -398,29 +458,26 @@ export function Proposals({ refreshKey }: ProposalsProps) {
 function ModeBadge({ mode }: { mode: "auto" | "manual" }) {
   const isAuto = mode === "auto";
   return (
-    <span
+    <Badge
+      tone={isAuto ? "danger" : "accent"}
+      dot
       title={
         isAuto
           ? "Auto mode — trades are placed automatically by the cycle"
           : "Manual mode — proposals wait for your approval"
       }
-      style={{
-        padding: "2px 10px",
-        borderRadius: 12,
-        fontSize: 12,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
-        background: isAuto ? "rgba(239,68,68,0.18)" : "rgba(76,154,255,0.18)",
-        color: isAuto ? "#f87171" : "#7cb3ff",
-        border: `1px solid ${isAuto ? "#ef4444" : "#4c9aff"}`,
-      }}
     >
       {isAuto ? "AUTO" : "MANUAL"}
-    </span>
+    </Badge>
   );
 }
 
 // ---- Column definitions ---------------------------------------------------------------------
+
+// A mono/tabular text span for symbol/ticker cells so identifiers align like a terminal.
+function SymbolCell(params: ICellRendererParams<unknown, string>) {
+  return <span style={numeric({ color: color.text, fontWeight: 700 })}>{params.value ?? "—"}</span>;
+}
 
 function proposalColumns(
   mode: "auto" | "manual",
@@ -448,13 +505,20 @@ function proposalColumns(
     );
   };
 
+  const SideCell = (params: ICellRendererParams<ProposalItem, string>) => {
+    const side = params.value;
+    if (!side) return null;
+    return <Badge tone={side === "buy" ? "ok" : "danger"}>{side.toUpperCase()}</Badge>;
+  };
+
   const columns: ColDef<ProposalItem>[] = [
-    { headerName: "Symbol", field: "symbol", maxWidth: 120 },
-    { headerName: "Side", field: "side", maxWidth: 100 },
+    { headerName: "Symbol", field: "symbol", maxWidth: 120, cellRenderer: SymbolCell },
+    { headerName: "Side", field: "side", maxWidth: 100, cellRenderer: SideCell },
     {
       headerName: "Quantity",
       field: "quantity",
       maxWidth: 130,
+      type: "rightAlignedColumn",
       valueFormatter: (p) => formatNumber(p.value as string, 4),
     },
     {
@@ -462,6 +526,7 @@ function proposalColumns(
       field: "conviction_score",
       maxWidth: 130,
       sort: "desc",
+      type: "rightAlignedColumn",
       valueFormatter: (p) => formatNumber(p.value as number, 1),
     },
     { headerName: "Rationale", field: "rationale", flex: 2 },
@@ -482,12 +547,13 @@ function proposalColumns(
 }
 
 const predictedColumns: ColDef<PredictedItem>[] = [
-  { headerName: "Symbol", field: "symbol", maxWidth: 120 },
+  { headerName: "Symbol", field: "symbol", maxWidth: 120, cellRenderer: SymbolCell },
   {
     headerName: "Conviction",
     field: "conviction_score",
     maxWidth: 140,
     sort: "desc",
+    type: "rightAlignedColumn",
     valueFormatter: (p) => formatNumber(p.value as number, 1),
   },
   {
@@ -501,19 +567,28 @@ const predictedColumns: ColDef<PredictedItem>[] = [
   },
 ];
 
+// Sentiment cell: mono/tabular figure colored by sign (positive green, negative red).
+function SentimentCell(params: ICellRendererParams<SignalFeedItem, number>) {
+  const v = params.value;
+  if (v == null) return <span style={{ color: color.muted }}>—</span>;
+  return <Figure pnl={v}>{formatNumber(v, 2)}</Figure>;
+}
+
 const signalColumns: ColDef<SignalFeedItem>[] = [
   {
     headerName: "Time",
     field: "occurred_at",
+    type: "rightAlignedColumn",
     valueFormatter: (p) => formatTime(p.value as string),
   },
-  { headerName: "Ticker", field: "ticker", maxWidth: 110 },
+  { headerName: "Ticker", field: "ticker", maxWidth: 110, cellRenderer: SymbolCell },
   { headerName: "Source", field: "source_type" },
   {
     headerName: "Sentiment",
     field: "sentiment",
     maxWidth: 120,
-    valueFormatter: (p) => formatNumber(p.value as number, 2),
+    type: "rightAlignedColumn",
+    cellRenderer: SentimentCell,
   },
   {
     // Optional on older backends (the feed schema may omit it) — render a neutral "—" then.

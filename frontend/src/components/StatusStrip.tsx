@@ -4,7 +4,7 @@
 // it needs no new backend endpoint.
 
 import { api } from "../lib/api";
-import { color } from "../lib/tokens";
+import { color, numeric, space } from "../lib/tokens";
 import type { Sleeve } from "../lib/types";
 import { useLoader } from "../lib/useLoader";
 
@@ -46,11 +46,13 @@ export function StatusStrip({ connected, sleeves, killEngaged, refreshKey }: Sta
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 14,
+        gap: space.md,
         flexWrap: "wrap",
-        padding: "5px 20px",
-        borderBottom: `1px solid ${color.hairline}`,
+        padding: "6px 24px",
+        borderTop: `1px solid ${color.hairline}`,
         fontSize: 12,
+        fontWeight: 500,
+        letterSpacing: "0.01em",
         color: color.muted,
       }}
     >
@@ -75,11 +77,13 @@ export function StatusStrip({ connected, sleeves, killEngaged, refreshKey }: Sta
       <Sep />
       <Item label="proposals" value={String(proposalCount)} />
       <Sep />
-      <strong style={{ color: live ? color.dangerText : color.accentText }}>
+      <strong
+        style={{ color: live ? color.dangerText : color.accentText, letterSpacing: "0.04em" }}
+      >
         {live ? "LIVE" : "PAPER"}
       </strong>
       <Sep />
-      <strong style={{ color: killEngaged ? color.dangerText : color.ok }}>
+      <strong style={{ color: killEngaged ? color.dangerText : color.ok, letterSpacing: "0.04em" }}>
         {killEngaged ? "HALTED" : "ARMED"}
       </strong>
     </div>
@@ -89,7 +93,7 @@ export function StatusStrip({ connected, sleeves, killEngaged, refreshKey }: Sta
 function Item({ label, value }: { label: string; value: string }) {
   return (
     <span>
-      {label} <span style={{ color: color.textDim, fontWeight: 600 }}>{value}</span>
+      {label} <span style={{ ...numeric(), color: color.textDim, fontWeight: 600 }}>{value}</span>
     </span>
   );
 }
