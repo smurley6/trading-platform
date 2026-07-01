@@ -31,6 +31,10 @@ class BrokerPosition:
 class BrokerAccount:
     cash: Decimal
     equity: Decimal
+    # Spendable capital right now — the shared-pool headline (real accounts allow margin, so this
+    # can exceed cash). Defaults to cash so pre-existing constructions (and cash-only simulators)
+    # stay correct without change.
+    buying_power: Decimal = Decimal("0")
 
 
 class OrderNotFoundError(Exception):

@@ -124,7 +124,8 @@ class PaperBroker:
         for symbol, holding in self._holdings.items():
             quote = await self._market_data.get_quote(symbol)
             equity += holding.quantity * quote.last
-        return BrokerAccount(cash=self._cash, equity=equity)
+        # Cash-account simulator: spendable buying power is simply the uninvested cash.
+        return BrokerAccount(cash=self._cash, equity=equity, buying_power=self._cash)
 
     def _record_rejection(
         self,

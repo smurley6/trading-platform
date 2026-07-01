@@ -419,6 +419,27 @@ class LivePositionsOut(BaseModel):
     positions: list[LivePositionOut]
 
 
+class CapitalAllocationOut(BaseModel):
+    # One algo's slice of the shared pool: what it currently holds in the one book (marked to the
+    # live feed when available). Attribution only — the capital itself is the single pool below.
+    sleeve_id: str
+    strategy_id: str
+    market_value: Decimal
+    unrealized_pnl: Decimal
+    positions: int
+
+
+class CapitalOut(BaseModel):
+    # The single shared capital pool = the live Alpaca account both algos draw from. `enabled` is
+    # False (and figures are zero) when no real account is wired, so the SPA renders a graceful
+    # empty state exactly like the other live feeds.
+    enabled: bool
+    cash: Decimal
+    equity: Decimal
+    buying_power: Decimal
+    allocations: list[CapitalAllocationOut]
+
+
 class KillSwitchIn(BaseModel):
     engaged: bool
 

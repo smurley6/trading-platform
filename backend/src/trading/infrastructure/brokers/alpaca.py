@@ -140,7 +140,13 @@ class AlpacaBroker:
         response = await self._client.get(f"{self._base_url}/v2/account", headers=self._headers)
         response.raise_for_status()
         data = response.json()
-        return BrokerAccount(cash=Decimal(str(data["cash"])), equity=Decimal(str(data["equity"])))
+        # `buying_power` is the shared capital pool's spendable headline (Alpaca paper accounts are
+        # margin-enabled, so it typically exceeds cash). Fall back to cash if the field is absent.
+        return BrokerAccount(
+            cash=Decimal(str(data["cash"])),
+            equity=Decimal(str(data["equity"])),
+            buying_power=Decimal(str(data.get("buying_power", data["cash"]))),
+        )
 
     async def _get_by_client_order_id(self, client_order_id: str) -> BrokerOrder:
         response = await self._client.get(

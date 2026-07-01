@@ -211,6 +211,25 @@ export interface LivePositionsResult {
   positions: LivePosition[];
 }
 
+// The single shared capital pool (GET /capital) both algos draw from = the live Alpaca account.
+// `enabled: false` (with zeroed figures) when no real account is wired — treat as a graceful
+// no-op, like the other live feeds. Numeric fields arrive as Decimal strings (parse with Number).
+export interface CapitalAllocation {
+  sleeve_id: string;
+  strategy_id: string;
+  market_value: string;
+  unrealized_pnl: string;
+  positions: number;
+}
+
+export interface CapitalResult {
+  enabled: boolean;
+  cash: string;
+  equity: string;
+  buying_power: string;
+  allocations: CapitalAllocation[];
+}
+
 // Daily-cycle proposals (GET /proposals). The cycle `mode` decides whether the actionable
 // `proposals` are awaiting manual approval ("manual") or have already been placed ("auto",
 // in which case these rows preview the next round). Numeric quantities arrive as Decimal

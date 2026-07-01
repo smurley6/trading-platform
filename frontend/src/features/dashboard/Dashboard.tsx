@@ -21,7 +21,7 @@ import { formatMoney, formatNumber } from "../../lib/format";
 import { equitySeries, latestSnapshots, positionRows } from "../../lib/projections";
 import type { SleeveSnapshot } from "../../lib/projections";
 import { color, pillStyle, space } from "../../lib/tokens";
-import type { LivePosition, LivePositionsResult, Sleeve } from "../../lib/types";
+import type { CapitalResult, LivePosition, LivePositionsResult, Sleeve } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 
 const LIVE_POLL_INTERVAL_MS = 5_000;
@@ -69,7 +69,9 @@ const columns: ColDef<SleeveRow>[] = [
   { headerName: "Strategy", field: "strategy_id", minWidth: 140 },
   { headerName: "Mode", field: "mode", maxWidth: 110, cellRenderer: modeCell },
   {
-    headerName: "Allocated",
+    // Under the shared pool there is no separate per-algo capital — this is each algo's slice of
+    // the one book (market value of what it holds), from /capital when a real account is wired.
+    headerName: "Held value",
     field: "allocated",
     type: "rightAlignedColumn",
     cellRenderer: moneyCell,
@@ -135,21 +137,31 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
   // Once enabled, it refreshes on a light interval so market value / unrealized P&L track the
   // moving feed in near-real-time; while disabled it stays dormant (no polling) — like today.
   const live = useLivePositions(refreshKey);
+  // The single shared capital pool both algos draw from (live Alpaca buying power/equity + each
+  // algo's slice). Disabled shape until a real account is wired, so the rest of the dashboard is
+  // unaffected when it's off.
+  const capital = useCapital(refreshKey);
   const [selected, setSelected] = useState<string | null>(null);
 
   const allEvents = events.data ?? [];
   const snapshots = latestSnapshots(allEvents);
   const openPositions = positionRows(allEvents).length;
 
+  // Per-algo slice of the shared book, keyed by sleeve id (empty until the pool is enabled).
+  const capBySleeve = new Map(capital.allocations.map((a) => [a.sleeve_id, a] as const));
+
   const rows: SleeveRow[] = sleeves.map((s) => {
     const snap: SleeveSnapshot | undefined = snapshots.get(s.id);
+    const alloc = capBySleeve.get(s.id);
     return {
       id: s.id,
       strategy_id: s.strategy_id,
       mode: s.mode,
-      allocated: s.allocated_capital,
+      // Held value = this algo's slice of the one pool; falls back to the legacy allocation only
+      // when no real account is wired (dev/offline).
+      allocated: alloc ? alloc.market_value : s.allocated_capital,
       equity: snap ? snap.equity : Number(s.allocated_capital),
-      positions: snap ? snap.positionCount : 0,
+      positions: alloc ? alloc.positions : snap ? snap.positionCount : 0,
     };
   });
   const totalEquity = rows.reduce((sum, r) => sum + r.equity, 0);
@@ -176,8 +188,21 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
           gap: space.lg,
         }}
       >
-        <MetricTile label="Total equity" value={formatMoney(totalEquity)} tone="accent" />
-        <MetricTile label="Sleeves" value={formatNumber(sleeves.length, 0)} />
+        {capital.enabled ? (
+          <>
+            {/* The one general capital location both algos pull from = live Alpaca account. */}
+            <MetricTile
+              label="Capital pool · buying power"
+              value={formatMoney(capital.buying_power)}
+              tone="accent"
+            />
+            <MetricTile label="Pool equity" value={formatMoney(capital.equity)} />
+            <MetricTile label="Pool cash" value={formatMoney(capital.cash)} />
+          </>
+        ) : (
+          <MetricTile label="Total equity" value={formatMoney(totalEquity)} tone="accent" />
+        )}
+        <MetricTile label="Algorithms" value={formatNumber(sleeves.length, 0)} />
         <MetricTile label="Open positions" value={formatNumber(openPositions, 0)} />
         <MetricTile label="Pending proposals" value={formatNumber(pendingProposals, 0)} />
         <MetricTile label="Cycle mode" value={cycleMode} />
@@ -305,6 +330,46 @@ function useLivePositions(refreshKey: number): LivePositionsResult {
         if (cancelled) return;
         setState(result);
         // Schedule the next poll only while the feed is on; otherwise stay dormant.
+        if (result.enabled && pollTimer === undefined) {
+          pollTimer = window.setInterval(load, LIVE_POLL_INTERVAL_MS);
+        } else if (!result.enabled && pollTimer !== undefined) {
+          window.clearInterval(pollTimer);
+          pollTimer = undefined;
+        }
+      });
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+    };
+  }, [refreshKey]);
+
+  return state;
+}
+
+// Shared capital pool overlay. Same shape as useLivePositions: fetch on mount / refreshKey change,
+// then keep refreshing on a light interval ONLY while the pool is enabled (a real account is
+// wired) so buying power / equity track the account; stays dormant otherwise.
+function useCapital(refreshKey: number): CapitalResult {
+  const [state, setState] = useState<CapitalResult>({
+    enabled: false,
+    cash: "0",
+    equity: "0",
+    buying_power: "0",
+    allocations: [],
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    let pollTimer: number | undefined;
+
+    const load = (): void => {
+      void api.capital().then((result) => {
+        if (cancelled) return;
+        setState(result);
         if (result.enabled && pollTimer === undefined) {
           pollTimer = window.setInterval(load, LIVE_POLL_INTERVAL_MS);
         } else if (!result.enabled && pollTimer !== undefined) {

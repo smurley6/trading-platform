@@ -91,7 +91,10 @@ async def test_list_positions_and_account() -> None:
                 200,
                 json=[{"symbol": "LMT", "qty": "10", "avg_entry_price": "450.25"}],
             )
-        return httpx.Response(200, json={"cash": "55000.00", "equity": "100000.00"})
+        return httpx.Response(
+            200,
+            json={"cash": "55000.00", "equity": "100000.00", "buying_power": "180000.00"},
+        )
 
     broker = _broker(handler)
     positions = await broker.list_positions()
@@ -101,6 +104,17 @@ async def test_list_positions_and_account() -> None:
     assert positions[0].quantity == Decimal("10")
     assert account.cash == Decimal("55000.00")
     assert account.equity == Decimal("100000.00")
+    # buying_power backs the shared capital pool's headline (margin => can exceed cash).
+    assert account.buying_power == Decimal("180000.00")
+
+
+async def test_account_buying_power_falls_back_to_cash_when_absent() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"cash": "55000.00", "equity": "100000.00"})
+
+    account = await _broker(handler).get_account()
+
+    assert account.buying_power == Decimal("55000.00")
 
 
 async def test_cancel_open_order_deletes_then_refetches() -> None:

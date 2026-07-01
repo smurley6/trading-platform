@@ -21,7 +21,7 @@ from trading.application.live_trading import (
     RequestLiveTrading,
 )
 from trading.application.political_cycle import PoliticalCycle
-from trading.application.ports.broker import OrderNotFoundError
+from trading.application.ports.broker import BrokerPort, OrderNotFoundError
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
@@ -36,7 +36,7 @@ from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveErr
 from trading.application.sync_orders import SyncOrders
 from trading.domain.conviction import ConvictionThresholds, compute_conviction
 from trading.domain.events import DomainEvent, EventType
-from trading.domain.positions import mark_positions
+from trading.domain.positions import MarkedPosition, mark_positions
 from trading.domain.sleeves import TradingMode
 from trading.infrastructure.observability.metrics import MetricsRegistry
 from trading.infrastructure.persistence.health import DatabaseReadiness
@@ -45,6 +45,8 @@ from trading.interface.middleware.observability import ObservabilityMiddleware
 from trading.interface.schemas import (
     BacktestOut,
     CancelOut,
+    CapitalAllocationOut,
+    CapitalOut,
     ConvictionItem,
     CycleModeIn,
     CycleModeOut,
@@ -87,11 +89,14 @@ class AppDeps:
     sleeve_registry: SleeveRegistry
     evaluators: dict[str, EvaluateSignals]  # keyed by sleeve_id
     default_sleeve_id: str  # target for manual signal pushes
-    reconcilers: list[Reconcile]  # one per sleeve (broker is per-sleeve)
+    reconcilers: list[Reconcile]  # pool-level: reconciles the whole shared book (FR-REC)
     order_syncs: list[SyncOrders]  # one per sleeve: ingest async broker fills (FR-REC)
     clock: ClockPort
     conviction_thresholds: ConvictionThresholds
     conviction_window_days: int
+    # The single shared capital pool's broker (the one Alpaca book both algos draw from). Backs
+    # /capital's live buying power/equity. None when no real account is wired => /capital disabled.
+    pool_broker: BrokerPort | None = None
     quote_feed: QuoteFeedPort | None = None  # live tracking/marks; None => disabled
     quote_stream: QuoteStreamPort | None = None  # /ws/quotes real-time push; None => disabled
     # Real-time broker trade-updates stream (records fills/status as events); disabled => no
@@ -344,6 +349,53 @@ def create_app(deps: AppDeps) -> FastAPI:
         return LivePositionsOut(
             enabled=enabled,
             positions=[LivePositionOut.from_marked(m) for m in marked],
+        )
+
+    @app.get("/capital", response_model=CapitalOut)
+    async def capital() -> CapitalOut:
+        # The single shared capital pool both algos draw from = the live Alpaca account. Reports
+        # buying power / cash / equity for that one book, plus each algo's slice of it (market value
+        # of what that sleeve holds, marked to the live feed when available). Disabled shape when no
+        # real account is wired, so the SPA renders a graceful empty state like the other feeds.
+        broker = deps.pool_broker
+        if broker is None:
+            return CapitalOut(
+                enabled=False,
+                cash=Decimal("0"),
+                equity=Decimal("0"),
+                buying_power=Decimal("0"),
+                allocations=[],
+            )
+        account = await broker.get_account()
+        held = await deps.read_model.held_positions()
+        feed = deps.quote_feed
+        marks: dict[str, Decimal] = {}
+        if feed is not None and feed.enabled and held:
+            symbols = sorted({p.symbol for p in held})
+            marks = {q.symbol: q.last for q in await feed.get_quotes(symbols)}
+        by_sleeve: dict[str, list[MarkedPosition]] = {}
+        for marked in mark_positions(held, marks):
+            by_sleeve.setdefault(marked.sleeve_id, []).append(marked)
+        allocations = [
+            CapitalAllocationOut(
+                sleeve_id=state.sleeve.id,
+                strategy_id=state.sleeve.strategy_id,
+                market_value=sum(
+                    (m.market_value for m in by_sleeve.get(state.sleeve.id, [])), Decimal("0")
+                ),
+                unrealized_pnl=sum(
+                    (m.unrealized_pnl for m in by_sleeve.get(state.sleeve.id, [])), Decimal("0")
+                ),
+                positions=len(by_sleeve.get(state.sleeve.id, [])),
+            )
+            for state in deps.sleeve_registry.all()
+        ]
+        return CapitalOut(
+            enabled=True,
+            cash=account.cash,
+            equity=account.equity,
+            buying_power=account.buying_power,
+            allocations=allocations,
         )
 
     @app.post("/ingest", response_model=IngestOut, dependencies=protected)

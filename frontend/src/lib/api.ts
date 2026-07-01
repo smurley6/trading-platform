@@ -2,6 +2,7 @@
 
 import type {
   BacktestResult,
+  CapitalResult,
   ConvictionItem,
   CycleMode,
   CycleModeResult,
@@ -136,6 +137,18 @@ export const api = {
     request<LivePositionsResult>("/positions/live").catch(() => ({
       enabled: false,
       positions: [],
+    })),
+
+  // The single shared capital pool both algos draw from (live Alpaca buying power/equity + each
+  // algo's slice). Resolves to a disabled shape on any non-200/network error so the Dashboard
+  // can render unconditionally and simply branch on `.enabled`.
+  capital: (): Promise<CapitalResult> =>
+    request<CapitalResult>("/capital").catch(() => ({
+      enabled: false,
+      cash: "0",
+      equity: "0",
+      buying_power: "0",
+      allocations: [],
     })),
 };
 

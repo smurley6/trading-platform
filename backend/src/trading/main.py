@@ -26,7 +26,7 @@ from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.read_model import ReadModelPort
-from trading.application.ports.trade_updates import TradeUpdatesStreamPort
+from trading.application.ports.trade_updates import TradeUpdate, TradeUpdatesStreamPort
 from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
@@ -189,10 +189,10 @@ def build_dependencies(settings: Settings) -> AppDeps:
         live_aclosers.append(live_client.aclose)
 
     # Optional Alpaca PAPER venue (real paper account, no real money). One Alpaca account is one
-    # book, so it backs exactly one sleeve (`alpaca_paper_sleeve_id`); that sleeve's execution
-    # and reconciliation then run against the authoritative external broker (FR-REC). Built only
-    # when enabled AND paper/data credentials resolve; otherwise the in-process simulator is used
-    # and no network calls are made. Constructing AlpacaBroker dials nothing.
+    # book = the ONE shared capital pool; when wired it backs EVERY sleeve (see the shared_paper
+    # routing below), and pool-level reconciliation runs against this authoritative external broker
+    # (FR-REC). Built only when enabled AND paper/data credentials resolve; otherwise the in-process
+    # simulator is used and no network calls are made. Constructing AlpacaBroker dials nothing.
     alpaca_paper_broker: BrokerPort | None = None
     paper_key_id = settings.paper_key_id()
     paper_secret_key = settings.paper_secret_key()
@@ -256,11 +256,13 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         live_aclosers.append(history_client.aclose)
 
-    # Each sleeve is an isolated capital pool: its own paper broker, evaluator, and reconciler.
-    # Adding a sleeve = one more spec here.
+    # Sleeves are algos that share ONE capital pool (the single Alpaca book), not isolated pools:
+    # each has its own strategy + evaluator, but they trade the same shared broker and every
+    # order/fill is attributed by the sleeve_id stamped on its events. `sleeve-testing` is an inert
+    # drop-in slot for a second algorithm (see strategies/testing.py). Adding an algo = one spec.
     sleeve_specs: list[tuple[str, str, Strategy]] = [
         ("sleeve-political", "political_signal", political_strategy),
-        ("sleeve-trivial", "trivial", strategy_registry.create("trivial", strategy_config)),
+        ("sleeve-testing", "testing", strategy_registry.create("testing", strategy_config)),
     ]
     registry = SleeveRegistry(
         [
@@ -298,26 +300,29 @@ def build_dependencies(settings: Settings) -> AppDeps:
             "enable the live feed, or disable the real broker / REQUIRE_REAL_DATA."
         )
 
+    # ONE shared execution book = the single capital pool. When the real Alpaca paper account is
+    # wired it backs EVERY sleeve, so both algos trade one book and are attributed by the sleeve_id
+    # already stamped on every order/fill event. Without it, one in-process simulator stands in
+    # (still one shared book) so dev/offline runs unchanged. This is the shared-pool switch.
+    shared_paper: BrokerPort = (
+        alpaca_paper_broker
+        if alpaca_paper_broker is not None
+        else PaperBroker(
+            market_data=market_data, clock=clock, starting_cash=settings.starting_cash
+        )
+    )
+
     evaluators: dict[str, EvaluateSignals] = {}
-    reconcilers_by_id: dict[str, Reconcile] = {}
     order_syncs_by_id: dict[str, SyncOrders] = {}  # per-sleeve: ingest async broker fills
     brokers_by_id: dict[str, BrokerPort] = {}  # per-sleeve routing broker, for manual cancel
     political_evaluator: EvaluateSignals | None = None
     for sleeve_id, _strategy_id, strategy in sleeve_specs:
         sleeve = registry.get(sleeve_id).sleeve
-        # The designated sleeve executes paper orders on the real Alpaca paper account when
-        # configured; every other sleeve uses the in-process simulator (isolated capital).
-        paper_venue: BrokerPort
-        if alpaca_paper_broker is not None and sleeve_id == settings.alpaca_paper_sleeve_id:
-            paper_venue = alpaca_paper_broker
-        else:
-            paper_venue = PaperBroker(
-                market_data=market_data, clock=clock, starting_cash=settings.starting_cash
-            )
-        # One broker handle per sleeve that routes to paper or live by current mode, so the
-        # paper->live switch never touches strategy, risk, or execution code (spec §11).
+        # One broker handle per sleeve that routes to the SHARED paper venue (or live) by the
+        # sleeve's current mode, so the paper->live switch never touches strategy/risk/execution
+        # code (spec §11). All sleeves' handles wrap the same underlying book.
         router = ModeRoutingBroker(
-            paper=paper_venue,
+            paper=shared_paper,
             live=live_broker,
             mode=partial(registry.mode, sleeve_id),
         )
@@ -334,15 +339,26 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
-        reconcilers_by_id[sleeve_id] = Reconcile(
-            broker=router, event_store=event_store, clock=clock, sleeve_id=sleeve_id
-        )
+        # Order-sync stays per-sleeve: each SyncOrders acts ONLY on client_order_ids in its own
+        # log, so polling the shared book never cross-imports another algo's fills (FR-REC).
         order_syncs_by_id[sleeve_id] = SyncOrders(
             broker=router, event_store=event_store, clock=clock, sleeve_id=sleeve_id
         )
         if sleeve_id == "sleeve-political":
             political_evaluator = evaluator
-    reconcilers = list(reconcilers_by_id.values())
+
+    # Reconciliation is POOL-LEVEL. The shared book is one account, so the local projection is
+    # summed across ALL sleeves (sleeve_id=None) and diffed against that one book — a per-sleeve
+    # diff would flag every OTHER algo's holdings as spurious drift. One reconciler serves the
+    # /reconcile endpoint + scheduler, and is keyed to every sleeve so the per-sleeve live-readiness
+    # preflight reuses the same authoritative account check.
+    pool_reconcile = Reconcile(
+        broker=shared_paper, event_store=event_store, clock=clock, sleeve_id=None
+    )
+    reconcilers_by_id: dict[str, Reconcile] = {
+        sleeve_id: pool_reconcile for sleeve_id, _s, _st in sleeve_specs
+    }
+    reconcilers = [pool_reconcile]
     order_syncs = list(order_syncs_by_id.values())
 
     # Real-time trade-updates stream (FR-REC/FR-EXE): the push complement to the 30s polling
@@ -358,20 +374,28 @@ def build_dependencies(settings: Settings) -> AppDeps:
         and paper_key_id
         and paper_secret_key
     ):
-        paper_sleeve_id = settings.alpaca_paper_sleeve_id
-        apply_update = ApplyTradeUpdate(
-            event_store=event_store, clock=clock, sleeve_id=paper_sleeve_id
-        )
+        # Shared book => fan each update to a per-sleeve applier. Each self-scopes to the orders in
+        # its own log and tags the fill with its own sleeve_id, so exactly the algo that placed an
+        # order records its fill — correct the instant a real second algo is dropped in.
+        appliers = [
+            ApplyTradeUpdate(event_store=event_store, clock=clock, sleeve_id=sleeve_id)
+            for sleeve_id, _s, _st in sleeve_specs
+        ]
+
+        async def _apply_to_all(update: TradeUpdate, *, sleeve_id: str | None = None) -> None:
+            for applier in appliers:
+                await applier.execute(update)
+
         updates_stream = AlpacaTradeUpdatesStream(
             key_id=paper_key_id,
             secret_key=paper_secret_key,
             url=settings.trade_updates_stream_url(),
-            sleeve_id=paper_sleeve_id,
+            sleeve_id=sleeve_specs[0][0],  # nominal; each applier self-scopes by client_order_id
         )
         trade_updates_stream = updates_stream
 
         async def _run_trade_updates() -> None:
-            await updates_stream.run(apply_update)
+            await updates_stream.run(_apply_to_all)
 
         background_tasks.append(_run_trade_updates)
 
@@ -473,6 +497,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
         read_model=read_model,
         kill_switch=kill_switch,
         sleeve_registry=registry,
+        # The shared capital pool reads live buying power/equity from the one Alpaca book; None
+        # when no real account is wired (the /capital endpoint then reports disabled).
+        pool_broker=alpaca_paper_broker,
         evaluators=evaluators,
         default_sleeve_id="sleeve-political",
         reconcilers=reconcilers,

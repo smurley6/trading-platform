@@ -88,6 +88,11 @@ class EvaluateSignals:
             },
         )
         self._peak_equity = max(self._peak_equity, account.equity)
+        # Shared-pool buying-power reserve for this cycle. `portfolio`/`account` come from the ONE
+        # shared broker book, so both algos size against the same live pool; this running reserve
+        # stops multiple BUYs in a single evaluation from double-spending it. (Cross-evaluator
+        # racing in the same cycle still relies on the account itself as the backstop.)
+        remaining_buying_power = account.buying_power
 
         decisions: list[Decision] = []
         orders: list[BrokerOrder] = []
@@ -145,6 +150,7 @@ class EvaluateSignals:
                     peak_equity=self._peak_equity,
                     current_position_value=current * quote.last,
                     price=quote.last,
+                    remaining_buying_power=remaining_buying_power,
                 ),
             )
             await self._append(
@@ -166,6 +172,13 @@ class EvaluateSignals:
                     extra={"correlation_id": correlation_id},
                 )
                 continue
+
+            # Reserve the approved BUY notional from the shared pool so a later BUY in this same
+            # cycle sees the reduced headroom (the shared-pool guard in RiskGate).
+            if side is OrderSide.BUY:
+                remaining_buying_power -= assessment.approved_quantity * quote.last
+                if remaining_buying_power < 0:
+                    remaining_buying_power = Decimal("0")
 
             if not place:
                 # Manual mode: the decision + risk verdict are recorded for audit, but no order

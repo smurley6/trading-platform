@@ -40,10 +40,14 @@ class KillSwitch:
 
 @dataclass(frozen=True, slots=True)
 class RiskContext:
-    sleeve_equity: Decimal
+    sleeve_equity: Decimal  # denominator for the % caps; the shared pool equity for a live account
     peak_equity: Decimal
-    current_position_value: Decimal  # market value already held in this symbol
+    current_position_value: Decimal  # market value already held in this symbol (the shared book)
     price: Decimal
+    # Spendable buying power remaining in the shared pool. 0 => guard disabled (unknown/simulator),
+    # so pre-existing callers and the paper simulator are unaffected. When >0 (a live account) a
+    # BUY is capped so combined orders can't over-commit the one shared account.
+    remaining_buying_power: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +108,15 @@ class RiskGate:
                     f"buy capped by {self._limits.max_position_concentration_pct}% "
                     "concentration limit"
                 )
+            # Shared-pool guard: never let a BUY (alone or combined with earlier BUYs in the same
+            # cycle, once the caller decrements this) exceed the spendable buying power of the one
+            # shared account. Skipped when unknown/zero (simulator/back-compat).
+            if (
+                context.remaining_buying_power > 0
+                and approved * context.price > context.remaining_buying_power
+            ):
+                approved = _floor_quantity(context.remaining_buying_power / context.price)
+                reasons.append("buy capped by remaining pool buying power")
 
         if approved <= 0:
             return self._reject("risk caps reduced quantity to zero")
