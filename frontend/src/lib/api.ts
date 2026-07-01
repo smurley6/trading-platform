@@ -3,6 +3,8 @@
 import type {
   BacktestResult,
   ConvictionItem,
+  CycleMode,
+  CycleModeResult,
   EvaluateResult,
   IngestResult,
   KillSwitchState,
@@ -79,6 +81,16 @@ export const api = {
     request<ProposalsExecuteResult>("/proposals/execute", {
       method: "POST",
       body: JSON.stringify({ symbols }),
+    }),
+
+  // Live arm/disarm of the scheduled cycle's trade mode. GET reads the current mode; POST flips
+  // it and the running cycle honours it on its next tick (no redeploy). NOT persisted — reverts
+  // to the CYCLE_TRADE_MODE env default if the backend restarts.
+  cycleMode: () => request<CycleModeResult>("/cycle/mode"),
+  setCycleMode: (mode: CycleMode) =>
+    request<CycleModeResult>("/cycle/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
     }),
   // POST /backtest replays recorded signals through the strategy + risk + execution path.
   // Returns 409 ("backtesting is not configured") when no historical market-data adapter is

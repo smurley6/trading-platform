@@ -217,6 +217,10 @@ export interface LivePositionsResult {
 // strings — format with Number(...)/formatNumber for display.
 export type CycleMode = "auto" | "manual";
 
+export interface CycleModeResult {
+  mode: CycleMode;
+}
+
 export interface ProposalItem {
   symbol: string;
   side: "buy" | "sell";

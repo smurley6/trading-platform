@@ -192,3 +192,20 @@ async def test_go_live_with_confirmation_flips_mode(client: httpx.AsyncClient) -
 async def test_unknown_sleeve_mode_404(client: httpx.AsyncClient) -> None:
     response = await client.post("/sleeves/nope/mode", json={"mode": "paper"})
     assert response.status_code == 404
+
+
+async def test_cycle_mode_live_toggle(client: httpx.AsyncClient) -> None:
+    # Arm autonomous trading, then disarm — each flip is reflected immediately (no restart).
+    armed = await client.post("/cycle/mode", json={"mode": "auto"})
+    assert armed.status_code == 200
+    assert armed.json()["mode"] == "auto"
+    assert (await client.get("/cycle/mode")).json()["mode"] == "auto"
+
+    disarmed = await client.post("/cycle/mode", json={"mode": "manual"})
+    assert disarmed.status_code == 200
+    assert disarmed.json()["mode"] == "manual"
+    assert (await client.get("/cycle/mode")).json()["mode"] == "manual"
+
+    # Unknown mode is rejected by request validation.
+    bad = await client.post("/cycle/mode", json={"mode": "bogus"})
+    assert bad.status_code == 422

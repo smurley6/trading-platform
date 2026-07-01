@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -354,6 +354,14 @@ class SleeveModeIn(BaseModel):
 class SleeveModeOut(BaseModel):
     sleeve: SleeveOut
     readiness: LiveReadinessOut | None = None
+
+
+class CycleModeIn(BaseModel):
+    mode: Literal["auto", "manual"]
+
+
+class CycleModeOut(BaseModel):
+    mode: str
 
 
 class QuoteOut(BaseModel):

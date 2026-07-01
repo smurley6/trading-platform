@@ -16,6 +16,7 @@ import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { Button, StackLayout } from "@salt-ds/core";
 import { useMemo, useState } from "react";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
+import { CycleModeToggle } from "../../components/CycleModeToggle";
 import { DataGrid } from "../../components/DataGrid";
 import { SignalDetail } from "../../components/SignalDetail";
 import { useToast } from "../../components/Toast";
@@ -147,7 +148,7 @@ export function Proposals({ refreshKey }: ProposalsProps) {
           title={
             <span style={{ display: "inline-flex", alignItems: "center", gap: space.md }}>
               Proposals
-              <ModeBadge mode={mode} />
+              <CycleModeToggle mode={mode} onChanged={reloadAfterBuy} />
             </span>
           }
           caption={
@@ -450,25 +451,6 @@ export function Proposals({ refreshKey }: ProposalsProps) {
         onCancel={() => setPendingBuy(null)}
       />
     </StackLayout>
-  );
-}
-
-// ---- Cycle mode badge (mirrors the Markets FeedBadge / App LIVE-PAPER badge) ----------------
-
-function ModeBadge({ mode }: { mode: "auto" | "manual" }) {
-  const isAuto = mode === "auto";
-  return (
-    <Badge
-      tone={isAuto ? "danger" : "accent"}
-      dot
-      title={
-        isAuto
-          ? "Auto mode — trades are placed automatically by the cycle"
-          : "Manual mode — proposals wait for your approval"
-      }
-    >
-      {isAuto ? "AUTO" : "MANUAL"}
-    </Badge>
   );
 }
 

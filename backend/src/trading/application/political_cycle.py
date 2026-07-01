@@ -39,6 +39,17 @@ class PoliticalCycle:
         self._window_days = window_days
         self._trade_mode = trade_mode
 
+    @property
+    def trade_mode(self) -> str:
+        """Current trade mode ('auto' | 'manual'). Mutable at runtime so an operator can
+        arm/disarm autonomous trading live (e.g. via POST /cycle/mode) without a restart;
+        the next execute() reads the updated value."""
+        return self._trade_mode
+
+    @trade_mode.setter
+    def trade_mode(self, value: str) -> None:
+        self._trade_mode = value
+
     async def execute(self) -> CycleResult:
         ingestion = await self._ingest.execute()
         events = await self._event_store.read_all()

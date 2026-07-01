@@ -46,6 +46,8 @@ from trading.interface.schemas import (
     BacktestOut,
     CancelOut,
     ConvictionItem,
+    CycleModeIn,
+    CycleModeOut,
     EvaluateOut,
     EventOut,
     ExecuteProposalsIn,
@@ -382,6 +384,21 @@ def create_app(deps: AppDeps) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         state = deps.sleeve_registry.get(sleeve_id)
         return SleeveModeOut(sleeve=SleeveOut.from_state(state), readiness=readiness)
+
+    @app.get("/cycle/mode", response_model=CycleModeOut)
+    async def get_cycle_mode() -> CycleModeOut:
+        return CycleModeOut(mode=deps.cycle_trade_mode)
+
+    @app.post("/cycle/mode", response_model=CycleModeOut, dependencies=protected)
+    async def set_cycle_mode(body: CycleModeIn) -> CycleModeOut:
+        # Live arm/disarm of autonomous trading for the scheduled political cycle. Updates the
+        # reporting copy AND the running PoliticalCycle so the next scheduled tick honours it
+        # with no redeploy. NOT persisted: reverts to the CYCLE_TRADE_MODE env default on
+        # restart, so a restart never silently resumes 'auto'.
+        deps.cycle_trade_mode = body.mode
+        if deps.political_cycle is not None:
+            deps.political_cycle.trade_mode = body.mode
+        return CycleModeOut(mode=body.mode)
 
     @app.get("/kill-switch", response_model=KillSwitchOut)
     async def get_kill_switch() -> KillSwitchOut:
