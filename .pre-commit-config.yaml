@@ -7,20 +7,21 @@ repos:
       - id: ruff-format
         files: ^backend/
 
-  # These run the project-aware checks from the active environment (PATH), so they work with
-  # any venv location, pipx, or a system install — not a hardcoded backend/.venv path. Activate
-  # the backend venv (or otherwise put mypy/lint-imports on PATH) before committing.
+  # Project-aware checks. They PREFER the backend/.venv tools when that venv exists (so `git
+  # commit` works without manually activating it), and otherwise fall back to whatever is on PATH
+  # (pipx, a differently-located venv, or a system install). Prepending .venv/bin to PATH keeps
+  # both behaviours without hardcoding an interpreter.
   - repo: local
     hooks:
       - id: mypy
         name: mypy --strict (backend)
-        entry: bash -c 'cd backend && mypy'
+        entry: bash -c 'cd backend && PATH="$PWD/.venv/bin:$PATH" mypy'
         language: system
         files: ^backend/.*\.py$
         pass_filenames: false
       - id: import-linter
         name: import-linter (hexagonal layering)
-        entry: bash -c 'cd backend && lint-imports'
+        entry: bash -c 'cd backend && PATH="$PWD/.venv/bin:$PATH" lint-imports'
         language: system
         files: ^backend/.*\.py$
         pass_filenames: false
