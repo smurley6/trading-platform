@@ -63,12 +63,14 @@ class Settings(BaseSettings):
     conviction_max_corroboration_factor: float | None = None
     conviction_scale: float = 25.0
 
-    # Cron trade mode (FR-EXE). 'auto' = the daily cycle places orders automatically when
-    # conviction clears the trade threshold. 'manual' = the cycle only ingests; actionable trades
-    # are surfaced as PROPOSALS via /proposals for human approval (individual or blanket buy).
-    # Both modes run the same (daily) cron cadence and surface predicted/incoming (watch-tier)
-    # candidates + the classified-signal feed in the UI.
-    cycle_trade_mode: Literal["auto", "manual"] = "auto"
+    # Scheduled-cycle trade mode (FR-EXE). Governs BOTH the daily cron and the in-process
+    # web-service scheduler (when INGEST_INTERVAL_SECONDS > 0). Default 'manual' is the SAFE
+    # collect-only mode: the cycle only ingests + classifies, and actionable trades are surfaced
+    # as PROPOSALS via /proposals for human approval (individual or blanket buy) — NO orders are
+    # placed. Opt in to autonomous trading with CYCLE_TRADE_MODE=auto, which ALSO places orders
+    # automatically when conviction clears the trade threshold. Both modes surface predicted/
+    # incoming (watch-tier) candidates + the classified-signal feed in the UI.
+    cycle_trade_mode: Literal["auto", "manual"] = "manual"
     # Max actionable proposals surfaced per scan (the "top N" reviewed/bought in manual mode).
     proposal_top_n: int = 10
 
