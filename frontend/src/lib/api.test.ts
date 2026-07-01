@@ -92,7 +92,10 @@ describe("api request building", () => {
 
   it("includes the sleeve_id query when submitting signals with a sleeve", async () => {
     fetchMock.mockResolvedValue(okResponse({ correlation_id: "c", orders: [] }));
-    await api.submitSignals([{ source_type: "statement", ticker: "AAPL", sentiment: 0.5 }], "sleeve-x");
+    await api.submitSignals(
+      [{ source_type: "statement", ticker: "AAPL", sentiment: 0.5 }],
+      "sleeve-x",
+    );
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("/api/signals?sleeve_id=sleeve-x");
     expect(init?.method).toBe("POST");

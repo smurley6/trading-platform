@@ -13,6 +13,7 @@ import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
 import { ApiError, api } from "../../lib/api";
 import { formatMoney, formatNumber, formatTime } from "../../lib/format";
+import { InfoButton } from "../../components/InfoButton";
 import { backtestCurve } from "../../lib/projections";
 import type { BacktestResult, BacktestTrade } from "../../lib/types";
 
@@ -129,9 +130,18 @@ export function Backtest(_props: BacktestProps) {
               live, then compares strategy equity against a benchmark.
             </Text>
           </div>
-          <Button disabled={busy} onClick={() => void run()}>
-            {busy ? "Running…" : "Run backtest"}
-          </Button>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <Button disabled={busy} onClick={() => void run()}>
+              {busy ? "Running…" : "Run backtest"}
+            </Button>
+            <InfoButton title="Run backtest" align="right">
+              Replays your recorded political signals through the strategy, the risk checks, and the
+              same execution engine used live — over historical prices — then charts strategy equity
+              vs. a buy-and-hold benchmark and reports Sharpe, max drawdown, win rate, and every
+              simulated trade. It's a SIMULATION: no real or paper orders are placed. Needs a
+              historical market-data adapter on the backend (otherwise you'll see "not configured").
+            </InfoButton>
+          </div>
         </div>
         {error && (
           <Text color="error" style={{ marginTop: 8 }}>
@@ -162,7 +172,9 @@ export function Backtest(_props: BacktestProps) {
       {result && (
         <>
           <Card>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}
+            >
               <H3 style={{ marginTop: 0 }}>Equity curve</H3>
               <div style={{ display: "flex", gap: 16, fontSize: 12, color: "#94a3b8" }}>
                 <LegendDot color="#4c9aff" label="Strategy" />
@@ -246,7 +258,13 @@ function LegendDot({ color, label }: { color: string; label: string }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <span
-        style={{ width: 10, height: 10, borderRadius: 2, background: color, display: "inline-block" }}
+        style={{
+          width: 10,
+          height: 10,
+          borderRadius: 2,
+          background: color,
+          display: "inline-block",
+        }}
       />
       {label}
     </span>

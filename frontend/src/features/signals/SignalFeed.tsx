@@ -2,9 +2,10 @@
 // action. The signals table uses AG Grid; the live conviction view uses FINOS Perspective.
 
 import type { ColDef } from "ag-grid-community";
-import { Card, H3, StackLayout, Text } from "@salt-ds/core";
-import { useMemo } from "react";
+import { Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
+import { useMemo, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
+import { SignalDetail } from "../../components/SignalDetail";
 import { StreamingTable } from "../../components/StreamingTable";
 import { api } from "../../lib/api";
 import { formatNumber, formatTime } from "../../lib/format";
@@ -44,6 +45,7 @@ interface SignalFeedProps {
 export function SignalFeed({ refreshKey }: SignalFeedProps) {
   const signals = useLoader(() => api.signalFeed(300), [refreshKey]);
   const conviction = useLoader(() => api.conviction(), [refreshKey]);
+  const [selected, setSelected] = useState<SignalFeedItem | null>(null);
 
   const feed = useMemo(() => [...(signals.data ?? [])].reverse(), [signals.data]);
 
@@ -71,32 +73,55 @@ export function SignalFeed({ refreshKey }: SignalFeedProps) {
   return (
     <StackLayout gap={2}>
       <Card>
-        <H3>Live conviction</H3>
+        <H3 style={{ marginTop: 0 }}>Live conviction</H3>
         <Text color="secondary" styleAs="label">
           Streaming view (FINOS Perspective) — sorted by conviction score
         </Text>
-        {convictionRows.length > 0 ? (
-          <StreamingTable
-            data={convictionRows}
-            config={{
-              sort: [["score", "desc"]],
-              columns: ["ticker", "score", "action", "corroboration", "signals"],
-            }}
-          />
-        ) : (
-          <Text color="secondary">No conviction yet within the corroboration window.</Text>
-        )}
+        <div style={{ marginTop: 12 }}>
+          {conviction.loading && !conviction.data ? (
+            <Spinner />
+          ) : conviction.error ? (
+            <Text color="error">Could not load conviction: {conviction.error}</Text>
+          ) : convictionRows.length === 0 ? (
+            <Text color="secondary">No conviction yet within the corroboration window.</Text>
+          ) : (
+            <StreamingTable
+              data={convictionRows}
+              config={{
+                sort: [["score", "desc"]],
+                columns: ["ticker", "score", "action", "corroboration", "signals"],
+              }}
+            />
+          )}
+        </div>
       </Card>
 
       <Card>
-        <H3>Signal feed</H3>
-        <DataGrid<SignalFeedItem>
-          rows={feed}
-          columns={signalColumns}
-          getRowId={(r) => r.signal_id}
-          height={420}
-        />
+        <H3 style={{ marginTop: 0 }}>Signal feed</H3>
+        <Text color="secondary" styleAs="label">
+          Most recent political signals — newest first. Click a row to see the source text that was
+          analyzed.
+        </Text>
+        <div style={{ marginTop: 12 }}>
+          {signals.loading && !signals.data ? (
+            <Spinner />
+          ) : signals.error ? (
+            <Text color="error">Could not load signals: {signals.error}</Text>
+          ) : feed.length === 0 ? (
+            <Text color="secondary">No signals yet — the feed is collecting real data.</Text>
+          ) : (
+            <DataGrid<SignalFeedItem>
+              rows={feed}
+              columns={signalColumns}
+              getRowId={(r) => r.signal_id}
+              height={420}
+              onRowClick={setSelected}
+            />
+          )}
+        </div>
       </Card>
+
+      {selected && <SignalDetail signal={selected} onClose={() => setSelected(null)} />}
     </StackLayout>
   );
 }

@@ -72,11 +72,23 @@ function evt(event_type: string, payload: Record<string, unknown>): StoredEventD
 
 // An open order (submitted, not terminal) and a filled (terminal) order.
 const OPEN_ORDER = [
-  evt("order.intent", { client_order_id: "open-1", sleeve_id: "a", symbol: "AAPL", side: "buy", quantity: "10" }),
+  evt("order.intent", {
+    client_order_id: "open-1",
+    sleeve_id: "a",
+    symbol: "AAPL",
+    side: "buy",
+    quantity: "10",
+  }),
   evt("order.submitted", { client_order_id: "open-1", broker_order_id: "b-1" }),
 ];
 const FILLED_ORDER = [
-  evt("order.intent", { client_order_id: "done-1", sleeve_id: "a", symbol: "MSFT", side: "buy", quantity: "5" }),
+  evt("order.intent", {
+    client_order_id: "done-1",
+    sleeve_id: "a",
+    symbol: "MSFT",
+    side: "buy",
+    quantity: "5",
+  }),
   evt("order.status_changed", { client_order_id: "done-1", status: "filled" }),
 ];
 

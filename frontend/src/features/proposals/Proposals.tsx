@@ -15,9 +15,13 @@
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import { Button, Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
 import { useMemo, useState } from "react";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { DataGrid } from "../../components/DataGrid";
+import { SignalDetail } from "../../components/SignalDetail";
+import { useToast } from "../../components/Toast";
 import { api } from "../../lib/api";
 import { formatNumber, formatTime } from "../../lib/format";
+import { color } from "../../lib/tokens";
 import type { PredictedItem, ProposalItem, SignalFeedItem } from "../../lib/types";
 import { useLoader } from "../../lib/useLoader";
 
@@ -25,29 +29,66 @@ interface ProposalsProps {
   refreshKey: number;
 }
 
+// A buy awaiting confirmation: the symbols passed to executeProposals (empty = "all" on the
+// backend), the busy key ("*" = blanket), and the human-readable symbol list for the dialog body.
+interface PendingBuy {
+  symbols: string[];
+  key: string;
+  displaySymbols: string[];
+}
+
+// Pull a short analyzed-text snippet from a signal's raw payload for the evidence drill-down.
+const TEXT_KEYS = [
+  "text",
+  "title",
+  "headline",
+  "summary",
+  "description",
+  "body",
+  "statement",
+  "content",
+];
+
+function signalSnippet(sig: SignalFeedItem): string {
+  const rp = sig.raw_payload;
+  if (!rp) return "—";
+  for (const [k, v] of Object.entries(rp)) {
+    if (TEXT_KEYS.includes(k.toLowerCase()) && typeof v === "string" && v.trim()) {
+      const t = v.trim();
+      return t.length > 120 ? `${t.slice(0, 120)}…` : t;
+    }
+  }
+  return "—";
+}
+
 export function Proposals({ refreshKey }: ProposalsProps) {
+  const toast = useToast();
   const proposals = useLoader(() => api.proposals(), [refreshKey]);
-  const signals = useLoader(() => api.signalFeed(100), [refreshKey]);
+  const signals = useLoader(() => api.signalFeed(300), [refreshKey]);
 
   // Local bump so a buy refreshes this screen immediately, without waiting for the live event
   // stream to round-trip (the stream also bumps the app refreshKey, which reloads us again).
   const [localKey, setLocalKey] = useState(0);
   // In-flight buys, keyed by symbol ("*" = the blanket "Buy all"). Drives the button busy state.
   const [buying, setBuying] = useState<Set<string>>(new Set());
-  const [buyError, setBuyError] = useState<string | null>(null);
+  // The buy awaiting confirmation in the ConfirmDialog (null = dialog closed).
+  const [pendingBuy, setPendingBuy] = useState<PendingBuy | null>(null);
+  // Evidence drill-down: the selected proposal and (within it) an expanded contributing signal.
+  const [selectedProposal, setSelectedProposal] = useState<ProposalItem | null>(null);
+  const [expandedSignal, setExpandedSignal] = useState<SignalFeedItem | null>(null);
 
   const reloadAfterBuy = (proposals as { reload: () => void }).reload;
 
   async function buy(symbols: string[], key: string): Promise<void> {
-    setBuyError(null);
     setBuying((prev) => new Set(prev).add(key));
     try {
-      await api.executeProposals(symbols);
+      const result = await api.executeProposals(symbols);
+      toast.success(`Placed ${result.orders.length} order(s)`);
       // Refresh both the proposals and the signal feed view.
       reloadAfterBuy();
       setLocalKey((k) => k + 1);
     } catch (err) {
-      setBuyError(err instanceof Error ? err.message : String(err));
+      toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setBuying((prev) => {
         const next = new Set(prev);
@@ -68,7 +109,31 @@ export function Proposals({ refreshKey }: ProposalsProps) {
     [signals.data, localKey],
   );
 
+  // Index the loaded feed by signal_id so the evidence panel can resolve a proposal's
+  // contributing_signal_ids back to full source records.
+  const signalsById = useMemo(() => {
+    const map = new Map<string, SignalFeedItem>();
+    for (const s of signals.data ?? []) map.set(s.signal_id, s);
+    return map;
+  }, [signals.data]);
+
   const anyBuying = buying.size > 0;
+
+  // Open the confirm dialog for a single-row buy. Empty symbols list ("Buy all") is handled below.
+  const requestBuy = (pending: PendingBuy) => setPendingBuy(pending);
+
+  const confirmPending = () => {
+    if (!pendingBuy) return;
+    const { symbols, key } = pendingBuy;
+    setPendingBuy(null);
+    void buy(symbols, key);
+  };
+
+  // Select a proposal for the evidence drill-down; reset any expanded contributing signal.
+  const openEvidence = (row: ProposalItem) => {
+    setSelectedProposal(row);
+    setExpandedSignal(null);
+  };
 
   return (
     <StackLayout gap={2}>
@@ -91,7 +156,13 @@ export function Proposals({ refreshKey }: ProposalsProps) {
             <Button
               variant="cta"
               disabled={anyBuying}
-              onClick={() => void buy([], "*")}
+              onClick={() =>
+                requestBuy({
+                  symbols: [],
+                  key: "*",
+                  displaySymbols: proposalRows.map((r) => r.symbol),
+                })
+              }
               style={{ height: 30 }}
             >
               {buying.has("*") ? "Buying…" : `Buy all (${proposalRows.length})`}
@@ -101,15 +172,9 @@ export function Proposals({ refreshKey }: ProposalsProps) {
 
         <Text color="secondary" styleAs="label">
           {mode === "manual"
-            ? "Manual: review & approve — nothing trades until you click Buy."
-            : "Auto: trades placed automatically — these are the upcoming proposals."}
+            ? "Manual: review & approve — nothing trades until you click Buy. Click a row to see why."
+            : "Auto: trades placed automatically — these are the upcoming proposals. Click a row to see why."}
         </Text>
-
-        {buyError && (
-          <Text color="error" style={{ display: "block", marginTop: 8 }}>
-            {buyError}
-          </Text>
-        )}
 
         <div style={{ marginTop: 12 }}>
           {proposals.loading && !proposals.data ? (
@@ -123,13 +188,138 @@ export function Proposals({ refreshKey }: ProposalsProps) {
           ) : (
             <DataGrid<ProposalItem>
               rows={proposalRows}
-              columns={proposalColumns(mode, buying, anyBuying, (sym) => void buy([sym], sym))}
+              columns={proposalColumns(mode, buying, anyBuying, (row) =>
+                requestBuy({
+                  symbols: [row.symbol],
+                  key: row.symbol,
+                  displaySymbols: [row.symbol],
+                }),
+              )}
               getRowId={(r) => r.symbol}
+              onRowClick={openEvidence}
               height={Math.min(120 + proposalRows.length * 44, 460)}
             />
           )}
         </div>
       </Card>
+
+      {/* ---- Evidence drill-down: "why this proposal?" ----------------------------------- */}
+      {selectedProposal && (
+        <Card>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+              gap: 8,
+            }}
+          >
+            <H3 style={{ marginTop: 0 }}>Evidence — why {selectedProposal.symbol}?</H3>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedProposal(null);
+                setExpandedSignal(null);
+              }}
+              aria-label="Close"
+              style={{
+                cursor: "pointer",
+                background: "transparent",
+                border: "none",
+                color: color.muted,
+                fontSize: 18,
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
+          </div>
+
+          <Text styleAs="label" color="secondary">
+            Rationale
+          </Text>
+          <div
+            style={{
+              marginTop: 4,
+              padding: 12,
+              borderRadius: 8,
+              background: color.panelSoft,
+              border: `1px solid ${color.faintBorder}`,
+              fontSize: 14,
+              lineHeight: 1.5,
+            }}
+          >
+            {selectedProposal.rationale || "—"}
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <Text styleAs="label" color="secondary">
+              Contributing signals ({selectedProposal.contributing_signal_ids.length})
+            </Text>
+            {selectedProposal.contributing_signal_ids.length === 0 ? (
+              <Text color="secondary" style={{ display: "block", marginTop: 6 }}>
+                No contributing signals recorded for this proposal.
+              </Text>
+            ) : (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {selectedProposal.contributing_signal_ids.map((id) => {
+                  const sig = signalsById.get(id);
+                  if (!sig) {
+                    return (
+                      <div
+                        key={id}
+                        style={{
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          border: `1px solid ${color.faintBorder}`,
+                          color: color.muted,
+                          fontSize: 13,
+                        }}
+                      >
+                        signal {id} — not in recent feed
+                      </div>
+                    );
+                  }
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setExpandedSignal(sig)}
+                      style={{
+                        textAlign: "left",
+                        cursor: "pointer",
+                        padding: "8px 12px",
+                        borderRadius: 8,
+                        background: color.panelSoft,
+                        border: `1px solid ${color.faintBorder}`,
+                        color: color.textDim,
+                        fontSize: 13,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      <span style={{ color: color.accentText, fontWeight: 700 }}>
+                        {sig.source_type}
+                      </span>
+                      <span style={{ color: color.muted }}> · </span>
+                      <span style={{ fontWeight: 700 }}>{sig.ticker}</span>
+                      <span style={{ color: color.muted }}> · </span>
+                      <span>sentiment {formatNumber(sig.sentiment, 2)}</span>
+                      <span style={{ color: color.muted }}> · </span>
+                      <span style={{ color: color.muted }}>{signalSnippet(sig)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {expandedSignal && (
+            <div style={{ marginTop: 12 }}>
+              <SignalDetail signal={expandedSignal} onClose={() => setExpandedSignal(null)} />
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* ---- Section 2: predicted / incoming --------------------------------------------- */}
       <Card>
@@ -141,6 +331,8 @@ export function Proposals({ refreshKey }: ProposalsProps) {
         <div style={{ marginTop: 12 }}>
           {proposals.loading && !proposals.data ? (
             <Spinner />
+          ) : proposals.error ? (
+            <Text color="error">Could not load predicted candidates: {proposals.error}</Text>
           ) : predictedRows.length === 0 ? (
             <Text color="secondary">
               Nothing incoming yet — no candidates near the trade threshold.
@@ -179,6 +371,24 @@ export function Proposals({ refreshKey }: ProposalsProps) {
           )}
         </div>
       </Card>
+
+      {/* ---- Buy confirmation -------------------------------------------------------------- */}
+      <ConfirmDialog
+        open={pendingBuy !== null}
+        title="Place paper orders?"
+        body={
+          pendingBuy ? (
+            <>
+              Place {pendingBuy.displaySymbols.length} PAPER order(s) for:{" "}
+              <strong>{pendingBuy.displaySymbols.join(", ")}</strong> on the political sleeve.
+            </>
+          ) : null
+        }
+        confirmLabel="Place orders"
+        busy={pendingBuy ? buying.has(pendingBuy.key) : false}
+        onConfirm={confirmPending}
+        onCancel={() => setPendingBuy(null)}
+      />
     </StackLayout>
   );
 }
@@ -216,7 +426,7 @@ function proposalColumns(
   mode: "auto" | "manual",
   buying: Set<string>,
   anyBuying: boolean,
-  onBuy: (symbol: string) => void,
+  onBuy: (row: ProposalItem) => void,
 ): ColDef<ProposalItem>[] {
   const BuyCell = (params: ICellRendererParams<ProposalItem>) => {
     const row = params.data;
@@ -226,7 +436,11 @@ function proposalColumns(
       <Button
         variant="primary"
         disabled={anyBuying}
-        onClick={() => onBuy(row.symbol)}
+        // Stop the row-click (evidence drill-down) from also firing when the Buy button is clicked.
+        onClick={(e) => {
+          e.stopPropagation();
+          onBuy(row);
+        }}
         style={{ height: 28, padding: "0 14px" }}
       >
         {inFlight ? "Buying…" : "Buy"}

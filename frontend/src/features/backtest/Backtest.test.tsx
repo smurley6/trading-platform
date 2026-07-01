@@ -10,12 +10,18 @@ import { Backtest } from "./Backtest";
 // screen's behaviour, not the widgets'.
 vi.mock("../../components/EquityCurve", () => ({
   EquityCurve: ({ data, benchmark }: { data: unknown[]; benchmark?: unknown[] }) => (
-    <div data-testid="equity-curve" data-points={data.length} data-benchmark={benchmark?.length ?? 0} />
+    <div
+      data-testid="equity-curve"
+      data-points={data.length}
+      data-benchmark={benchmark?.length ?? 0}
+    />
   ),
 }));
 
 vi.mock("../../components/DataGrid", () => ({
-  DataGrid: ({ rows }: { rows: unknown[] }) => <div data-testid="trades-grid" data-rows={rows.length} />,
+  DataGrid: ({ rows }: { rows: unknown[] }) => (
+    <div data-testid="trades-grid" data-rows={rows.length} />
+  ),
 }));
 
 // Hoisted so the (also-hoisted) vi.mock factory below can safely reference it.
@@ -49,7 +55,9 @@ const FULL_RESULT: BacktestResult = {
     { t: "2026-01-01T00:00:00Z", equity: 100000 },
     { t: "2026-01-02T00:00:00Z", equity: 107400 },
   ],
-  trades: [{ symbol: "AAPL", side: "buy", quantity: 10, price: 190.25, filled_at: "2026-01-01T15:00:00Z" }],
+  trades: [
+    { symbol: "AAPL", side: "buy", quantity: 10, price: 190.25, filled_at: "2026-01-01T15:00:00Z" },
+  ],
 };
 
 beforeEach(() => {
@@ -63,7 +71,7 @@ afterEach(() => {
 describe("Backtest", () => {
   it("shows a prompt empty state before a backtest is run", () => {
     render(<Backtest refreshKey={0} />);
-    expect(screen.getByRole("button", { name: /run backtest/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Run backtest" })).toBeEnabled();
     expect(screen.getByText(/run a backtest to see the equity curve/i)).toBeInTheDocument();
   });
 
@@ -72,7 +80,7 @@ describe("Backtest", () => {
     const user = userEvent.setup();
     render(<Backtest refreshKey={0} />);
 
-    await user.click(screen.getByRole("button", { name: /run backtest/i }));
+    await user.click(screen.getByRole("button", { name: "Run backtest" }));
 
     await waitFor(() => expect(screen.getByTestId("equity-curve")).toBeInTheDocument());
     const curve = screen.getByTestId("equity-curve");
@@ -99,7 +107,7 @@ describe("Backtest", () => {
     });
     const user = userEvent.setup();
     render(<Backtest refreshKey={0} />);
-    await user.click(screen.getByRole("button", { name: /run backtest/i }));
+    await user.click(screen.getByRole("button", { name: "Run backtest" }));
 
     await waitFor(() => expect(screen.getByText("3.5%")).toBeInTheDocument());
     // Sharpe + Sortino are null -> "—" appears at least twice.
@@ -110,7 +118,7 @@ describe("Backtest", () => {
     backtest.mockRejectedValue(new ApiError(409, "backtesting is not configured"));
     const user = userEvent.setup();
     render(<Backtest refreshKey={0} />);
-    await user.click(screen.getByRole("button", { name: /run backtest/i }));
+    await user.click(screen.getByRole("button", { name: "Run backtest" }));
 
     await waitFor(() =>
       expect(screen.getByText(/backtesting is not configured/i)).toBeInTheDocument(),
@@ -122,7 +130,7 @@ describe("Backtest", () => {
     backtest.mockRejectedValue(new ApiError(500, "boom"));
     const user = userEvent.setup();
     render(<Backtest refreshKey={0} />);
-    await user.click(screen.getByRole("button", { name: /run backtest/i }));
+    await user.click(screen.getByRole("button", { name: "Run backtest" }));
 
     await waitFor(() => expect(screen.getByText(/boom/)).toBeInTheDocument());
     expect(screen.queryByTestId("equity-curve")).not.toBeInTheDocument();
@@ -132,7 +140,7 @@ describe("Backtest", () => {
     backtest.mockResolvedValue(FULL_RESULT);
     const user = userEvent.setup();
     render(<Backtest refreshKey={0} />);
-    await user.click(screen.getByRole("button", { name: /run backtest/i }));
+    await user.click(screen.getByRole("button", { name: "Run backtest" }));
 
     await waitFor(() => expect(screen.getByText("Profit factor")).toBeInTheDocument());
     // The trade count surfaces in the Trades card heading.

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Always-on REAL-TIME data scraper (macOS launchd user agent).
+
+  Runs the FastAPI app (uvicorn @ 127.0.0.1:8000) 24/7 with the in-app APScheduler
+  polling every data source on an interval. New signals append to the event store and
+  fan out live over the /ws/events WebSocket, so the dashboard updates the instant a
+  signal lands. Placeholders are substituted by ops/realtime/install.sh.
+
+  CYCLE_TRADE_MODE is forced to 'manual' here (collect-only): the poll loop ingests +
+  classifies + builds proposals but places NO orders. The OS env vars below override
+  whatever is in backend/.env (pydantic-settings ranks process env above the dotenv
+  file), so this can't silently auto-trade even though .env has ENABLE_ALPACA_PAPER=true.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PY}}</string>
+        <string>-m</string>
+        <string>trading.main</string>
+    </array>
+
+    <!-- CWD = backend/ so pydantic-settings finds .env (DATABASE_URL, keys, risk caps). -->
+    <key>WorkingDirectory</key>
+    <string>{{WORKDIR}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>INGEST_INTERVAL_SECONDS</key>
+        <string>{{INTERVAL}}</string>
+        <key>CYCLE_TRADE_MODE</key>
+        <string>{{MODE}}</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <!-- Start at login and keep alive: relaunch if uvicorn ever exits or crashes. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- launchd refuses to relaunch more than once per ThrottleInterval seconds. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOGDIR}}/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOGDIR}}/stderr.log</string>
+</dict>
+</plist>

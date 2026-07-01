@@ -1,0 +1,119 @@
+{
+  "data": [
+    {
+      "type": "documents",
+      "id": "FAA-2026-7195-0001",
+      "attributes": {
+        "agencyId": "FAA",
+        "objectId": "09000064b9341645",
+        "frDocNum": null,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "commentEndDate": "2026-07-02T03:59:59Z",
+        "commentStartDate": "2026-06-22T04:00:00Z",
+        "lastModifiedDate": "2026-06-22T15:47:03Z",
+        "openForComment": true,
+        "withinCommentPeriod": true,
+        "postedDate": "2026-06-22T04:00:00Z",
+        "title": "Airworthiness Directives; The Boeing Company Airplanes",
+        "docketId": "FAA-2026-7195",
+        "subtype": "Petition(s)",
+        "allowLateComments": true
+      }
+    },
+    {
+      "type": "documents",
+      "id": "EPA-2026-0562-0001",
+      "attributes": {
+        "agencyId": "EPA",
+        "objectId": "09000064b93425d8",
+        "frDocNum": "2026-12509",
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "commentEndDate": "2026-09-22T03:59:59Z",
+        "commentStartDate": "2026-06-21T04:00:00Z",
+        "lastModifiedDate": "2026-06-21T16:41:50Z",
+        "openForComment": true,
+        "withinCommentPeriod": true,
+        "postedDate": "2026-06-21T04:00:00Z",
+        "title": "Standards of Performance for New Refineries; Chevron Corporation Facilities",
+        "docketId": "EPA-2026-0562",
+        "subtype": "Request for Comments",
+        "allowLateComments": false
+      }
+    },
+    {
+      "type": "documents",
+      "id": "NHTSA-2026-0002-0323",
+      "attributes": {
+        "agencyId": "NHTSA",
+        "objectId": "09000064b933837b",
+        "frDocNum": "2026-13001",
+        "documentType": "Rule",
+        "withdrawn": true,
+        "commentEndDate": null,
+        "commentStartDate": null,
+        "lastModifiedDate": "2026-06-20T16:34:52Z",
+        "openForComment": false,
+        "withinCommentPeriod": false,
+        "postedDate": "2026-06-20T04:00:00Z",
+        "title": "Withdrawal of Federal Motor Vehicle Safety Standard Amendment Affecting Tesla, Inc.",
+        "docketId": "NHTSA-2026-0002",
+        "subtype": "Withdrawal",
+        "allowLateComments": false
+      }
+    },
+    {
+      "type": "documents",
+      "id": "APHIS-2019-0002-0323",
+      "attributes": {
+        "agencyId": "APHIS",
+        "objectId": "09000064b933837c",
+        "frDocNum": null,
+        "documentType": "Supporting & Related Material",
+        "withdrawn": false,
+        "commentEndDate": null,
+        "commentStartDate": null,
+        "lastModifiedDate": "2026-06-22T16:34:52Z",
+        "openForComment": false,
+        "withinCommentPeriod": false,
+        "postedDate": "2026-06-22T04:00:00Z",
+        "title": "Field Release of the Knotweed Psyllid Aphalara itadori for Classical Biological Control of Japanese, Giant, and Bohemian Knotweeds in the Contiguous United States",
+        "docketId": "APHIS-2019-0002",
+        "subtype": "EA and FONSI",
+        "allowLateComments": false
+      }
+    },
+    {
+      "type": "documents",
+      "id": "FMCSA-2026-0999-0001",
+      "attributes": {
+        "agencyId": "FMCSA",
+        "objectId": "09000064b93425e0",
+        "frDocNum": "2026-12777",
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "commentEndDate": "2026-08-22T03:59:59Z",
+        "commentStartDate": "2026-06-19T04:00:00Z",
+        "lastModifiedDate": "2026-06-19T16:41:50Z",
+        "openForComment": true,
+        "withinCommentPeriod": true,
+        "postedDate": "2026-06-19T04:00:00Z",
+        "title": "Agency Information Collection Activities; Techniques for Preventing and Enforcing Controlled Substance Violations among Commercial Motor Vehicle Drivers",
+        "docketId": "FMCSA-2026-0999",
+        "subtype": "Request for Comments",
+        "allowLateComments": false
+      }
+    }
+  ],
+  "meta": {
+    "totalElements": 5,
+    "pageSize": 250,
+    "pageNumber": 1,
+    "hasNextPage": false,
+    "hasPreviousPage": false,
+    "numberOfElements": 5,
+    "firstPage": true,
+    "lastPage": true
+  }
+}

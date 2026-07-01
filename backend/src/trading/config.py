@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     alpaca_data_key_id: str | None = None
     alpaca_data_secret_key: str | None = None
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.
-    default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL"]
+    default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPCX"]
 
     # Real historical bars for backtests (FR-BT). OFF by construction: a bare
     # `python -m trading.main` and the test suite price backtests off the deterministic

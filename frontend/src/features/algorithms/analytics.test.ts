@@ -57,7 +57,14 @@ describe("algoStats", () => {
     const events = [
       evt("decision.made", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "buy", quantity: "10" }),
       evt("decision.made", { sleeve_id: "sleeve-b", symbol: "MSFT", side: "buy", quantity: "10" }),
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "buy", quantity: "10", price: "100", fees: "0" }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "buy",
+        quantity: "10",
+        price: "100",
+        fees: "0",
+      }),
     ];
     const stats = algoStats(events, "sleeve-a");
     expect(stats.decisionCount).toBe(1);
@@ -67,8 +74,22 @@ describe("algoStats", () => {
   it("realizes P&L and win rate from a profitable round-trip (avg cost, fees included)", () => {
     const events = [
       // Buy 10 @ 100 (fee 1), then sell 10 @ 110 (fee 1).
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "buy", quantity: "10", price: "100", fees: "1" }),
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "sell", quantity: "10", price: "110", fees: "1" }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "buy",
+        quantity: "10",
+        price: "100",
+        fees: "1",
+      }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "sell",
+        quantity: "10",
+        price: "110",
+        fees: "1",
+      }),
     ];
     const stats = algoStats(events, "sleeve-a");
     // Open: realizedPnl -= 1 (fee) => -1
@@ -82,11 +103,39 @@ describe("algoStats", () => {
   it("books a losing close and reports a sub-100% win rate across two round-trips", () => {
     const events = [
       // Round-trip 1: win. Buy 10 @ 100, sell 10 @ 120 (no fees).
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "buy", quantity: "10", price: "100", fees: "0" }),
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "sell", quantity: "10", price: "120", fees: "0" }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "buy",
+        quantity: "10",
+        price: "100",
+        fees: "0",
+      }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "sell",
+        quantity: "10",
+        price: "120",
+        fees: "0",
+      }),
       // Round-trip 2: loss. Buy 10 @ 100, sell 10 @ 90.
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "MSFT", side: "buy", quantity: "10", price: "100", fees: "0" }),
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "MSFT", side: "sell", quantity: "10", price: "90", fees: "0" }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "MSFT",
+        side: "buy",
+        quantity: "10",
+        price: "100",
+        fees: "0",
+      }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "MSFT",
+        side: "sell",
+        quantity: "10",
+        price: "90",
+        fees: "0",
+      }),
     ];
     const stats = algoStats(events, "sleeve-a");
     // +200 (win) and -100 (loss) => +100 realized.
@@ -97,7 +146,14 @@ describe("algoStats", () => {
 
   it("returns null win rate when nothing has been closed yet", () => {
     const events = [
-      evt("order.filled", { sleeve_id: "sleeve-a", symbol: "AAPL", side: "buy", quantity: "10", price: "100", fees: "0" }),
+      evt("order.filled", {
+        sleeve_id: "sleeve-a",
+        symbol: "AAPL",
+        side: "buy",
+        quantity: "10",
+        price: "100",
+        fees: "0",
+      }),
     ];
     const stats = algoStats(events, "sleeve-a");
     expect(stats.winRatePct).toBeNull();
@@ -126,9 +182,7 @@ describe("convictionBreakdown", () => {
   ];
 
   it("flags tickers the sleeve has decided on and orders traded-first", () => {
-    const events = [
-      evt("decision.made", { sleeve_id: "sleeve-a", symbol: "AAPL" }),
-    ];
+    const events = [evt("decision.made", { sleeve_id: "sleeve-a", symbol: "AAPL" })];
     const rows = convictionBreakdown(conviction, events, "sleeve-a");
     // AAPL is traded, so it sorts ahead of higher-scoring-but-untraded MSFT.
     expect(rows[0]?.ticker).toBe("AAPL");
@@ -158,7 +212,13 @@ describe("signalAttribution", () => {
     const events = [
       evt(
         "signal.received",
-        { signal_id: "sig-1", source_type: "statement", ticker: "AAPL", sentiment: 0.8, politician_id: "pol-1" },
+        {
+          signal_id: "sig-1",
+          source_type: "statement",
+          ticker: "AAPL",
+          sentiment: 0.8,
+          politician_id: "pol-1",
+        },
         "2026-01-01T00:00:00.000Z",
       ),
       evt(
@@ -210,7 +270,11 @@ describe("signalAttribution", () => {
 
   it("excludes decisions from other sleeves", () => {
     const events = [
-      evt("decision.made", { sleeve_id: "sleeve-b", decision_id: "x", contributing_signal_ids: [] }),
+      evt("decision.made", {
+        sleeve_id: "sleeve-b",
+        decision_id: "x",
+        contributing_signal_ids: [],
+      }),
     ];
     expect(signalAttribution(events, "sleeve-a")).toHaveLength(0);
   });

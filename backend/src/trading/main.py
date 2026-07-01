@@ -677,7 +677,12 @@ def create_application() -> FastAPI:
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(create_application(), host="127.0.0.1", port=8000)
+    # loop="asyncio" (NOT uvloop): asyncpg's TLS handshake to Neon fails under uvloop with
+    # "ConnectionResetError: [Errno 54]" inside uvloop's start_tls, while the stdlib asyncio
+    # loop connects cleanly (the scheduled cron job, which runs under asyncio.run, talks to
+    # Neon without issue). The marginal uvloop throughput win is irrelevant for this low-rate,
+    # I/O-bound service, so we prefer the loop that actually connects.
+    uvicorn.run(create_application(), host="127.0.0.1", port=8000, loop="asyncio")
 
 
 if __name__ == "__main__":

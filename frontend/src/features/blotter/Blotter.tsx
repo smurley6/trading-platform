@@ -4,7 +4,7 @@
 // drives the authoritative refresh once the backend records the cancellation.
 
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Button, Card, H3, StackLayout, Text } from "@salt-ds/core";
+import { Button, Card, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
 import { useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { api } from "../../lib/api";
@@ -27,6 +27,21 @@ const TERMINAL_STATUSES = new Set([
 function isOpen(row: BlotterRow): boolean {
   return !TERMINAL_STATUSES.has(row.status.toLowerCase());
 }
+
+// Color-code the side as a presentational overlay only — buy green / sell red, matching the
+// tone palette used across the dashboard. Falls back to plain inherited text for any other value.
+const SIDE_COLOR: Record<string, string> = { buy: "#4ade80", sell: "#f87171" };
+
+const SideCell = (params: ICellRendererParams<BlotterRow>) => {
+  const side = (params.value as string | undefined) ?? params.data?.side;
+  if (!side) return null;
+  const color = SIDE_COLOR[side.toLowerCase()];
+  return (
+    <span style={{ color, fontWeight: color ? 600 : undefined, textTransform: "uppercase" }}>
+      {side}
+    </span>
+  );
+};
 
 const positionColumns: ColDef<PositionRow>[] = [
   { headerName: "Sleeve", field: "sleeve_id" },
@@ -98,7 +113,7 @@ export function Blotter({ refreshKey }: BlotterProps) {
     },
     { headerName: "Sleeve", field: "sleeve_id" },
     { headerName: "Symbol", field: "symbol", maxWidth: 110 },
-    { headerName: "Side", field: "side", maxWidth: 100 },
+    { headerName: "Side", field: "side", maxWidth: 100, cellRenderer: SideCell },
     { headerName: "Qty", field: "quantity", maxWidth: 110 },
     {
       headerName: "Status",
@@ -119,28 +134,60 @@ export function Blotter({ refreshKey }: BlotterProps) {
     },
   ];
 
+  const positions = positionRows(all);
+  // First-load only: show a spinner while the very first events request is in flight. On
+  // refresh (data already present) the grids stay put rather than flashing the spinner.
+  const initialLoading = events.loading && !events.data;
+  const loadError = events.error;
+
   return (
     <StackLayout gap={2}>
       <Card>
-        <H3>Positions</H3>
-        <DataGrid<PositionRow>
-          rows={positionRows(all)}
-          columns={positionColumns}
-          getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
-          height={240}
-        />
+        <H3 style={{ marginTop: 0 }}>Positions</H3>
+        <Text color="secondary" styleAs="label">
+          Net open quantity per sleeve and symbol
+        </Text>
+        <div style={{ marginTop: 12 }}>
+          {initialLoading ? (
+            <Spinner />
+          ) : loadError ? (
+            <Text color="error">Could not load positions: {loadError}</Text>
+          ) : positions.length > 0 ? (
+            <DataGrid<PositionRow>
+              rows={positions}
+              columns={positionColumns}
+              getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
+              height={240}
+            />
+          ) : (
+            <Text color="secondary">No open positions yet — fills will appear here.</Text>
+          )}
+        </div>
       </Card>
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <H3>Order blotter</H3>
+          <H3 style={{ marginTop: 0 }}>Order blotter</H3>
           {cancelError && <Text color="error">{cancelError}</Text>}
         </div>
-        <DataGrid<BlotterRow>
-          rows={rows}
-          columns={orderColumns}
-          getRowId={(r) => r.client_order_id}
-          height={420}
-        />
+        <Text color="secondary" styleAs="label">
+          Every order from the event log — open orders can be canceled inline
+        </Text>
+        <div style={{ marginTop: 12 }}>
+          {initialLoading ? (
+            <Spinner />
+          ) : loadError ? (
+            <Text color="error">Could not load orders: {loadError}</Text>
+          ) : rows.length > 0 ? (
+            <DataGrid<BlotterRow>
+              rows={rows}
+              columns={orderColumns}
+              getRowId={(r) => r.client_order_id}
+              height={420}
+            />
+          ) : (
+            <Text color="secondary">No orders yet — submit signals to generate activity.</Text>
+          )}
+        </div>
       </Card>
     </StackLayout>
   );

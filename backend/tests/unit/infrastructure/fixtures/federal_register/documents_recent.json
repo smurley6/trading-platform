@@ -1,0 +1,118 @@
+{
+  "description": "All Documents",
+  "count": 5,
+  "total_pages": 1,
+  "next_page_url": null,
+  "results": [
+    {
+      "title": "New Drug Application Approval Standards; Guidance for Pfizer Inc Oncology Products",
+      "type": "Rule",
+      "abstract": "The Food and Drug Administration is issuing a final rule affecting Pfizer oncology product review pathways.",
+      "document_number": "2026-13300",
+      "html_url": "https://www.federalregister.gov/documents/2026/06/29/2026-13300/new-drug-application-approval-standards",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-06-29/pdf/2026-13300.pdf",
+      "public_inspection_pdf_url": "https://public-inspection.federalregister.gov/2026-13300.pdf?1782650000",
+      "publication_date": "2026-06-29",
+      "agencies": [
+        {
+          "raw_name": "FOOD AND DRUG ADMINISTRATION",
+          "name": "Food and Drug Administration",
+          "id": 121,
+          "url": "https://www.federalregister.gov/agencies/food-and-drug-administration",
+          "json_url": "https://www.federalregister.gov/api/v1/agencies/121",
+          "parent_id": 227,
+          "slug": "food-and-drug-administration"
+        }
+      ],
+      "excerpts": null
+    },
+    {
+      "title": "Emissions Standards Update Affecting Moderna Manufacturing Facilities",
+      "type": "Rule",
+      "abstract": "The Environmental Protection Agency finalizes emissions standards for pharmaceutical manufacturing operated by Moderna.",
+      "document_number": "2026-13285",
+      "html_url": "https://www.federalregister.gov/documents/2026/06/28/2026-13285/emissions-standards-update",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-06-28/pdf/2026-13285.pdf",
+      "public_inspection_pdf_url": "https://public-inspection.federalregister.gov/2026-13285.pdf?1782560000",
+      "publication_date": "2026-06-28",
+      "agencies": [
+        {
+          "raw_name": "ENVIRONMENTAL PROTECTION AGENCY",
+          "name": "Environmental Protection Agency",
+          "id": 145,
+          "url": "https://www.federalregister.gov/agencies/environmental-protection-agency",
+          "json_url": "https://www.federalregister.gov/api/v1/agencies/145",
+          "parent_id": null,
+          "slug": "environmental-protection-agency"
+        }
+      ],
+      "excerpts": null
+    },
+    {
+      "title": "Proposed Rule on Reporting Requirements for Lockheed Martin Defense Contracts",
+      "type": "Proposed Rule",
+      "abstract": "The Department of Defense proposes new reporting requirements applicable to Lockheed Martin.",
+      "document_number": "2026-13270",
+      "html_url": "https://www.federalregister.gov/documents/2026/06/27/2026-13270/proposed-rule-reporting",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-06-27/pdf/2026-13270.pdf",
+      "public_inspection_pdf_url": "https://public-inspection.federalregister.gov/2026-13270.pdf?1782470000",
+      "publication_date": "2026-06-27",
+      "agencies": [
+        {
+          "raw_name": "DEPARTMENT OF DEFENSE",
+          "name": "Defense Department",
+          "id": 96,
+          "url": "https://www.federalregister.gov/agencies/defense-department",
+          "json_url": "https://www.federalregister.gov/api/v1/agencies/96",
+          "parent_id": null,
+          "slug": "defense-department"
+        }
+      ],
+      "excerpts": null
+    },
+    {
+      "title": "Advancing Regenerative Agriculture and Strengthening American Farm Resilience",
+      "type": "Presidential Document",
+      "abstract": null,
+      "document_number": "2026-13254",
+      "html_url": "https://www.federalregister.gov/documents/2026/06/26/2026-13254/advancing-regenerative-agriculture",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-06-26/pdf/2026-13254.pdf",
+      "public_inspection_pdf_url": "https://public-inspection.federalregister.gov/2026-13254.pdf?1782380000",
+      "publication_date": "2026-06-26",
+      "agencies": [
+        {
+          "raw_name": "EXECUTIVE OFFICE OF THE PRESIDENT",
+          "name": "Executive Office of the President",
+          "id": 538,
+          "url": "https://www.federalregister.gov/agencies/executive-office-of-the-president",
+          "json_url": "https://www.federalregister.gov/api/v1/agencies/538",
+          "parent_id": null,
+          "slug": "executive-office-of-the-president"
+        }
+      ],
+      "excerpts": null
+    },
+    {
+      "title": "Signatures on Immigration Benefit Requests",
+      "type": "Rule",
+      "abstract": "General administrative rule with no publicly traded entity mentioned.",
+      "document_number": "C1-2026-09289",
+      "html_url": "https://www.federalregister.gov/documents/2026/06/25/C1-2026-09289/signatures-on-immigration-benefit-requests",
+      "pdf_url": "https://www.govinfo.gov/content/pkg/FR-2026-06-25/pdf/C1-2026-09289.pdf",
+      "public_inspection_pdf_url": "https://public-inspection.federalregister.gov/C1-2026-09289.pdf?1782290000",
+      "publication_date": "2026-06-25",
+      "agencies": [
+        {
+          "raw_name": "DEPARTMENT OF HOMELAND SECURITY",
+          "name": "Homeland Security Department",
+          "id": 227,
+          "url": "https://www.federalregister.gov/agencies/homeland-security-department",
+          "json_url": "https://www.federalregister.gov/api/v1/agencies/227",
+          "parent_id": null,
+          "slug": "homeland-security-department"
+        }
+      ],
+      "excerpts": null
+    }
+  ]
+}

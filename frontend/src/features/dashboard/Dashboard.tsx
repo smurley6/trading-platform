@@ -1,7 +1,7 @@
 // Portfolio dashboard (FR-UI-6): aggregate + per-sleeve, equity curve, paper/live indicator.
 
 import type { ColDef } from "ag-grid-community";
-import { Card, H2, H3, StackLayout, Text } from "@salt-ds/core";
+import { Card, H2, H3, Spinner, StackLayout, Text } from "@salt-ds/core";
 import { useEffect, useState } from "react";
 import { DataGrid } from "../../components/DataGrid";
 import { EquityCurve } from "../../components/EquityCurve";
@@ -65,6 +65,9 @@ interface DashboardProps {
 
 export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
   const events = useLoader(() => api.events(1000), [refreshKey]);
+  // Command-center signals: pending proposals + cycle mode share one loader; kill-switch state.
+  const proposals = useLoader(() => api.proposals(), [refreshKey]);
+  const killSwitch = useLoader(() => api.killSwitch(), [refreshKey]);
   // Optional live P&L overlay. Defaults to OFF (no credentials) and resolves to a disabled
   // shape on any error, so the rest of the dashboard is unaffected when it's not available.
   // Once enabled, it refreshes on a light interval so market value / unrealized P&L track the
@@ -96,23 +99,51 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
   const liveUnrealized = livePositions.reduce((sum, p) => sum + Number(p.unrealized_pnl), 0);
   const liveMarketValue = livePositions.reduce((sum, p) => sum + Number(p.market_value), 0);
 
+  // Command-center derived values.
+  const pendingProposals = proposals.data?.proposals.length ?? 0;
+  const cycleMode = proposals.data?.mode ?? "—";
+  const tradingLive = sleeves.some((s) => s.mode === "live");
+  const killEngaged = killSwitch.data?.engaged ?? false;
+
   return (
     <StackLayout gap={2}>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+          gap: 16,
+        }}
+      >
         <SummaryCard label="Total equity" value={formatMoney(totalEquity)} />
         <SummaryCard label="Sleeves" value={formatNumber(sleeves.length, 0)} />
         <SummaryCard label="Open positions" value={formatNumber(openPositions, 0)} />
+        <SummaryCard label="Pending proposals" value={formatNumber(pendingProposals, 0)} />
+        <SummaryCard label="Cycle mode" value={cycleMode} />
+        <SummaryCard
+          label="Trading mode"
+          value={tradingLive ? "LIVE" : "PAPER"}
+          tone={tradingLive ? "danger" : "ok"}
+        />
+        <SummaryCard
+          label="Kill switch"
+          value={killEngaged ? "HALTED" : "ARMED"}
+          tone={killEngaged ? "danger" : "ok"}
+        />
         {liveOn && (
           <>
             <SummaryCard label="Live market value" value={formatMoney(liveMarketValue)} />
-            <SummaryCard label="Unrealized P&L" value={formatMoney(liveUnrealized)} />
+            <SummaryCard
+              label="Unrealized P&L"
+              value={formatMoney(liveUnrealized)}
+              tone={liveUnrealized >= 0 ? "ok" : "danger"}
+            />
           </>
         )}
       </div>
 
       {liveOn && livePositions.length > 0 && (
         <Card>
-          <H3>Live positions</H3>
+          <H3 style={{ marginTop: 0 }}>Live positions</H3>
           <DataGrid<LivePosition>
             rows={livePositions}
             columns={livePositionColumns}
@@ -123,18 +154,26 @@ export function Dashboard({ refreshKey, sleeves }: DashboardProps) {
       )}
 
       <Card>
-        <H3>Sleeves</H3>
-        <DataGrid<SleeveRow>
-          rows={rows}
-          columns={columns}
-          getRowId={(r) => r.id}
-          height={Math.max(140, 60 + rows.length * 44)}
-        />
+        <H3 style={{ marginTop: 0 }}>Sleeves</H3>
+        {events.loading && !events.data ? (
+          <Spinner />
+        ) : events.error ? (
+          <Text color="error">Could not load portfolio activity: {events.error}</Text>
+        ) : rows.length > 0 ? (
+          <DataGrid<SleeveRow>
+            rows={rows}
+            columns={columns}
+            getRowId={(r) => r.id}
+            height={Math.max(140, 60 + rows.length * 44)}
+          />
+        ) : (
+          <Text color="secondary">No sleeves configured yet.</Text>
+        )}
       </Card>
 
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <H3>Equity curve</H3>
+          <H3 style={{ marginTop: 0 }}>Equity curve</H3>
           <div style={{ display: "flex", gap: 8 }}>
             {sleeves.map((s) => (
               <button
@@ -203,13 +242,28 @@ function useLivePositions(refreshKey: number): LivePositionsResult {
   return state;
 }
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
+const TONE_COLOR: Record<"ok" | "danger", string> = {
+  ok: "#4ade80",
+  danger: "#f87171",
+};
+
+function SummaryCard({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "ok" | "danger" | "neutral";
+}) {
   return (
-    <Card style={{ minWidth: 200, flex: 1 }}>
+    <Card>
       <Text color="secondary" styleAs="label">
         {label}
       </Text>
-      <H2 style={{ margin: "4px 0 0" }}>{value}</H2>
+      <H2 style={{ margin: "4px 0 0", color: tone === "neutral" ? undefined : TONE_COLOR[tone] }}>
+        {value}
+      </H2>
     </Card>
   );
 }

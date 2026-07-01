@@ -4,8 +4,10 @@
 import { Spinner, Text } from "@salt-ds/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KillSwitchControl } from "./components/KillSwitchControl";
+import { LiveIndicator } from "./components/LiveIndicator";
+import { ModeToggle } from "./components/ModeToggle";
+import { StatusStrip } from "./components/StatusStrip";
 import { Algorithms } from "./features/algorithms/Algorithms";
-import { Backtest } from "./features/backtest/Backtest";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
 import { Markets } from "./features/markets/Markets";
@@ -13,19 +15,11 @@ import { Proposals } from "./features/proposals/Proposals";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { SignalFeed } from "./features/signals/SignalFeed";
 import { api } from "./lib/api";
-import type { Sleeve } from "./lib/types";
+import type { Sleeve, StoredEventDto } from "./lib/types";
 import { useEventStream } from "./lib/useEventStream";
 import { useLoader } from "./lib/useLoader";
 
-type View =
-  | "dashboard"
-  | "algorithms"
-  | "markets"
-  | "proposals"
-  | "signals"
-  | "blotter"
-  | "backtest"
-  | "risk";
+type View = "dashboard" | "algorithms" | "markets" | "proposals" | "signals" | "blotter" | "risk";
 
 const NAV: { id: View; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
@@ -34,7 +28,6 @@ const NAV: { id: View; label: string }[] = [
   { id: "proposals", label: "Proposals" },
   { id: "signals", label: "Signal feed" },
   { id: "blotter", label: "Blotter" },
-  { id: "backtest", label: "Backtest" },
   { id: "risk", label: "Risk" },
 ];
 
@@ -42,22 +35,34 @@ export function App() {
   const [view, setView] = useState<View>("dashboard");
   const [refreshKey, setRefreshKey] = useState(0);
   const [killBusy, setKillBusy] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [signalCount, setSignalCount] = useState(0);
 
   const sleeves = useLoader<Sleeve[]>(() => api.listSleeves(), [refreshKey]);
   const kill = useLoader(() => api.killSwitch(), [refreshKey]);
 
-  // Coalesce bursts of live events into a single refresh.
+  // Coalesce bursts of live events into a single refresh, and tally signal arrivals so the
+  // header can flash a "+N" badge as fresh signals stream in.
   const debounceRef = useRef<number | undefined>(undefined);
-  const bumpRefresh = useCallback(() => {
+  const onEvent = useCallback((event: StoredEventDto) => {
+    if (event.event_type === "signal.received") setSignalCount((n) => n + 1);
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => setRefreshKey((k) => k + 1), 300);
   }, []);
-  useEventStream(bumpRefresh);
+  useEventStream(onEvent, setConnected);
   useEffect(() => () => window.clearTimeout(debounceRef.current), []);
 
   const sleeveList = sleeves.data ?? [];
-  const isLive = sleeveList.some((s) => s.mode === "live");
   const engaged = kill.data?.engaged ?? false;
+
+  // Lazy keep-alive: a view mounts the first time it's visited, then stays mounted (hidden via
+  // display:none) so switching tabs never re-mounts its widgets (TradingView iframes, loaders).
+  // Nothing loads until first visit, so the upfront RAM/compute cost stays near zero.
+  const [visited, setVisited] = useState<View[]>([]);
+  useEffect(() => {
+    setVisited((prev) => (prev.includes(view) ? prev : [...prev, view]));
+  }, [view]);
+  const mountedViews = visited.includes(view) ? visited : [...visited, view];
 
   async function toggleKill(next: boolean): Promise<void> {
     setKillBusy(true);
@@ -82,22 +87,18 @@ export function App() {
         }}
       >
         <strong style={{ fontSize: 18 }}>Trading Platform</strong>
-        <span
-          style={{
-            padding: "2px 10px",
-            borderRadius: 12,
-            fontSize: 12,
-            fontWeight: 700,
-            background: isLive ? "rgba(239,68,68,0.2)" : "rgba(76,154,255,0.18)",
-            color: isLive ? "#f87171" : "#7cb3ff",
-            border: `1px solid ${isLive ? "#ef4444" : "#4c9aff"}`,
-          }}
-        >
-          {isLive ? "LIVE" : "PAPER"}
-        </span>
+        <ModeToggle sleeves={sleeveList} onChanged={() => setRefreshKey((k) => k + 1)} />
+        <LiveIndicator connected={connected} signalCount={signalCount} />
         <div style={{ flex: 1 }} />
         <KillSwitchControl engaged={engaged} busy={killBusy} onToggle={(n) => void toggleKill(n)} />
       </header>
+
+      <StatusStrip
+        connected={connected}
+        sleeves={sleeveList}
+        killEngaged={engaged}
+        refreshKey={refreshKey}
+      />
 
       <nav style={{ display: "flex", gap: 8, padding: "10px 20px" }}>
         {NAV.map((item) => (
@@ -125,7 +126,11 @@ export function App() {
         ) : sleeves.error ? (
           <Text color="error">Could not reach backend: {sleeves.error}</Text>
         ) : (
-          <Screen view={view} refreshKey={refreshKey} sleeves={sleeveList} />
+          mountedViews.map((v) => (
+            <div key={v} style={{ display: v === view ? "block" : "none" }}>
+              <Screen view={v} refreshKey={refreshKey} sleeves={sleeveList} />
+            </div>
+          ))
         )}
       </main>
     </div>
@@ -154,8 +159,6 @@ function Screen({
       return <SignalFeed refreshKey={refreshKey} />;
     case "blotter":
       return <Blotter refreshKey={refreshKey} />;
-    case "backtest":
-      return <Backtest refreshKey={refreshKey} />;
     case "risk":
       return <RiskDashboard refreshKey={refreshKey} sleeves={sleeves} />;
   }

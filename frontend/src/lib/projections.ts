@@ -148,11 +148,7 @@ export function backtestCurve(points: BacktestPoint[] | undefined): EquityPoint[
   let lastTime = 0;
   for (const p of points ?? []) {
     const rawTime =
-      typeof p.time === "number"
-        ? p.time
-        : p.t
-          ? Math.floor(new Date(p.t).getTime() / 1000)
-          : NaN;
+      typeof p.time === "number" ? p.time : p.t ? Math.floor(new Date(p.t).getTime() / 1000) : NaN;
     const value = Number(p.equity);
     if (!Number.isFinite(rawTime) || !Number.isFinite(value)) continue;
     let time = rawTime;
