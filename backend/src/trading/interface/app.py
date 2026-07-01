@@ -120,6 +120,9 @@ class AppDeps:
     db_readiness: DatabaseReadiness | None = None
     # Auth: API-key guard for mutating/sensitive endpoints. None => open (dev default).
     api_key: str | None = None
+    # CORS: allowed browser origins when the SPA is served from a different origin than this API
+    # (e.g. a static host). Empty => no CORS headers (same-origin only).
+    cors_allow_origins: list[str] = field(default_factory=list)
     # Long-running background coroutines started on startup and cancelled on shutdown (e.g. the
     # Alpaca quote-stream consumer and the trade-updates stream). Each is a factory so nothing
     # runs until the app starts — when empty (the default) startup launches no task, no socket.
@@ -157,6 +160,18 @@ def create_app(deps: AppDeps) -> FastAPI:
                 await aclose()
 
     app = FastAPI(title="Trading Platform", version="0.2.0", lifespan=lifespan)
+    # Cross-origin access for a browser SPA served from a DIFFERENT origin than this API (e.g. a
+    # static host). Empty => no CORS headers (same-origin only), preserving the default.
+    if deps.cors_allow_origins:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=deps.cors_allow_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     # Structured JSON access logging + request/latency metrics + a propagated request id.
     app.add_middleware(ObservabilityMiddleware, metrics=deps.metrics)
 

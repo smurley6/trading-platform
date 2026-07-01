@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     def _force_async_pg_driver(cls, v: str | None) -> str | None:
         return normalize_async_dsn(v) if v else v
 
+    # Comma-separated allowed CORS origins for a browser SPA served from a DIFFERENT origin than
+    # this API (e.g. a static host). Unset => no CORS headers (same-origin only). Example:
+    # "https://app.example.com,https://staging.example.com".
+    cors_allow_origins: str | None = None
+
     # Sleeve / paper account
     starting_cash: Decimal = Decimal("100000")
 

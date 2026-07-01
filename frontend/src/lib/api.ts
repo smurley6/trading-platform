@@ -24,7 +24,10 @@ import type {
   TradingMode,
 } from "./types";
 
-const BASE = "/api";
+// In prod the SPA is served from a different origin than the API (a static host), so it calls the
+// backend directly via VITE_API_URL (baked in at build time). In dev VITE_API_URL is unset, so it
+// falls back to same-origin "/api", which the Vite dev proxy forwards to the backend.
+const BASE = import.meta.env.VITE_API_URL ?? "/api";
 
 class ApiError extends Error {
   constructor(

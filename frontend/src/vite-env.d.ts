@@ -8,4 +8,5 @@
 // WS upgrades. Unset in dev (the Vite proxy handles /ws/*). See lib/wsBase.ts.
 interface ImportMetaEnv {
   readonly VITE_WS_URL?: string;
+  readonly VITE_API_URL?: string;
 }

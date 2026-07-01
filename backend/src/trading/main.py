@@ -487,6 +487,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
         cycle_trade_mode=settings.cycle_trade_mode,
+        cors_allow_origins=[
+            o.strip() for o in (settings.cors_allow_origins or "").split(",") if o.strip()
+        ],
         scan_proposals=scan_proposals,
         execute_proposals=execute_proposals,
         backtest_runner=run_backtest,
