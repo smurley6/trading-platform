@@ -163,6 +163,21 @@ class Settings(BaseSettings):
     fda_approvals_enabled: bool = False
     fda_lookback_days: int = 30
     openfda_api_key: str | None = None
+    # Federal Register (Public Inspection) — keyless free API; api_key optional (raises rate limit).
+    federal_register_enabled: bool = False
+    federal_register_lookback_days: int = 30
+    federal_register_api_key: str | None = None
+    # Congress.gov bill actions — free api.data.gov key REQUIRED when enabled.
+    congress_bills_enabled: bool = False
+    congress_bills_lookback_days: int = 30
+    congress_bills_api_key: str | None = None
+    # Regulations.gov dockets — free api.data.gov key REQUIRED when enabled.
+    regulations_gov_enabled: bool = False
+    regulations_gov_lookback_days: int = 7
+    regulations_gov_api_key: str | None = None
+    # SEC EDGAR "getcurrent" Atom feed (fast Form 4) — reuses sec_form4_user_agent (SEC needs a UA).
+    sec_edgar_atom_enabled: bool = False
+    sec_edgar_atom_max_filings: int = 100
 
     http_timeout_seconds: float = 10.0
 
