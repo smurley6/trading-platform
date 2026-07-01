@@ -163,6 +163,9 @@ class Settings(BaseSettings):
     fda_approvals_enabled: bool = False
     fda_lookback_days: int = 30
     openfda_api_key: str | None = None
+    # ClinicalTrials.gov API v2 study updates — keyless free API, no key needed.
+    clinical_trials_enabled: bool = False
+    clinical_trials_lookback_days: int = 14
     # Federal Register (Public Inspection) — keyless free API; api_key optional (raises rate limit).
     federal_register_enabled: bool = False
     federal_register_lookback_days: int = 30

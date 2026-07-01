@@ -43,6 +43,7 @@ from trading.infrastructure.brokers.paper import PaperBroker
 from trading.infrastructure.brokers.routing import ModeRoutingBroker
 from trading.infrastructure.brokers.trade_updates_stream import AlpacaTradeUpdatesStream
 from trading.infrastructure.clock import SystemClock
+from trading.infrastructure.data_sources.clinical_trials import ClinicalTrialsSource
 from trading.infrastructure.data_sources.congress_bills import CongressBillsSource
 from trading.infrastructure.data_sources.congress_trades import CongressTradesSource
 from trading.infrastructure.data_sources.fda_approvals import FdaApprovalsSource
@@ -556,6 +557,7 @@ def _build_sources(
     sec_enabled = bool(settings.sec_form4_enabled and settings.sec_form4_user_agent)
     lobbying_enabled = settings.lobbying_enabled
     fda_enabled = settings.fda_approvals_enabled
+    clinical_trials_enabled = settings.clinical_trials_enabled
     federal_register_enabled = settings.federal_register_enabled
     congress_bills_enabled = bool(
         settings.congress_bills_enabled and settings.congress_bills_api_key
@@ -575,6 +577,7 @@ def _build_sources(
         or sec_enabled
         or lobbying_enabled
         or fda_enabled
+        or clinical_trials_enabled
         or federal_register_enabled
         or congress_bills_enabled
         or regulations_gov_enabled
@@ -679,6 +682,16 @@ def _build_sources(
                 clock=clock,
                 lookback_days=settings.fda_lookback_days,
                 api_key=settings.openfda_api_key,
+            )
+        )
+    if clinical_trials_enabled:
+        sources.append(
+            ClinicalTrialsSource(
+                client=client,
+                entity_resolver=entity_resolver,
+                clock=clock,
+                enabled=True,
+                lookback_days=settings.clinical_trials_lookback_days,
             )
         )
     if federal_register_enabled:
