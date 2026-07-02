@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from trading.application.data_integrity import ensure_real_signals
+from trading.application.data_integrity import ensure_real_signals, tradeable_signals
 from trading.application.place_order import PlaceOrder, PlaceOrderRequest
 from trading.application.ports.broker import BrokerOrder, BrokerPort
 from trading.application.ports.clock import ClockPort
@@ -78,6 +78,12 @@ class EvaluateSignals:
         # the window aborts the whole evaluation — no real order is ever driven by fake data.
         if self._require_real_data:
             ensure_real_signals(signals)
+
+        # Provenance wall (RESEARCH-PLAN §2): BACKFILLED signals are real but must never reach
+        # the strategy/order-placement path. Unlike the SYNTHETIC guard above, this FILTERS
+        # rather than aborts, so REAL (or SYNTHETIC, outside require_real_data) signals in the
+        # same batch still evaluate normally instead of the whole cycle halting.
+        signals = tradeable_signals(signals)
 
         account = await self._broker.get_account()
         portfolio = Portfolio(

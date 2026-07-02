@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from trading.domain.provenance import Provenance
+from trading.domain.provenance import PitConfidence, Provenance
 
 
 class SignalSource(StrEnum):
@@ -28,6 +28,10 @@ class Signal:
     # Origin trust level. Defaults to SYNTHETIC (fail-closed): a Signal that does not explicitly
     # declare itself REAL can never drive a real order. Only live data adapters stamp REAL.
     provenance: Provenance = Provenance.SYNTHETIC
+    # Point-in-time confidence in this signal's timestamp (RESEARCH-PLAN §3 source tier table).
+    # Defaults to "exact" so existing REAL/SYNTHETIC flows (all live-timestamped) are undisturbed;
+    # backfilled signals stamp this from a per-source config map (Task 02).
+    pit_confidence: PitConfidence = "exact"
 
     def __post_init__(self) -> None:
         if not -1.0 <= self.sentiment <= 1.0:

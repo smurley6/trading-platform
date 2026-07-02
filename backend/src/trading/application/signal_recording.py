@@ -26,6 +26,7 @@ def signal_payload(signal: Signal) -> dict[str, object]:
         "source_reliability": signal.source_reliability,
         "raw_payload": signal.raw_payload,
         "provenance": signal.provenance.value,
+        "pit_confidence": signal.pit_confidence,
     }
 
 

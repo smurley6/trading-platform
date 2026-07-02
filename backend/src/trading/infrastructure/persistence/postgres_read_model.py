@@ -12,7 +12,7 @@ positions agree with the live engine and the in-memory projection.
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Row, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +23,7 @@ from trading.application.projections import _signal_from_payload
 from trading.domain.events import EventType, StoredEvent
 from trading.domain.orders import Fill, OrderSide
 from trading.domain.positions import HeldPosition, Portfolio, Position
+from trading.domain.provenance import PitConfidence, Provenance
 from trading.domain.signals import Signal, SignalSource
 from trading.infrastructure.persistence.tables import (
     portfolio_snapshots_table,
@@ -66,6 +67,8 @@ class PostgresReadModel:
             politician_weight=signal.politician_weight,
             source_reliability=signal.source_reliability,
             raw_payload=signal.raw_payload,
+            provenance=signal.provenance.value,
+            pit_confidence=signal.pit_confidence,
         )
         # A signal id is recorded once; ignore a replayed duplicate so rebuild is idempotent.
         await conn.execute(stmt.on_conflict_do_nothing(index_elements=["signal_id"]))
@@ -261,4 +264,10 @@ def _row_to_signal(row: Row[Any]) -> Signal:
         politician_weight=float(row.politician_weight),
         source_reliability=float(row.source_reliability),
         raw_payload=dict(row.raw_payload),
+        # NOT NULL with a fail-closed server default ('synthetic'/'exact'): rows written before
+        # migration 0003 read back as SYNTHETIC/"exact" (same convention as a legacy event
+        # payload in `application.projections._signal_from_payload`) until a read-model rebuild
+        # restores their true values from the event log.
+        provenance=Provenance(str(row.provenance)),
+        pit_confidence=cast(PitConfidence, str(row.pit_confidence)),
     )

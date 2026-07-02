@@ -1,7 +1,7 @@
 """Anti-placeholder guard: SYNTHETIC data is structurally kept out of real decisions."""
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,9 +10,10 @@ from trading.application.data_integrity import (
     SyntheticDataError,
     ensure_real_signals,
     non_real_signals,
+    tradeable_signals,
 )
 from trading.application.ingest_signals import IngestSignals
-from trading.application.projections import signals_from_events
+from trading.application.projections import _signal_from_payload, signals_from_events
 from trading.application.signal_recording import record_signals
 from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal
@@ -52,6 +53,39 @@ def test_non_real_signals_returns_only_fakes(make_signal: SignalFactory) -> None
     assert non_real_signals([real, fake]) == [fake]
 
 
+def test_ensure_real_signals_does_not_raise_on_backfilled(make_signal: SignalFactory) -> None:
+    # The execution wall for BACKFILLED is filter-not-abort (tradeable_signals), NOT this
+    # abort-the-batch guard — otherwise any backfill run would halt live evaluation until the
+    # backfilled signals aged out of the corroboration window (RESEARCH-PLAN §2).
+    ensure_real_signals([make_signal(provenance=Provenance.BACKFILLED)])
+
+
+def test_tradeable_signals_drops_backfilled_but_keeps_real_and_synthetic(
+    make_signal: SignalFactory,
+) -> None:
+    real = make_signal(provenance=Provenance.REAL)
+    backfilled = make_signal(provenance=Provenance.BACKFILLED)
+    synthetic = make_signal(provenance=Provenance.SYNTHETIC)
+    assert tradeable_signals([real, backfilled, synthetic]) == [real, synthetic]
+
+
+async def test_backfilled_signals_appear_in_signals_from_events_projection(
+    clock: FixedClock, make_signal: SignalFactory
+) -> None:
+    # BACKFILLED must never trade, but IS permitted into projections and (future) labeler/
+    # learner paths — unlike SYNTHETIC, which is only kept for tests/backtests.
+    event_store = InMemoryEventStore(clock)
+    backfilled = make_signal(provenance=Provenance.BACKFILLED)
+    await record_signals(
+        event_store=event_store, clock=clock, signals=[backfilled], correlation_id="c"
+    )
+
+    [reconstructed] = signals_from_events(await event_store.read_all())
+
+    assert reconstructed.provenance is Provenance.BACKFILLED
+    assert reconstructed.id == backfilled.id
+
+
 async def test_provenance_survives_event_roundtrip(
     clock: FixedClock, make_signal: SignalFactory
 ) -> None:
@@ -66,6 +100,40 @@ async def test_provenance_survives_event_roundtrip(
     )
     [reconstructed] = signals_from_events(await event_store.read_all())
     assert reconstructed.provenance is Provenance.REAL
+
+
+async def test_pit_confidence_survives_event_roundtrip(
+    clock: FixedClock, make_signal: SignalFactory
+) -> None:
+    event_store = InMemoryEventStore(clock)
+    await record_signals(
+        event_store=event_store,
+        clock=clock,
+        signals=[make_signal(provenance=Provenance.BACKFILLED, pit_confidence="approximate")],
+        correlation_id="c",
+    )
+    [reconstructed] = signals_from_events(await event_store.read_all())
+    assert reconstructed.pit_confidence == "approximate"
+
+
+def test_pit_confidence_defaults_to_exact_for_legacy_payloads() -> None:
+    # Legacy events recorded before pit_confidence existed have no such key in their payload;
+    # they must default to "exact" so pre-backfill REAL/SYNTHETIC signals are undisturbed.
+    legacy_payload: dict[str, object] = {
+        "signal_id": "s-legacy",
+        "created_at": datetime(2026, 6, 1, tzinfo=UTC).isoformat(),
+        "source_type": "statement",
+        "ticker": "AAPL",
+        "politician_id": None,
+        "sentiment": 0.5,
+        "politician_weight": 1.0,
+        "source_reliability": 1.0,
+        "raw_payload": {},
+        # no "provenance" or "pit_confidence" key at all
+    }
+    signal = _signal_from_payload(legacy_payload)
+    assert signal.pit_confidence == "exact"
+    assert signal.provenance is Provenance.SYNTHETIC
 
 
 async def test_ingestion_gate_drops_synthetic_in_real_mode(

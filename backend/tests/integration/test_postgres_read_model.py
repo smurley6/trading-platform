@@ -44,6 +44,30 @@ def _signal_event(*, signal_id: str, ticker: str, created_at: datetime) -> Domai
     )
 
 
+def _signal_event_with_provenance(
+    *, signal_id: str, ticker: str, created_at: datetime, provenance: str, pit_confidence: str
+) -> DomainEvent:
+    return DomainEvent(
+        stream_id=f"signal-{signal_id}",
+        event_type=EventType.SIGNAL_RECEIVED,
+        payload={
+            "signal_id": signal_id,
+            "created_at": created_at.isoformat(),
+            "source_type": "statement",
+            "ticker": ticker,
+            "politician_id": "pol-1",
+            "sentiment": 0.8,
+            "politician_weight": 1.0,
+            "source_reliability": 1.0,
+            "raw_payload": {"k": "v"},
+            "provenance": provenance,
+            "pit_confidence": pit_confidence,
+        },
+        occurred_at=created_at,
+        correlation_id="c1",
+    )
+
+
 def _fill_event(*, sleeve_id: str, symbol: str, side: str, price: str, qty: str) -> DomainEvent:
     return DomainEvent(
         stream_id=f"sleeve-{sleeve_id}",
@@ -71,6 +95,64 @@ def _snapshot_event(*, sleeve_id: str, cash: str, equity: str, taken_at: datetim
         occurred_at=taken_at,
         correlation_id="c1",
     )
+
+
+async def test_provenance_and_pit_confidence_round_trip_through_rm_signals() -> None:
+    # Task 01: `rm_signals` gained provenance/pit_confidence columns (migration 0003) because
+    # `_row_to_signal` used to silently drop both, so anything read back from Postgres degraded
+    # to SYNTHETIC/"exact" regardless of what was actually recorded.
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from trading.domain.provenance import Provenance
+    from trading.infrastructure.persistence.postgres import PostgresEventStore
+    from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    read_model = PostgresReadModel(engine)
+    store = PostgresEventStore(engine, on_append=read_model.apply)
+    sig = f"s-{uuid4()}"
+    try:
+        await read_model.rebuild([])
+        await store.append(
+            _signal_event_with_provenance(
+                signal_id=sig,
+                ticker="AAPL",
+                created_at=_WHEN,
+                provenance="backfilled",
+                pit_confidence="approximate",
+            )
+        )
+
+        [signal] = [s for s in await read_model.all_signals() if s.id == sig]
+        assert signal.provenance is Provenance.BACKFILLED
+        assert signal.pit_confidence == "approximate"
+    finally:
+        await engine.dispose()
+
+
+async def test_legacy_signal_row_defaults_provenance_and_pit_confidence() -> None:
+    # A payload with no provenance/pit_confidence key at all (pre-Task-01 event shape) must
+    # fail-closed: SYNTHETIC + "exact", matching the server-default columns added in migration
+    # 0003 and the in-memory legacy-payload default in `_signal_from_payload`.
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from trading.domain.provenance import Provenance
+    from trading.infrastructure.persistence.postgres import PostgresEventStore
+    from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    read_model = PostgresReadModel(engine)
+    store = PostgresEventStore(engine, on_append=read_model.apply)
+    sig = f"s-{uuid4()}"
+    try:
+        await read_model.rebuild([])
+        await store.append(_signal_event(signal_id=sig, ticker="AAPL", created_at=_WHEN))
+
+        [signal] = [s for s in await read_model.all_signals() if s.id == sig]
+        assert signal.provenance is Provenance.SYNTHETIC
+        assert signal.pit_confidence == "exact"
+    finally:
+        await engine.dispose()
 
 
 async def test_append_keeps_read_model_current() -> None:

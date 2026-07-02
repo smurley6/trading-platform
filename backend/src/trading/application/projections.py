@@ -6,12 +6,12 @@ The event log is the system of record; these are rebuildable at any time (spec s
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from trading.domain.events import EventType, StoredEvent
 from trading.domain.orders import Fill, OrderSide
 from trading.domain.positions import HeldPosition, Portfolio
-from trading.domain.provenance import Provenance
+from trading.domain.provenance import PitConfidence, Provenance
 from trading.domain.signals import Signal, SignalSource
 
 
@@ -29,6 +29,9 @@ def _signal_from_payload(payload: dict[str, Any]) -> Signal:
         # Legacy events (recorded before provenance existed) default to SYNTHETIC — fail-closed,
         # so old data can never be mistaken for real and slip past the trade-time guard.
         provenance=Provenance(str(payload.get("provenance", Provenance.SYNTHETIC.value))),
+        # Legacy events (recorded before pit_confidence existed) default to "exact" so pre-backfill
+        # REAL/SYNTHETIC signals — all live-timestamped — are not disturbed.
+        pit_confidence=cast(PitConfidence, str(payload.get("pit_confidence", "exact"))),
     )
 
 

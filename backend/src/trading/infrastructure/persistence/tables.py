@@ -62,6 +62,11 @@ rm_signals_table = Table(
     Column("politician_weight", Numeric, nullable=False),
     Column("source_reliability", Numeric, nullable=False),
     Column("raw_payload", JSONB, nullable=False),
+    # Added in migration 0003. Server default is fail-closed ('synthetic'/'exact') so
+    # pre-existing rows (recorded before these columns existed) never silently upgrade to a
+    # trusted tier; a read-model rebuild from the event log restores their true values.
+    Column("provenance", Text, nullable=False, server_default="synthetic"),
+    Column("pit_confidence", Text, nullable=False, server_default="exact"),
     Index("ix_rm_signals_created_at", "created_at"),
     Index("ix_rm_signals_recorded_id", "recorded_id"),
 )
