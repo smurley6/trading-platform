@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Double,
     Identity,
     Index,
     Integer,
@@ -81,6 +82,29 @@ backfill_seen_table = Table(
     Column("source_id", Text, nullable=False),
     Column("source_uid", Text, nullable=False),
     PrimaryKeyConstraint("source_id", "source_uid", name="pk_backfill_seen"),
+)
+
+# Outcome labels (Task 03): a rebuildable RESEARCH projection of event-study outcome labels, one
+# row per (signal, horizon). NOT part of the event-fold read model — it is written by an explicit
+# labeler run (see application/outcome_labels.py) and rebuilt by re-running the labeler, keyed and
+# indexed on label_run_id so a rerun can delete-then-write its own run. abnormal_return is a
+# double (nullable — null when unresolvable); reason is nullable (set only for unresolvable rows).
+outcome_labels_table = Table(
+    "outcome_labels",
+    metadata,
+    Column(
+        "id", BigInteger, Identity(), primary_key=True
+    ),  # surrogate key; (signal,horizon) repeats across runs
+    Column("signal_id", Text, nullable=False),
+    Column("ticker", Text, nullable=False),
+    Column("horizon_days", Integer, nullable=False),
+    Column("abnormal_return", Double, nullable=True),
+    Column("benchmark", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("reason", Text, nullable=True),
+    Column("label_run_id", Text, nullable=False),
+    Index("ix_outcome_labels_label_run_id", "label_run_id"),
+    Index("ix_outcome_labels_signal_id", "signal_id"),
 )
 
 # Current open positions with cost basis, one row per (sleeve, symbol). Closed lots are

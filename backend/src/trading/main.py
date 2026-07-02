@@ -17,6 +17,7 @@ from trading.application.cancel_order import CancelOrder
 from trading.application.evaluate_signals import EvaluateSignals
 from trading.application.ingest_signals import IngestSignals
 from trading.application.live_trading import AssessLiveReadiness, RequestLiveTrading
+from trading.application.outcome_labels import LabelOutcomes
 from trading.application.place_order import PlaceOrder
 from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.backfill_seen import BackfillSeenPort
@@ -25,6 +26,7 @@ from trading.application.ports.data_source import DataSourcePort, HistoricalData
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
+from trading.application.ports.outcome_labels import OutcomeLabelsPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.ports.trade_updates import TradeUpdate, TradeUpdatesStreamPort
@@ -72,6 +74,7 @@ from trading.infrastructure.persistence.broadcasting import BroadcastingEventSto
 from trading.infrastructure.persistence.health import DatabaseReadiness
 from trading.infrastructure.persistence.memory import InMemoryEventStore
 from trading.infrastructure.persistence.memory_backfill_seen import InMemoryBackfillSeen
+from trading.infrastructure.persistence.memory_outcome_labels import InMemoryOutcomeLabels
 from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
 from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.infrastructure.politicians.congress_legislators import (
@@ -117,12 +120,16 @@ def build_dependencies(settings: Settings) -> AppDeps:
     inner_store: EventStorePort
     read_model: ReadModelPort
     backfill_seen: BackfillSeenPort
+    outcome_labels: OutcomeLabelsPort
     db_engine: AsyncEngine | None = None
     if settings.database_url:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from trading.infrastructure.persistence.postgres import PostgresEventStore
         from trading.infrastructure.persistence.postgres_backfill_seen import PostgresBackfillSeen
+        from trading.infrastructure.persistence.postgres_outcome_labels import (
+            PostgresOutcomeLabels,
+        )
         from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
 
         # pool_pre_ping issues a lightweight liveness check (SELECT 1) before handing out a
@@ -139,6 +146,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
         read_model = pg_read_model
         # Backfill dedupe lives in its own table (not the read model); Postgres-backed here.
         backfill_seen = PostgresBackfillSeen(db_engine)
+        # Outcome labels: a rebuildable RESEARCH projection (Task 03), written by the labeler run,
+        # NOT folded from events on append — its own table, Postgres-backed here.
+        outcome_labels = PostgresOutcomeLabels(db_engine)
     else:
         # Default path stays fully in-memory: a projecting wrapper folds each appended event
         # into the in-memory read model synchronously (read-after-write consistency).
@@ -146,6 +156,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         inner_store = ProjectingEventStore(InMemoryEventStore(clock), memory_read_model)
         read_model = memory_read_model
         backfill_seen = InMemoryBackfillSeen()
+        outcome_labels = InMemoryOutcomeLabels()
     # /readyz probes DB connectivity when a database is configured; trivially ready otherwise.
     db_readiness = DatabaseReadiness(db_engine)
     # Wrap the store so appended events fan out to live WebSocket subscribers (FR-API-1)...
@@ -250,9 +261,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
         quote_stream = alpaca_stream
         background_tasks.append(alpaca_stream.run)
 
-    # Historical price source for backtests. Default OFF -> synthetic (offline, no network);
-    # real Alpaca daily bars are wired only when enabled AND the same data credentials resolve.
+    # Historical price source for backtests AND the outcome labeler. Default OFF -> synthetic
+    # (offline, no network); real Alpaca daily bars are wired only when enabled AND the same data
+    # credentials resolve. `real_historical_prices` tells the labeler job whether the REAL adapter
+    # is wired (its --confirm guard refuses to store labels computed from the synthetic provider).
     historical_prices: HistoricalPricesPort = SyntheticHistoricalPrices(_DEV_PRICES)
+    real_historical_prices = False
     if settings.enable_historical_data and data_key_id and data_secret_key:
         history_client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
         historical_prices = AlpacaHistoricalData(
@@ -262,6 +276,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(history_client.aclose)
+        real_historical_prices = True
 
     # Sleeves are algos that share ONE capital pool (the single Alpaca book), not isolated pools:
     # each has its own strategy + evaluator, but they trade the same shared broker and every
@@ -506,6 +521,21 @@ def build_dependencies(settings: Settings) -> AppDeps:
         window_days=settings.corroboration_window_days,
     )
 
+    # Outcome labeler (Task 03): computes forward event-study abnormal returns for ticker-resolved
+    # REAL+BACKFILLED signals and writes them to the rebuildable outcome_labels projection (never
+    # the event log). Consumes the SAME historical-prices port the backtest uses (daily bars) and
+    # the static sector map for the sector-ETF benchmark. Driven only by `python -m
+    # trading.jobs.label_outcomes` (no HTTP route); the job's --confirm guard uses
+    # `real_historical_prices` to refuse storing labels computed from the synthetic price provider.
+    label_outcomes = LabelOutcomes(
+        read_model=read_model,
+        prices=historical_prices,
+        sector_map=StaticSectorMap(),
+        labels_store=outcome_labels,
+        event_store=event_store,
+        clock=clock,
+    )
+
     deps = AppDeps(
         event_store=event_store,
         read_model=read_model,
@@ -547,6 +577,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
         api_key=settings.api_key,
         backfill_seen=backfill_seen,
         historical_sources=historical_sources,
+        outcome_labels=outcome_labels,
+        label_outcomes=label_outcomes,
+        real_historical_prices=real_historical_prices,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)

@@ -74,3 +74,24 @@ def ensure_real_signals(signals: Sequence[Signal]) -> None:
             f"refusing to act on {len(fake)} SYNTHETIC signal(s) in a real decision path "
             f"(require_real_data is on); offending ids: {sample}"
         )
+
+
+def ensure_no_synthetic(signals: Iterable[Signal]) -> None:
+    """Raise :class:`SyntheticDataError` if ANY signal is SYNTHETIC — the labeler's guard.
+
+    Distinct from :func:`ensure_real_signals` in intent, though it shares the SYNTHETIC-only
+    rule: the labeler admits BOTH REAL and BACKFILLED provenance (backfilled data is real,
+    historically reconstructed data that IS permitted into the research/labeler path — see
+    ``docs/RESEARCH-PLAN.md`` §2), but SYNTHETIC (fabricated/placeholder) data must never
+    produce a stored outcome label. The outcome labeler applies this to its input so a caller
+    that hands it explicit SYNTHETIC signals is refused (RESEARCH-PLAN §2: "SYNTHETIC never
+    trains"). Unlike :func:`tradeable_signals` this ABORTS rather than filters, because a
+    label computed from fake data is meaningless research output, not a live-trade risk.
+    """
+    fake = [s for s in signals if s.provenance is Provenance.SYNTHETIC]
+    if fake:
+        sample = ", ".join(sorted(s.id for s in fake)[:10])
+        raise SyntheticDataError(
+            f"refusing to label {len(fake)} SYNTHETIC signal(s): synthetic data never enters "
+            f"the labeler/learner (RESEARCH-PLAN §2); offending ids: {sample}"
+        )

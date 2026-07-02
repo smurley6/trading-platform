@@ -20,6 +20,7 @@ from trading.application.live_trading import (
     LiveTradingError,
     RequestLiveTrading,
 )
+from trading.application.outcome_labels import LabelOutcomes
 from trading.application.political_cycle import PoliticalCycle
 from trading.application.ports.backfill_seen import BackfillSeenPort
 from trading.application.ports.broker import BrokerPort, OrderNotFoundError
@@ -28,6 +29,7 @@ from trading.application.ports.data_source import HistoricalDataSourcePort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
+from trading.application.ports.outcome_labels import OutcomeLabelsPort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.ports.trade_updates import TradeUpdatesStreamPort
 from trading.application.proposals import ExecuteProposals, ScanProposals
@@ -141,6 +143,13 @@ class AppDeps:
     # EMPTY until the historical fetchers (Tasks 04a/04b) register their adapters here.
     backfill_seen: BackfillSeenPort | None = None
     historical_sources: dict[str, HistoricalDataSourcePort] = field(default_factory=dict)
+    # Outcome labeler (Task 03): the rebuildable outcome-labels store and the labeler use case,
+    # read by the `python -m trading.jobs.label_outcomes` job (NO HTTP route — the API surface
+    # stays stable). `real_historical_prices` tells that job whether the REAL historical-bars
+    # adapter is wired; its --confirm guard refuses to store labels from the synthetic provider.
+    outcome_labels: OutcomeLabelsPort | None = None
+    label_outcomes: LabelOutcomes | None = None
+    real_historical_prices: bool = False
 
 
 def create_app(deps: AppDeps) -> FastAPI:
