@@ -1,18 +1,176 @@
 // Shared design tokens — the single source of truth for the platform's visual language.
-// The app historically hardcoded the same hexes/rgba inline in every component; centralizing
-// them here keeps the look consistent and makes a restyle a one-file change. Feature screens and
-// shared components import from here, so changing a VALUE below propagates the new look app-wide.
 //
-// Design direction: "trading terminal meets premium SaaS" — a confident, deep dark palette with
-// one strong electric-blue accent, crisp semantic P&L colors, strong typographic hierarchy,
-// tabular/mono numerals for every figure, purposeful density, and subtle depth (hairline borders
-// + soft shadows, never heavy chrome).
+// UI Phase A (2026-07-02, docs/UI-DESIGN.md): this file now carries TWO token systems side by
+// side:
 //
-// IMPORTANT (contract): existing exports (color.*, space.*, radius.*, z.*, pillStyle, pnlColor)
-// must never be removed or renamed — screens depend on them. New tokens/helpers may be added
-// freely, and existing token VALUES may evolve.
+//   1. The §3 operator-console system below (`tokens`, `cssVars`) — desaturated blue-slate ink
+//      ramp, reserved semantic colors, IBM Plex type scale, 4px space unit, the §3.4/3.5 motion
+//      constants. This is what the new app shell (status bar, nav rail, palette, state
+//      components) and all future screens are built from. `cssVars` renders it to CSS custom
+//      properties (see injectThemeVars in App.tsx) so AG Grid/Perspective/Lightweight Charts
+//      adapters and plain CSS can consume the same palette.
+//
+//   2. The legacy "trading terminal meets premium SaaS" system below that (`color`, `space`,
+//      `radius`, `z`, `font`, `text`, `shadow`, `motion`, `transitions`, `cardStyle`,
+//      `sectionHeaderStyle`, `sectionTitleStyle`, `eyebrowStyle`, `numeric`, `pillStyle`,
+//      `pnlColor`) — still imported by all 7 existing screens and their shared components. Per
+//      the Phase A spec, existing screens keep their internals unchanged in this phase
+//      (container/chrome/theming only), so every one of these exports is CONTRACT: unchanged in
+//      name, shape, and value. Do not remove or rename them. Note the §3 system's own space
+//      scale is exported as `layout` (not `space`) specifically to avoid colliding with this
+//      legacy `space` export.
+//
+// Phase B/C will migrate screen internals onto the §3 system; until then both systems coexist.
 
 import type { CSSProperties } from "react";
+
+// =================================================================================================
+// §3 token system (docs/UI-DESIGN.md §3) — new app shell + future screens.
+// =================================================================================================
+
+/** §3.1 — three-step blue-slate ink ramp + reserved semantic colors. */
+export const colors = {
+  bgBase: "#0E1116",
+  bgSurface: "#151A21",
+  bgRaised: "#1C232C",
+  border: "#262E38",
+  textPrimary: "#E8EAED",
+  textSecondary: "#98A2AD",
+  textMuted: "#5C6670",
+
+  // Reserved — exclusive meaning, never decorative (§3.1).
+  gain: "#2ECC8F",
+  loss: "#F0544F",
+  warn: "#E5A83B",
+  accent: "#4E9CB0",
+  chain: "#9D8CFF",
+  synthetic: "#D66BA0",
+} as const;
+
+/**
+ * Derive an `rgba(...)` string from one of the §3.1 hex tokens instead of hand-copying hex
+ * digits into a literal (which silently drifts if the token ever changes). `alpha` is 0-1.
+ */
+export function withAlpha(hex: string, alpha: number): string {
+  const normalized = hex.replace("#", "");
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/** §3.2 — IBM Plex type scale (px) and font stacks. */
+export const type = {
+  fontSans:
+    '"IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  fontMono:
+    '"IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+  scale: {
+    meta: 11, // dense grid meta
+    body: 12, // grid body, labels
+    default: 13, // default UI
+    paneTitle: 15, // pane titles
+    screenTitle: 20, // screen title — one per screen, top-left, quiet
+    // Not in §3.2's scale — added in the Phase A fix cycle because 15/20 both misuse
+    // pane-title/screen-title semantics when applied to a small nav-rail icon glyph. One
+    // explicit exception, documented here and in the MEMORY.md changelog.
+    icon: 16, // nav-rail icon glyphs only
+  },
+} as const;
+
+/** §3.3 — 4px base unit, row heights, radii. Named `layout` to avoid clashing with the legacy
+ *  `space` export (contracted below) during the Phase A→C transition. */
+export const layout = {
+  unit: 4,
+  x1: 4,
+  x2: 8,
+  x3: 12,
+  x4: 16,
+  x5: 20,
+  x6: 24,
+  x8: 32,
+} as const;
+
+export const shape = {
+  radiusPane: 4,
+  radiusBadge: 2,
+  radiusButton: 4,
+  radiusMax: 4,
+  rowHeightDense: 28,
+  rowHeightTicker: 24,
+  statusBarHeight: 36,
+  navRailWidth: 48,
+  overlayShadow: "0 8px 24px rgba(0,0,0,0.5)",
+} as const;
+
+/** §3.4 / §3.5 — the one sanctioned easing system + durations. No other curves/durations. */
+export const motionTokens = {
+  easeOut: "cubic-bezier(0.16, 1, 0.3, 1)",
+  easeIn: "cubic-bezier(0.7, 0, 0.84, 0)",
+  durationOverlay: 120, // ms — overlays/hover
+  durationRow: 150, // ms — row ops (ticker insert)
+  durationFlash: 400, // ms — data flash decay
+} as const;
+
+/** The full §3 token object, grouped for convenience. */
+export const tokens = {
+  colors,
+  type,
+  space: layout,
+  shape,
+  motion: motionTokens,
+} as const;
+
+/**
+ * Render the §3 tokens as a flat CSS custom-property map (`--bg-base`, `--gain`, `--ease-out`,
+ * etc. — exact names from UI-DESIGN.md §3.1-3.4) for injection into `:root`. One palette shared
+ * by Salt, AG Grid, Perspective, and Lightweight Charts adapters plus plain CSS.
+ */
+export const cssVars = {
+  "--bg-base": colors.bgBase,
+  "--bg-surface": colors.bgSurface,
+  "--bg-raised": colors.bgRaised,
+  "--border": colors.border,
+  "--text-primary": colors.textPrimary,
+  "--text-secondary": colors.textSecondary,
+  "--text-muted": colors.textMuted,
+  "--gain": colors.gain,
+  "--loss": colors.loss,
+  "--warn": colors.warn,
+  "--accent": colors.accent,
+  "--chain": colors.chain,
+  "--synthetic": colors.synthetic,
+
+  "--font-sans": type.fontSans,
+  "--font-mono": type.fontMono,
+  "--font-size-meta": `${type.scale.meta}px`,
+  "--font-size-body": `${type.scale.body}px`,
+  "--font-size-default": `${type.scale.default}px`,
+  "--font-size-pane-title": `${type.scale.paneTitle}px`,
+  "--font-size-screen-title": `${type.scale.screenTitle}px`,
+  "--font-size-icon": `${type.scale.icon}px`,
+
+  "--space-unit": `${layout.unit}px`,
+  "--row-height-dense": `${shape.rowHeightDense}px`,
+  "--row-height-ticker": `${shape.rowHeightTicker}px`,
+  "--status-bar-height": `${shape.statusBarHeight}px`,
+  "--nav-rail-width": `${shape.navRailWidth}px`,
+  "--radius-pane": `${shape.radiusPane}px`,
+  "--radius-badge": `${shape.radiusBadge}px`,
+  "--radius-button": `${shape.radiusButton}px`,
+  "--overlay-shadow": shape.overlayShadow,
+
+  "--ease-out": motionTokens.easeOut,
+  "--ease-in": motionTokens.easeIn,
+  "--duration-overlay": `${motionTokens.durationOverlay}ms`,
+  "--duration-row": `${motionTokens.durationRow}ms`,
+  "--duration-flash": `${motionTokens.durationFlash}ms`,
+};
+
+// =================================================================================================
+// Legacy token system — CONTRACT, unchanged. Every screen and shared component under
+// components/ and features/ (outside this Phase A change set) still imports from here.
+// =================================================================================================
 
 export const color = {
   // Brand / interactive — electric azure accent.
@@ -208,3 +366,4 @@ export function pillStyle(tone: "accent" | "ok" | "danger" | "warn" | "muted"): 
 export function pnlColor(value: number): string {
   return value >= 0 ? color.ok : color.dangerText;
 }
+

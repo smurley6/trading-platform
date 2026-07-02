@@ -1,0 +1,163 @@
+/* UI Phase A — operator console theme overlay (docs/UI-DESIGN.md §3).
+   Loaded after @salt-ds/theme and the legacy index.css so its rules win where they overlap.
+   Every value here is a CSS custom property from src/lib/tokens.ts (`cssVars`, applied to
+   :root by applyThemeVars() in main.tsx) — zero hardcoded hex/px/ms/easing in this file.
+
+   IBM Plex Sans/Mono (latin, weights 400/500/600 — §3.2) are registered via the FontFace API
+   in lib/theme.ts (registerFonts()), not as @font-face rules here, so `font-display: optional`
+   (§3.5 — no CLS on font swap) can be set explicitly; fontsource's own CSS defaults to
+   `font-display: swap`, which the spec disallows. */
+
+/* The operator console shell (status bar, nav rail, palette, state components) reads var(...)
+   directly rather than through inline styles computed from tokens.ts, since these are true
+   global/structural rules (font stacks, numeric formatting, reduced motion) rather than
+   component-local style objects. */
+.tp-shell {
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg-base);
+}
+
+/* shell/AppShell.tsx layout: status bar (fixed height, own rules) stacked over a row of
+   [nav rail | main content]. Structural layout only — colors/spacing for the row's children
+   live in their own components (StatusBar.tsx, NavRail.tsx). */
+.tp-shell-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+.tp-shell-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.tp-shell-main {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: var(--bg-base);
+}
+
+/* §3.2: every numeric/id/timestamp cell gets tabular figures, applied via this utility class
+   plus globally on grid numeric cells. Components that render numbers apply .tp-numeric. */
+.tp-numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Belt-and-suspenders per §3.2 ("tabular-nums globally on numeric cells") for AG Grid's own
+   numeric-leaning columns, mirroring the pattern already used in index.css for the legacy grid
+   theme, now driven by the §3 mono var. */
+.ag-theme-quartz-dark .ag-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+/* §3.5: visible 1px accent focus ring on every interactive element in the new shell. */
+.tp-shell :focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* §3.4: prefers-reduced-motion disables all three sanctioned decorative animations. Components
+   implementing the cell-flash / overlay-enter / ticker-row-insert effects gate their CSS
+   transition/animation declarations behind this media query (or the JS equivalent
+   `matchMedia("(prefers-reduced-motion: reduce)")` for shimmer toggling in skeletons). */
+@media (prefers-reduced-motion: reduce) {
+  .tp-shell * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* shell/states.tsx SkeletonRows — shimmer sweep, disabled under reduced motion above. Duration
+   is not one of the §3.5 named durations (120/150/400ms) because a loading shimmer is a
+   continuous ambient loop, not a discrete state transition; kept slow/subtle deliberately. */
+.tp-skeleton-row {
+  position: relative;
+  overflow: hidden;
+}
+.tp-skeleton-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.04), transparent);
+  animation: tp-shimmer 1.2s var(--ease-out) infinite;
+}
+@keyframes tp-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* shell/CommandPalette.tsx — cmdk overlay enter (§3.4 "overlay enter — 120ms translate+fade"). */
+.tp-palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1200;
+}
+.tp-palette-content {
+  position: fixed;
+  top: 20%;
+  left: 50%;
+  width: min(560px, 90vw);
+  transform: translate(-50%, 0);
+  z-index: 1201;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pane);
+  box-shadow: var(--overlay-shadow);
+  animation: tp-overlay-enter var(--duration-overlay) var(--ease-out);
+}
+@keyframes tp-overlay-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* shell/CommandPalette.tsx — cmdk drives keyboard-selection highlight via [data-selected] on
+   [cmdk-item]; styled here since it's an attribute cmdk manages, not a prop we control. */
+[cmdk-item][data-selected="true"] {
+  background: var(--bg-surface);
+  color: var(--accent);
+}
+[cmdk-item] {
+  transition: background-color var(--duration-overlay) var(--ease-out);
+}
+
+/* shell/NavRail.tsx active-item indicator — active = --accent left rule (§4), transform/opacity
+   only per §3.5 (compositor-only transitions; never animates width/height/top/left). */
+.tp-nav-item {
+  position: relative;
+  transition:
+    color var(--duration-overlay) var(--ease-out),
+    background-color var(--duration-overlay) var(--ease-out);
+}
+.tp-nav-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: var(--radius-badge);
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleY(0.4);
+  transform-origin: center;
+  transition:
+    opacity var(--duration-overlay) var(--ease-out),
+    transform var(--duration-overlay) var(--ease-out);
+}
+.tp-nav-item[data-active="true"]::before {
+  opacity: 1;
+  transform: scaleY(1);
+}

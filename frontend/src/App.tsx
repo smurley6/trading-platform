@@ -1,12 +1,11 @@
-// App shell: header (paper/live indicator + kill switch), navigation, and the live event
-// stream that drives refreshes across every screen.
+// App shell: the new §4 operator-console chrome (36px status bar, 48px icon nav rail, cmdk
+// palette, global keys — shell/AppShell.tsx) wraps the SAME screen-mounting + live event-stream
+// mechanism this file has always owned. Phase A ambiguity #4: existing screens keep their
+// internals unchanged in this phase — only the container/chrome/theming around them changes; the
+// old inline header/nav is fully replaced by AppShell, but the refreshKey/`/ws/events` mechanism
+// below is untouched.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { KillSwitchControl } from "./components/KillSwitchControl";
-import { LiveIndicator } from "./components/LiveIndicator";
-import { ModeToggle } from "./components/ModeToggle";
-import { StatusStrip } from "./components/StatusStrip";
-import { EmptyState, LoadingState } from "./components/ui";
 import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
@@ -15,51 +14,40 @@ import { Proposals } from "./features/proposals/Proposals";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { SignalFeed } from "./features/signals/SignalFeed";
 import { api } from "./lib/api";
-import { color, radius, shadow, space, text, transitions, z } from "./lib/tokens";
 import type { Sleeve, StoredEventDto } from "./lib/types";
-import { useEventStream } from "./lib/useEventStream";
+import { type ConnectionStatus, useEventStream } from "./lib/useEventStream";
 import { useLoader } from "./lib/useLoader";
-
-type View = "dashboard" | "algorithms" | "markets" | "proposals" | "signals" | "blotter" | "risk";
-
-const NAV: { id: View; label: string }[] = [
-  { id: "dashboard", label: "Dashboard" },
-  { id: "algorithms", label: "Algorithms" },
-  { id: "markets", label: "Markets" },
-  { id: "proposals", label: "Proposals" },
-  { id: "signals", label: "Signal feed" },
-  { id: "blotter", label: "Blotter" },
-  { id: "risk", label: "Risk" },
-];
+import { AppShell } from "./shell/AppShell";
+import { ShellEmptyState, SkeletonRows } from "./shell/states";
+import { useHistoryRoute } from "./shell/useHistoryRoute";
+import type { ScreenId } from "./shell/useHistoryRoute";
 
 export function App() {
-  const [view, setView] = useState<View>("dashboard");
+  const [view, navigate] = useHistoryRoute();
   const [refreshKey, setRefreshKey] = useState(0);
   const [killBusy, setKillBusy] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [signalCount, setSignalCount] = useState(0);
+  const [wsState, setWsState] = useState<ConnectionStatus>("down");
 
   const sleeves = useLoader<Sleeve[]>(() => api.listSleeves(), [refreshKey]);
   const kill = useLoader(() => api.killSwitch(), [refreshKey]);
 
-  // Coalesce bursts of live events into a single refresh, and tally signal arrivals so the
-  // header can flash a "+N" badge as fresh signals stream in.
+  // Coalesce bursts of live events into a single refresh (rAF-adjacent debounce — §3.5 "coalesced
+  // live updates": one render per burst, not per message).
   const debounceRef = useRef<number | undefined>(undefined);
-  const onEvent = useCallback((event: StoredEventDto) => {
-    if (event.event_type === "signal.received") setSignalCount((n) => n + 1);
+  const onEvent = useCallback((_event: StoredEventDto) => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => setRefreshKey((k) => k + 1), 300);
   }, []);
-  useEventStream(onEvent, setConnected);
+  useEventStream(onEvent, undefined, setWsState);
   useEffect(() => () => window.clearTimeout(debounceRef.current), []);
 
   const sleeveList = sleeves.data ?? [];
   const engaged = kill.data?.engaged ?? false;
 
   // Lazy keep-alive: a view mounts the first time it's visited, then stays mounted (hidden via
-  // display:none) so switching tabs never re-mounts its widgets (TradingView iframes, loaders).
+  // display:none) so switching screens never re-mounts its widgets (TradingView iframes, loaders).
   // Nothing loads until first visit, so the upfront RAM/compute cost stays near zero.
-  const [visited, setVisited] = useState<View[]>([]);
+  const [visited, setVisited] = useState<ScreenId[]>([]);
   useEffect(() => {
     setVisited((prev) => (prev.includes(view) ? prev : [...prev, view]));
   }, [view]);
@@ -76,141 +64,32 @@ export function App() {
   }
 
   return (
-    <div style={{ minHeight: "100vh" }}>
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: z.strip,
-          background: "rgba(10,13,20,0.82)",
-          backdropFilter: "blur(12px)",
-          WebkitBackdropFilter: "blur(12px)",
-          borderBottom: `1px solid ${color.hairline}`,
-        }}
-      >
-        <header
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: space.lg,
-            padding: "12px 24px",
-            flexWrap: "wrap",
-          }}
-        >
-          <BrandLockup />
-          <ModeToggle sleeves={sleeveList} onChanged={() => setRefreshKey((k) => k + 1)} />
-          <LiveIndicator connected={connected} signalCount={signalCount} />
-          <div style={{ flex: 1 }} />
-          <KillSwitchControl
-            engaged={engaged}
-            busy={killBusy}
-            onToggle={(n) => void toggleKill(n)}
-          />
-        </header>
-
-        <StatusStrip
-          connected={connected}
-          sleeves={sleeveList}
-          killEngaged={engaged}
-          refreshKey={refreshKey}
-        />
-
-        <nav
-          style={{
-            display: "flex",
-            gap: space.xs,
-            padding: "8px 24px",
-            flexWrap: "wrap",
-            borderTop: `1px solid ${color.hairline}`,
-          }}
-        >
-          {NAV.map((item) => {
-            const active = view === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setView(item.id)}
-                aria-current={active ? "page" : undefined}
-                style={{
-                  cursor: "pointer",
-                  borderRadius: radius.md,
-                  padding: "6px 14px",
-                  ...text.label,
-                  fontWeight: active ? 700 : 500,
-                  color: active ? color.accentText : color.muted,
-                  border: `1px solid ${active ? color.accentBorder : "transparent"}`,
-                  background: active ? color.accentSoft : "transparent",
-                  transition: transitions("background", "color", "border-color"),
-                }}
-              >
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-      </div>
-
-      <main style={{ padding: "24px 24px 56px", maxWidth: 1600, margin: "0 auto" }}>
-        {sleeves.loading && !sleeves.data ? (
-          <LoadingState label="Connecting to backend…" />
-        ) : sleeves.error ? (
-          <EmptyState
-            title="Backend unreachable"
-            message={`Could not reach backend: ${sleeves.error}`}
-          />
-        ) : (
-          mountedViews.map((v) => (
-            <div key={v} style={{ display: v === view ? "block" : "none" }}>
-              <Screen view={v} refreshKey={refreshKey} sleeves={sleeveList} />
-            </div>
-          ))
-        )}
-      </main>
-    </div>
-  );
-}
-
-// Brand lockup: a compact monogram mark + wordmark. Deliberately restrained — the mark carries
-// the accent, the wordmark carries the hierarchy.
-function BrandLockup() {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <div
-        aria-hidden
-        style={{
-          width: 30,
-          height: 30,
-          borderRadius: radius.md,
-          display: "grid",
-          placeItems: "center",
-          background: `linear-gradient(140deg, ${color.accentStrong}, ${color.accent})`,
-          boxShadow: shadow.glowAccent,
-          color: "#fff",
-          fontWeight: 800,
-          fontSize: 15,
-          letterSpacing: "-0.03em",
-        }}
-      >
-        T
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
-        <strong style={{ ...text.h3, color: color.text, letterSpacing: "-0.01em" }}>
-          Trading Platform
-        </strong>
-        <span
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.18em",
-            color: color.muted,
-            textTransform: "uppercase",
-            marginTop: 2,
-          }}
-        >
-          Terminal
-        </span>
-      </div>
-    </div>
+    <AppShell
+      screen={view}
+      onNavigate={navigate}
+      sleeves={sleeveList}
+      refreshKey={refreshKey}
+      wsState={wsState}
+      killEngaged={engaged}
+      killBusy={killBusy}
+      onToggleKill={(n) => void toggleKill(n)}
+    >
+      {sleeves.loading && !sleeves.data ? (
+        <div style={{ padding: 24 }}>
+          <SkeletonRows rows={3} />
+        </div>
+      ) : sleeves.error ? (
+        <div style={{ padding: 24 }}>
+          <ShellEmptyState message={`Backend unreachable: ${sleeves.error}`} />
+        </div>
+      ) : (
+        mountedViews.map((v) => (
+          <div key={v} style={{ display: v === view ? "block" : "none", padding: 24 }}>
+            <Screen view={v} refreshKey={refreshKey} sleeves={sleeveList} />
+          </div>
+        ))
+      )}
+    </AppShell>
   );
 }
 
@@ -219,7 +98,7 @@ function Screen({
   refreshKey,
   sleeves,
 }: {
-  view: View;
+  view: ScreenId;
   refreshKey: number;
   sleeves: Sleeve[];
 }) {

@@ -10,28 +10,42 @@ function wsUrl(): string {
   return `${wsBase()}/ws/events`;
 }
 
+/** Tri-state connection status for the status bar's WS dot (§4: green ok / amber
+ *  reconnecting / red down — replaces silent failure). "reconnecting" is entered on every
+ *  close after the first successful open; "down" is the pre-first-connect / never-connected
+ *  state. */
+export type ConnectionStatus = "connected" | "reconnecting" | "down";
+
 // Optional second argument: a callback invoked whenever the socket opens (true) or
 // closes (false), so callers can surface connection state without owning the socket.
 export function useEventStream(
   onEvent: (event: StoredEventDto) => void,
   onConnectionChange?: (connected: boolean) => void,
+  onStatusChange?: (status: ConnectionStatus) => void,
 ): void {
   const handlerRef = useRef(onEvent);
   handlerRef.current = onEvent;
   const statusRef = useRef(onConnectionChange);
   statusRef.current = onConnectionChange;
+  const statusDetailRef = useRef(onStatusChange);
+  statusDetailRef.current = onStatusChange;
 
   useEffect(() => {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | undefined;
     let closed = false;
     let backoffMs = 500;
+    let everConnected = false;
+
+    statusDetailRef.current?.("down");
 
     const connect = (): void => {
       socket = new WebSocket(wsUrl());
       socket.onopen = () => {
         backoffMs = 500;
+        everConnected = true;
         statusRef.current?.(true);
+        statusDetailRef.current?.("connected");
       };
       socket.onmessage = (message: MessageEvent<string>) => {
         try {
@@ -43,6 +57,7 @@ export function useEventStream(
       socket.onclose = () => {
         if (closed) return;
         statusRef.current?.(false);
+        statusDetailRef.current?.(everConnected ? "reconnecting" : "down");
         reconnectTimer = window.setTimeout(connect, backoffMs);
         backoffMs = Math.min(backoffMs * 2, 10_000);
       };

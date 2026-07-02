@@ -1,7 +1,16 @@
+/* Base stylesheet: legacy palette CSS vars (pre-Phase-A, unchanged values — every existing
+ * screen's inline styles still resolve through lib/tokens.ts's legacy `color` export family, so
+ * nothing existing regresses under the new shell/theme) + the Salt dark-theme overlay + global
+ * body/scrollbar/focus rules.
+ *
+ * The §3 operator-console tokens (--bg-base, --gain, --ease-out, etc.) are injected at runtime
+ * by lib/theme.ts's applyThemeVars() (called once from main.tsx, before first paint) rather than
+ * declared here, so tokens.ts's `cssVars` stays the single source of truth for that palette — see
+ * src/theme.css for the rules built on top of them (shell, grid/perspective adapters, overlay +
+ * ticker animations). */
 :root {
   color-scheme: dark;
 
-  /* Mirror of src/lib/tokens.ts for global CSS (body, scrollbars, AG Grid, Perspective). */
   --tp-accent: #3d8bff;
   --tp-accent-text: #8fbaff;
   --tp-ok: #34d399;
@@ -21,6 +30,43 @@
   --tp-font-mono:
     ui-monospace, "SFMono-Regular", "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono",
     monospace;
+}
+
+/* ================================================================================================
+ * Salt theme overlay — retarget Salt's own CSS custom properties (set on `[data-mode="dark"]` by
+ * SaltProvider, see ThemeApplicator) at the §3 palette instead of Salt's stock dark theme, so Salt
+ * primitives (Button, Spinner, StackLayout, Dialog…) sit visually flush with the rest of the
+ * console. Headless-first: this never pulls colors from Salt's own theme tokens, only maps §3
+ * vars (applied to :root by applyThemeVars(), see lib/theme.ts) onto the Salt vars actually
+ * rendered.
+ * ================================================================================================ */
+[data-mode="dark"] {
+  --salt-container-primary-background: var(--bg-surface, var(--tp-panel));
+  --salt-container-secondary-background: var(--bg-raised, var(--tp-panel-raised));
+  --salt-container-tertiary-background: var(--bg-raised, var(--tp-panel-raised));
+  --salt-palette-neutral-primary-background: var(--bg-base, var(--tp-bg));
+  --salt-palette-neutral-secondary-background: var(--bg-surface, var(--tp-panel));
+  --salt-palette-neutral-tertiary-background: var(--bg-raised, var(--tp-panel-raised));
+  --salt-palette-neutral-primary-foreground: var(--text-primary, var(--tp-text));
+  --salt-palette-neutral-secondary-foreground: var(--text-secondary, var(--tp-text-dim));
+  --salt-palette-neutral-primary-border: var(--border, var(--tp-hairline));
+  --salt-palette-neutral-secondary-border: var(--border, var(--tp-hairline));
+  --salt-container-primary-borderColor: var(--border, var(--tp-hairline));
+  --salt-container-secondary-borderColor: var(--border, var(--tp-hairline));
+  --salt-accent-background: var(--accent, var(--tp-accent));
+  --salt-accent-foreground: var(--bg-base, var(--tp-bg));
+  --salt-accent-borderColor: var(--accent, var(--tp-accent));
+  --salt-actionable-accented-background: var(--accent, var(--tp-accent));
+  --salt-actionable-accented-foreground: var(--bg-base, var(--tp-bg));
+  --salt-actionable-accented-borderColor: var(--accent, var(--tp-accent));
+  --salt-taggable-info-background: var(--accent, var(--tp-accent));
+  --salt-taggable-info-foreground: var(--bg-base, var(--tp-bg));
+  --salt-taggable-positive-background: var(--gain, var(--tp-ok));
+  --salt-taggable-negative-background: var(--loss, var(--tp-danger));
+  --salt-taggable-warning-background: var(--warn, #e5a83b);
+  --salt-status-error-foreground: var(--loss, var(--tp-danger));
+  --salt-status-warning-foreground: var(--warn, #e5a83b);
+  --salt-status-success-foreground: var(--gain, var(--tp-ok));
 }
 
 * {
@@ -53,7 +99,6 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Tabular numerals everywhere headings/figures land, so columns of numbers align. */
 h1,
 h2,
 h3 {
@@ -99,7 +144,10 @@ button {
   outline-offset: 1px;
 }
 
-/* --- AG Grid (ag-theme-quartz-dark) themed to the palette ------------------------------------ */
+/* --- AG Grid (ag-theme-quartz-dark) themed to the palette ------------------------------------
+ * Legacy mapping for EXISTING screens' grids (unchanged look, Phase A keeps screen internals
+ * untouched). New/re-themed grids use the §3 adapter instead — see lib/theme-adapters/
+ * agGridTheme.ts; its `.ag-theme-tp` consumer rule lands in Phase B (does not exist yet). */
 .ag-theme-quartz-dark {
   --ag-background-color: transparent;
   --ag-foreground-color: var(--tp-text-dim);
