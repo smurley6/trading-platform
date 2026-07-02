@@ -19,7 +19,11 @@ class Signal:
     id: str
     created_at: datetime
     source_type: SignalSource
-    ticker: str
+    # None = entity/ticker resolution failed (e.g. a backfilled House PTR whose asset name never
+    # matched a known ticker). Unresolved signals stay visible in feeds/projections but are
+    # EXCLUDED from conviction scoring, strategy evaluation, proposals, backtest symbol
+    # collection, and outcome labeling (every ticker-grouping site filters `is not None` first).
+    ticker: str | None
     politician_id: str | None
     sentiment: float  # -1 (bearish) .. +1 (bullish)
     politician_weight: float

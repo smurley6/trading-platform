@@ -77,6 +77,7 @@ async def test_emits_real_statement_signals_from_bill_actions(clock: FixedClock)
     # referral. HR2200 -> Rural Broadband: no resolvable ticker, dropped entirely.
     by_ticker: dict[str, list[Any]] = {}
     for signal in signals:
+        assert signal.ticker is not None  # congress_bills always resolves or drops (never None)
         by_ticker.setdefault(signal.ticker, []).append(signal)
     assert set(by_ticker) == {"BA", "LMT"}
     assert all(s.source_type is SignalSource.STATEMENT for s in signals)

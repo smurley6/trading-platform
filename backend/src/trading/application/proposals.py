@@ -122,7 +122,9 @@ class ScanProposals:
         # Predicted/incoming: WATCH-tier tickers not already proposed (foresight, both modes).
         proposed = {c.symbol for c in proposals}
         predicted: list[PredictedCandidate] = []
-        for ticker in sorted({s.ticker for s in window}):
+        # Unresolved-entity signals (ticker=None, Task 04b) are visible in the feed but excluded
+        # from proposals/predicted candidates — there is no symbol to trade.
+        for ticker in sorted({s.ticker for s in window if s.ticker is not None}):
             if ticker in proposed:
                 continue
             result = compute_conviction(

@@ -1,15 +1,21 @@
-"""Composition-root wiring for the backfill-capable (historical) source registry (Task 04a).
+"""Composition-root wiring for the backfill-capable (historical) source registry (Tasks 04a/04b).
 
 `sec_form4` must be registered in `historical_sources` whenever `SEC_FORM4_USER_AGENT` is set --
 INDEPENDENTLY of `SEC_FORM4_ENABLED` (the live-feed flag). Backfill is a research op with its own
 gate (`BACKFILL_ENABLED`, checked at `--confirm` time by the job), not the live ingestion switch.
-With no user agent set (the default), the registry stays empty and no network-capable client is
+With no user agent set (the default), `sec_form4` is absent and no network-capable client is
 constructed for it -- matching the "bare run makes no network calls" contract.
+
+`house_disclosures` (Task 04b) registers UNCONDITIONALLY (construction dials nothing -- no
+network call, no roster fetch; all fetching, including the historical roster load, is lazy and
+deferred to the first `fetch_historical` call), so it is present in the registry regardless of
+env -- a bare app boot must still make zero network calls despite that unconditional registration.
 """
 
 import pytest
 
 from trading.config import Settings
+from trading.infrastructure.data_sources.house_disclosures import HouseDisclosuresSource
 from trading.infrastructure.data_sources.sec_form4 import SecForm4Source
 from trading.main import build_dependencies
 
@@ -37,12 +43,26 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-async def test_no_user_agent_means_empty_historical_registry(
+async def test_no_user_agent_means_sec_form4_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     deps = build_dependencies(Settings(_env_file=None))
     try:
         assert "sec_form4" not in deps.historical_sources
+    finally:
+        for aclose in deps.aclosers:
+            await aclose()
+
+
+async def test_house_disclosures_registers_unconditionally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env gate at all (mirrors a bare app boot) -- house_disclosures is still registered,
+    since construction alone makes no network calls (Task 04b)."""
+    deps = build_dependencies(Settings(_env_file=None))
+    try:
+        assert "house_disclosures" in deps.historical_sources
+        assert isinstance(deps.historical_sources["house_disclosures"], HouseDisclosuresSource)
     finally:
         for aclose in deps.aclosers:
             await aclose()

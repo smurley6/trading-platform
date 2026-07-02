@@ -233,7 +233,7 @@ async def test_multi_transaction_pdf_emits_multiple_signals(clock_2025: FixedClo
     # A richer multi-row PTR yields more than one transaction signal.
     assert len(member_signals) > 1
     assert all(s.source_type is SignalSource.DISCLOSED_TRADE for s in member_signals)
-    assert all(s.ticker == s.ticker.upper() for s in member_signals)
+    assert all(s.ticker is not None and s.ticker == s.ticker.upper() for s in member_signals)
 
 
 # --- Windowing -----------------------------------------------------------------------------

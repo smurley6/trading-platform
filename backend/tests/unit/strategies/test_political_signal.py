@@ -109,6 +109,28 @@ def test_already_at_target_proposes_nothing(make_signal: SignalFactory) -> None:
     assert _strategy().evaluate(signals, portfolio) == []
 
 
+def test_none_ticker_signal_excluded_from_evaluation(make_signal: SignalFactory) -> None:
+    """A None-ticker (unresolved-entity, Task 04b) signal must not crash the ticker-grouping
+    `sorted({s.ticker ...})` set-build and must not produce a proposal for a "None" symbol."""
+    signals = [
+        make_signal(ticker=None, sentiment=0.95, politician_weight=3.0),
+        make_signal(
+            ticker="AAPL",
+            sentiment=0.9,
+            politician_weight=1.5,
+            source_type=SignalSource.STATEMENT,
+        ),
+        make_signal(
+            ticker="AAPL",
+            sentiment=0.8,
+            politician_weight=1.5,
+            source_type=SignalSource.CONTRACT,
+        ),
+    ]
+    proposals = _strategy().evaluate(signals, Portfolio(cash=Decimal("100000")))
+    assert [p.target.symbol for p in proposals] == ["AAPL"]
+
+
 def test_decay_params_thread_through_strategy() -> None:
     # Two strong corroborated signals; with aggressive decay the older one is heavily
     # downweighted so conviction falls below the trade threshold -> no entry proposed.

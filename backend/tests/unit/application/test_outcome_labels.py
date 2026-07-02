@@ -67,7 +67,7 @@ def _bars(*closes: tuple[str, str]) -> tuple[tuple[datetime, Decimal], ...]:
 def _signal(
     *,
     signal_id: str,
-    ticker: str,
+    ticker: str | None,
     disclosed_at: datetime,
     provenance: Provenance = Provenance.BACKFILLED,
 ) -> Signal:
@@ -310,6 +310,21 @@ async def test_signals_without_ticker_are_skipped() -> None:
     no_ticker = _signal(signal_id="s1", ticker="   ", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
     run_id = str(uuid4())
     report = await labeler.execute(label_run_id=run_id, dry_run=False, signals=[no_ticker])
+    assert report.signal_count == 0
+    assert report.labels == 0
+    assert labels._by_run[run_id] == []
+
+
+async def test_signals_with_none_ticker_are_skipped() -> None:
+    """Task 04b: an unresolved-entity backfilled signal (ticker=None) must be SKIPPED (not
+    crash on `.strip()`), same as the existing empty-string ticker case above."""
+    prices = PriceSeries(series={"SPY": _bars(("2025-01-02", "100"), ("2025-01-03", "101"))})
+    labeler, labels, _store, _clock = _labeler(prices, {})
+    none_ticker = _signal(
+        signal_id="s1", ticker=None, disclosed_at=datetime(2025, 1, 1, tzinfo=UTC)
+    )
+    run_id = str(uuid4())
+    report = await labeler.execute(label_run_id=run_id, dry_run=False, signals=[none_ticker])
     assert report.signal_count == 0
     assert report.labels == 0
     assert labels._by_run[run_id] == []

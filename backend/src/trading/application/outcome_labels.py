@@ -200,7 +200,9 @@ class LabelOutcomes:
         # Signals without a ticker are SKIPPED (not errors) — only "ticker-resolved" signals are
         # labeled (their unresolved-ticker set is itself research data, handled upstream).
         labelable = [
-            s for s in candidates if s.provenance in LABELABLE_PROVENANCE and s.ticker.strip()
+            s
+            for s in candidates
+            if s.provenance in LABELABLE_PROVENANCE and s.ticker is not None and s.ticker.strip()
         ]
         # Defence in depth: even a read-model pull must never carry SYNTHETIC into the labeler.
         ensure_no_synthetic(labelable)
@@ -236,7 +238,9 @@ class LabelOutcomes:
         """One price_series call for {tickers} u {sector ETFs} u {SPY} over the padded window."""
         if not signals:
             return PriceSeries(series={})
-        tickers = {s.ticker.strip().upper() for s in signals if s.ticker.strip()}
+        # Callers only ever pass `labelable` signals (already ticker-resolved, see `execute`),
+        # but `s.ticker` is typed `str | None` on the shared domain Signal, so narrow here too.
+        tickers = {s.ticker.strip().upper() for s in signals if s.ticker and s.ticker.strip()}
         # Every ETF proxy any ticker could map to, plus the ETFs for their resolved sectors, plus
         # SPY (the market fallback and ultimate benchmark). Collecting all proxies keeps this to
         # one fetch.
@@ -256,6 +260,9 @@ class LabelOutcomes:
         self, signal: Signal, prices: PriceSeries, label_run_id: str
     ) -> list[OutcomeLabel]:
         """One label row per horizon for a single signal (ok or unresolvable-with-reason)."""
+        # Only ever called on `labelable` signals, which `execute` has already filtered to
+        # ticker-resolved (`s.ticker is not None`) — narrow the shared domain type here too.
+        assert signal.ticker is not None
         ticker = signal.ticker.strip().upper()
         benchmark_symbol, benchmark_tag = self._benchmark_for(ticker, prices)
 

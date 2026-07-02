@@ -17,7 +17,10 @@ from trading.domain.politicians import DEFAULT_BASE_WEIGHTS, Politician, Politic
 from trading.domain.provenance import Provenance
 from trading.infrastructure.politicians.congress_legislators import (
     CongressLegislatorsRepository,
+    fetch_and_parse_combined_roster,
+    fetch_and_parse_historical_roster,
     fetch_and_parse_roster,
+    parse_historical_roster,
     parse_roster,
 )
 
@@ -224,3 +227,112 @@ async def test_fetch_and_parse_roster_uses_mock_transport() -> None:
 
     assert len(politicians) == 4
     assert all(p.provenance is Provenance.REAL for p in politicians)
+
+
+# --- Historical roster (Task 04b, docs/RESEARCH-PLAN.md) -------------------------------------
+
+# A retired long-tenured House member (7 terms -> SENIOR by the tenure threshold, no committee
+# membership file exists for retired members) and a retired one-term junior member (-> MEMBER).
+_LEGISLATORS_HISTORICAL_YAML = """
+- id:
+    bioguide: R000577
+  name:
+    first: Retired
+    last: Senior
+    official_full: Retired Senior Member
+  terms:
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+    - type: rep
+      state: OH
+      party: Democrat
+- id:
+    bioguide: R000578
+  name:
+    first: Retired
+    last: Junior
+    official_full: Retired Junior Member
+  terms:
+    - type: rep
+      state: NY
+      party: Republican
+"""
+
+
+def test_parse_historical_roster_yields_two_real_politicians() -> None:
+    politicians = parse_historical_roster(_LEGISLATORS_HISTORICAL_YAML)
+    assert len(politicians) == 2
+    assert all(p.provenance is Provenance.REAL for p in politicians)
+
+
+def test_historical_roster_classifies_by_terms_served_with_empty_committees() -> None:
+    politicians = {p.id: p for p in parse_historical_roster(_LEGISLATORS_HISTORICAL_YAML)}
+
+    senior = politicians["R000577"]
+    assert senior.role is PoliticianRole.SENIOR  # >= 6 terms, no committee-membership file
+    assert senior.committees == ()
+    assert senior.track_record_score == 1.0
+    assert senior.base_weight == DEFAULT_BASE_WEIGHTS[PoliticianRole.SENIOR]
+
+    junior = politicians["R000578"]
+    assert junior.role is PoliticianRole.MEMBER
+    assert junior.committees == ()
+    assert junior.base_weight == DEFAULT_BASE_WEIGHTS[PoliticianRole.MEMBER]
+
+
+async def test_fetch_and_parse_historical_roster_uses_mock_transport() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("legislators-historical.yaml")
+        return httpx.Response(200, text=_LEGISLATORS_HISTORICAL_YAML)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        politicians = await fetch_and_parse_historical_roster(client)
+
+    assert len(politicians) == 2
+    assert all(p.provenance is Provenance.REAL for p in politicians)
+
+
+async def test_fetch_and_parse_combined_roster_includes_current_and_historical() -> None:
+    """A filer present ONLY in legislators-historical resolves via the combined roster — this is
+    the fact that unblocks deep House-disclosures backfill (2008+) for since-retired members."""
+    bodies = {
+        "legislators-current.yaml": _LEGISLATORS_YAML,
+        "committees-current.yaml": _COMMITTEES_YAML,
+        "committee-membership-current.yaml": _MEMBERSHIP_YAML,
+        "legislators-historical.yaml": _LEGISLATORS_HISTORICAL_YAML,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        filename = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, text=bodies[filename])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        politicians = await fetch_and_parse_combined_roster(client)
+
+    assert len(politicians) == 6  # 4 current + 2 historical
+    repo = CongressLegislatorsRepository(politicians)
+    # A current member still resolves...
+    assert repo.get("T000467") is not None
+    # ...and so does a member who exists ONLY in the historical file (never in current).
+    retired = repo.get("R000577")
+    assert retired is not None
+    assert retired.provenance is Provenance.REAL
+    found = repo.find_in_text("Retired Senior Member filed a periodic transaction report today.")
+    assert found is not None
+    assert found.id == "R000577"

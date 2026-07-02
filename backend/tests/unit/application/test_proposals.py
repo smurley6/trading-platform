@@ -90,6 +90,26 @@ async def test_scan_caps_proposals_at_top_n(clock: FixedClock, make_signal: Sign
     assert len(scan.proposals) == 2
 
 
+async def test_none_ticker_signal_excluded_from_scan(
+    clock: FixedClock, make_signal: SignalFactory
+) -> None:
+    """A None-ticker (unresolved-entity, Task 04b) signal must not crash the scan's ticker
+    grouping (`sorted({s.ticker for s in window})` in both the proposals and predicted loops)
+    and must not appear as a proposal/predicted symbol."""
+    signals = [
+        make_signal(ticker=None, sentiment=1.0, politician_weight=3.0),  # would-be TRADE tier
+        make_signal(ticker="LMT", sentiment=1.0, politician_weight=3.0),  # 75 -> TRADE
+        make_signal(ticker=None, sentiment=1.0, politician_weight=2.0),  # would-be WATCH tier
+        make_signal(ticker="NOC", sentiment=1.0, politician_weight=2.0),  # 50 -> WATCH
+    ]
+    scan = await _scanner(_FakeReadModel(signals), clock).execute()
+
+    assert [p.symbol for p in scan.proposals] == ["LMT"]
+    assert [p.symbol for p in scan.predicted] == ["NOC"]
+    seen = {p.symbol for p in scan.proposals} | {p.symbol for p in scan.predicted}
+    assert None not in seen
+
+
 async def test_held_target_is_not_re_proposed(
     clock: FixedClock, make_signal: SignalFactory
 ) -> None:

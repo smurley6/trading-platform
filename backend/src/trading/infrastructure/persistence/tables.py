@@ -57,7 +57,9 @@ rm_signals_table = Table(
     Column("occurred_at", DateTime(timezone=True), nullable=False),
     Column("recorded_id", BigInteger, nullable=False),  # events.id, for stable feed ordering
     Column("source_type", Text, nullable=False),
-    Column("ticker", Text, nullable=False),
+    # Nullable since migration 0006: an unresolved-entity backfilled signal (Task 04b) is
+    # recorded with ticker=None rather than dropped. See domain/signals.py::Signal.ticker.
+    Column("ticker", Text, nullable=True),
     Column("politician_id", Text, nullable=True),
     Column("sentiment", Numeric, nullable=False),
     Column("politician_weight", Numeric, nullable=False),

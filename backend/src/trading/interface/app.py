@@ -290,7 +290,9 @@ def create_app(deps: AppDeps) -> FastAPI:
             now=deps.clock.now(), window_days=deps.conviction_window_days
         )
         items: list[ConvictionItem] = []
-        for ticker in sorted({s.ticker for s in window}):
+        # Unresolved-entity signals (ticker=None, Task 04b) are visible in the feed but excluded
+        # from conviction scoring — there is no symbol to score.
+        for ticker in sorted({s.ticker for s in window if s.ticker is not None}):
             result = compute_conviction(
                 ticker,
                 window,

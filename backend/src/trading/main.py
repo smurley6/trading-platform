@@ -79,6 +79,7 @@ from trading.infrastructure.persistence.memory_read_model import InMemoryReadMod
 from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.infrastructure.politicians.congress_legislators import (
     CongressLegislatorsRepository,
+    fetch_and_parse_combined_roster,
     fetch_and_parse_roster,
 )
 from trading.infrastructure.politicians.repository import StaticPoliticianRepository
@@ -451,10 +452,10 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     sources, aclosers = _build_sources(settings, clock)
 
-    # Backfill (Task 02+04a): the registry of HISTORICAL sources (those implementing
-    # fetch_historical). Task 04a registers sec_form4 here; house_disclosures (04b) is not yet
-    # wired. The backfill job fails cleanly on an unknown/unsupported --source, listing whatever
-    # is registered. Keyed by source name.
+    # Backfill (Task 02+04a+04b): the registry of HISTORICAL sources (those implementing
+    # fetch_historical) — sec_form4 (04a) and house_disclosures (04b) are both registered here.
+    # The backfill job fails cleanly on an unknown/unsupported --source, listing whatever is
+    # registered. Keyed by source name.
     historical_sources, historical_aclosers = _build_historical_sources(settings, clock)
     aclosers = [*aclosers, *historical_aclosers]
 
@@ -482,7 +483,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     async def run_backtest() -> BacktestResult:
         recorded = list(await read_model.all_signals())
-        symbols = sorted({s.ticker for s in recorded})
+        # Unresolved-entity signals (ticker=None, Task 04b) contribute no symbol to price.
+        symbols = sorted({s.ticker for s in recorded if s.ticker is not None})
         times = sorted({s.created_at for s in recorded})
         # Date range: bound by the recorded signal timestamps, widened to at least
         # backtest_lookback_days so real bars span enough history to mark every signal.
@@ -819,6 +821,20 @@ def _build_sources(
     return sources, [client.aclose]
 
 
+async def _load_historical_congress_roster(settings: Settings) -> PoliticianRepositoryPort:
+    """Fetch + parse CURRENT + HISTORICAL congressional rosters, combined (Task 04b).
+
+    A short-lived client, mirroring ``_load_congress_roster``, but ALSO pulls
+    ``legislators-historical.yaml`` so a deep House-disclosures backfill (2008+) resolves PTRs
+    filed by since-retired members, not just current sitting ones. This is deliberately NOT
+    called at composition-root construction time (see ``_build_historical_sources`` below) — it
+    is wired as a lazy, cached, one-shot loader on the historical source itself, invoked only on
+    the FIRST ``fetch_historical`` call, so a bare app boot stays network-silent.
+    """
+    async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
+        return CongressLegislatorsRepository(await fetch_and_parse_combined_roster(client))
+
+
 def _build_historical_sources(
     settings: Settings, clock: SystemClock
 ) -> tuple[dict[str, HistoricalDataSourcePort], list[Callable[[], Awaitable[None]]]]:
@@ -827,7 +843,9 @@ def _build_historical_sources(
     Registered independently of the LIVE `*_enabled` flags — backfill is a research op, gated
     only by the source having what it needs to make requests at all (e.g. sec_form4 needs a
     declared User-Agent per SEC fair-access policy, same field the live adapter uses, but not
-    `sec_form4_enabled`). house_disclosures (Task 04b) is not yet wired here.
+    `sec_form4_enabled`). house_disclosures (Task 04b) registers UNCONDITIONALLY: construction
+    dials nothing (no roster fetch, no other prerequisite), and ALL fetching — including the
+    historical roster load — is lazy, deferred to the first `fetch_historical` call.
 
     Returns its own aclosers (e.g. the shared httpx client) rather than reusing `_build_sources`'
     client, since a historical-only run (no live source enabled) would otherwise get no client.
@@ -845,6 +863,20 @@ def _build_historical_sources(
             lookback_days=settings.sec_form4_lookback_days,
         )
         sources[form4.name] = form4
+
+    house_client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
+    aclosers.append(house_client.aclose)
+    house = HouseDisclosuresSource(
+        client=house_client,
+        # The LIVE (current-only) roster is a harmless placeholder here — fetch_historical never
+        # reads `self._politicians` directly, only the lazily-loaded combined roster below.
+        politicians=StaticPoliticianRepository(),
+        sector_map=StaticSectorMap(),
+        clock=clock,
+        entity_resolver=GazetteerEntityResolver(),
+        historical_politicians=partial(_load_historical_congress_roster, settings),
+    )
+    sources[house.name] = house
 
     return sources, aclosers
 

@@ -150,7 +150,9 @@ class SignalFeedItem(BaseModel):
     signal_id: str
     occurred_at: datetime
     source_type: str
-    ticker: str
+    # None = unresolved entity (Task 04b backfilled signal whose asset name never matched a
+    # ticker). Visible in the feed for research purposes; excluded from conviction/proposals.
+    ticker: str | None
     politician_id: str | None
     sentiment: float
     politician_weight: float

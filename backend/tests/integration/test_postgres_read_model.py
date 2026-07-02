@@ -24,7 +24,7 @@ pytestmark = [
 _WHEN = datetime(2026, 6, 13, 14, 0, tzinfo=UTC)
 
 
-def _signal_event(*, signal_id: str, ticker: str, created_at: datetime) -> DomainEvent:
+def _signal_event(*, signal_id: str, ticker: str | None, created_at: datetime) -> DomainEvent:
     return DomainEvent(
         stream_id=f"signal-{signal_id}",
         event_type=EventType.SIGNAL_RECEIVED,
@@ -126,6 +126,29 @@ async def test_provenance_and_pit_confidence_round_trip_through_rm_signals() -> 
         [signal] = [s for s in await read_model.all_signals() if s.id == sig]
         assert signal.provenance is Provenance.BACKFILLED
         assert signal.pit_confidence == "approximate"
+    finally:
+        await engine.dispose()
+
+
+async def test_null_ticker_round_trips_through_rm_signals() -> None:
+    # Task 04b: migration 0006 relaxed rm_signals.ticker to NULLable (an unresolved-entity
+    # backfilled signal is recorded with ticker=None rather than dropped). Before that migration
+    # this INSERT would have raised NotNullViolation.
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from trading.infrastructure.persistence.postgres import PostgresEventStore
+    from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    read_model = PostgresReadModel(engine)
+    store = PostgresEventStore(engine, on_append=read_model.apply)
+    sig = f"s-{uuid4()}"
+    try:
+        await read_model.rebuild([])
+        await store.append(_signal_event(signal_id=sig, ticker=None, created_at=_WHEN))
+
+        [signal] = [s for s in await read_model.all_signals() if s.id == sig]
+        assert signal.ticker is None
     finally:
         await engine.dispose()
 

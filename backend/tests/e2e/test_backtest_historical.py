@@ -60,7 +60,7 @@ class _StubHistoricalPrices:
 
 async def _run(provider: object, signals: list[Signal]) -> object:
     # Mirror main.run_backtest: derive symbols + date range, ask the provider, run the backtest.
-    symbols = sorted({s.ticker for s in signals})
+    symbols = sorted({s.ticker for s in signals if s.ticker is not None})
     times = sorted({s.created_at for s in signals})
     end = times[-1] if times else _ts(1)
     start = min(times[0], end - timedelta(days=180)) if times else end - timedelta(days=180)

@@ -29,6 +29,20 @@ predictiveness score would require a historical congressional-trades corpus the 
 not yet have; rather than fabricate signal, we decline to up/down-weight: ``influence_weight``
 (FR-POL-3) reduces to ``base_weight x topic_relevance``. This is the single honest
 placeholder-but-neutral value in the adapter and is documented as such.
+
+**Historical roster (Task 04b, docs/RESEARCH-PLAN.md).** ``legislators-historical.yaml`` (same
+repo, same per-member schema as ``legislators-current.yaml``) covers every RETIRED/former member
+back to 1789 — without it, a deep House-disclosures backfill (2008+) would silently drop every
+PTR filed by a since-retired member, because the live roster only ever covers CURRENT sitting
+members. :func:`parse_historical_roster` classifies retired members from ``terms`` ALONE (there
+is no current committee-membership file for someone no longer serving): >= ``_SENIOR_TERM_
+THRESHOLD`` terms served -> ``SENIOR``, else ``MEMBER``; ``committees=()`` (empty — a former
+member holds no active committee seat) and ``track_record_score=1.0`` (same neutral convention
+as the current-roster parser), still stamped ``Provenance.REAL`` (this is genuine historical
+public-record data, not a placeholder). The composition root is responsible for combining
+current + historical into one :class:`CongressLegislatorsRepository` for the historical House
+source — see ``main.py``'s lazy historical-roster loader (fetched only on first use, never at
+startup, so a bare app boot stays network-silent).
 """
 
 from collections.abc import Sequence
@@ -50,6 +64,9 @@ _RAW_BASE: Final = "https://raw.githubusercontent.com/unitedstates/congress-legi
 LEGISLATORS_URL: Final = f"{_RAW_BASE}/legislators-current.yaml"
 COMMITTEES_URL: Final = f"{_RAW_BASE}/committees-current.yaml"
 COMMITTEE_MEMBERSHIP_URL: Final = f"{_RAW_BASE}/committee-membership-current.yaml"
+# Same repo, same per-member schema; every RETIRED/former member back to 1789 (Task 04b). No
+# committee-membership counterpart exists for this file (retired members hold no active seat).
+LEGISLATORS_HISTORICAL_URL: Final = f"{_RAW_BASE}/legislators-historical.yaml"
 
 # A member who has served at least this many terms is treated as "clearly senior".
 _SENIOR_TERM_THRESHOLD: Final = 6
@@ -120,6 +137,51 @@ def parse_roster(
     return tuple(politicians)
 
 
+def parse_historical_roster(legislators_historical_yaml: str) -> tuple[Politician, ...]:
+    """Build REAL :class:`Politician` objects from ``legislators-historical.yaml`` (Task 04b).
+
+    Pure and offline, same schema as :func:`parse_roster`'s legislators file, but with NO
+    committee-membership counterpart: a retired member holds no active committee seat, so role
+    classification here relies on ``terms`` alone (>= ``_SENIOR_TERM_THRESHOLD`` served terms ->
+    ``SENIOR``, else ``MEMBER``; a *Chair*/*Ranking Member* title cannot be inferred without a
+    membership file, so ``COMMITTEE_CHAIR`` is never emitted here) and ``committees=()``.
+    ``track_record_score`` stays the same NEUTRAL ``1.0`` as the current-roster parser.
+
+    Args:
+        legislators_historical_yaml: contents of ``legislators-historical.yaml``.
+
+    Returns:
+        A tuple of Politicians, each stamped ``provenance=Provenance.REAL``, ordered by the
+        underlying legislators-historical file.
+    """
+    politicians: list[Politician] = []
+    legislators = yaml.safe_load(legislators_historical_yaml) or []
+    for entry in legislators:
+        bioguide = _bioguide(entry)
+        name = _official_full(entry)
+        if not bioguide or not name:
+            continue
+
+        terms = entry.get("terms") or []
+        latest = terms[-1] if terms else {}
+        party = str(latest.get("party", "") or "")
+
+        role = _classify_role(is_chair=False, is_ranking_member=False, term_count=len(terms))
+        politicians.append(
+            Politician(
+                id=bioguide,
+                name=name,
+                role=role,
+                committees=(),
+                party=party,
+                base_weight=DEFAULT_BASE_WEIGHTS[role],
+                track_record_score=_NEUTRAL_TRACK_RECORD,
+                provenance=Provenance.REAL,
+            )
+        )
+    return tuple(politicians)
+
+
 async def fetch_roster(client: httpx.AsyncClient) -> tuple[str, str, str]:
     """GET the three source YAML files and return their raw text.
 
@@ -140,6 +202,33 @@ async def fetch_and_parse_roster(client: httpx.AsyncClient) -> tuple[Politician,
     """Convenience: :func:`fetch_roster` followed by :func:`parse_roster`."""
     legislators, committees, membership = await fetch_roster(client)
     return parse_roster(legislators, committees, membership)
+
+
+async def fetch_historical_roster(client: httpx.AsyncClient) -> str:
+    """GET ``legislators-historical.yaml`` and return its raw text (Task 04b).
+
+    Kept separate from :func:`parse_historical_roster` for the same reason as the current-roster
+    split: parsing stays unit-testable with no network. Only called by the House disclosures
+    historical source's LAZY roster loader (never at startup — see ``main.py``).
+    """
+    return await _get_text(client, LEGISLATORS_HISTORICAL_URL)
+
+
+async def fetch_and_parse_historical_roster(client: httpx.AsyncClient) -> tuple[Politician, ...]:
+    """Convenience: :func:`fetch_historical_roster` followed by :func:`parse_historical_roster`."""
+    legislators_historical = await fetch_historical_roster(client)
+    return parse_historical_roster(legislators_historical)
+
+
+async def fetch_and_parse_combined_roster(client: httpx.AsyncClient) -> tuple[Politician, ...]:
+    """Current + historical members in one call (Task 04b): current + retired, current first.
+
+    The convenience the historical House source's lazy loader uses to resolve filers across
+    both sitting and since-retired members in a single :class:`CongressLegislatorsRepository`.
+    """
+    current = await fetch_and_parse_roster(client)
+    historical = await fetch_and_parse_historical_roster(client)
+    return current + historical
 
 
 async def _get_text(client: httpx.AsyncClient, url: str) -> str:

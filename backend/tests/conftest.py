@@ -137,7 +137,7 @@ def evaluate_signals(
 @pytest.fixture
 def make_signal(clock: FixedClock) -> SignalFactory:
     def _make(
-        ticker: str = "AAPL",
+        ticker: str | None = "AAPL",
         sentiment: float = 0.8,
         source_type: SignalSource = SignalSource.STATEMENT,
         politician_weight: float = 1.0,

@@ -34,7 +34,9 @@ class PoliticalSignalStrategy:
     def evaluate(
         self, signals: Sequence[Signal], portfolio: Portfolio
     ) -> Sequence[StrategyProposal]:
-        tickers = sorted({s.ticker for s in signals})
+        # Unresolved-entity signals (ticker=None, Task 04b) are excluded from strategy
+        # evaluation — there is no symbol to score, size, or place an order against.
+        tickers = sorted({s.ticker for s in signals if s.ticker is not None})
         # Anchor time decay to a single deterministic reference shared across tickers:
         # the most recent signal in this evaluation batch. This keeps the per-ticker
         # scores comparable and the whole evaluation reproducible in backtest (FR-BT-1).

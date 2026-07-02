@@ -51,7 +51,6 @@ import asyncio
 import logging
 import math
 import re
-import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -64,6 +63,7 @@ import httpx
 from trading.application.ports.clock import ClockPort
 from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
+from trading.infrastructure.data_sources.throttle import RateLimiter
 from trading.infrastructure.reference import COMPANY_DIRECTORY
 
 logger = logging.getLogger(__name__)
@@ -179,37 +179,6 @@ def _classify_transactions(document: str) -> list[_ParsedTransaction]:
     return parsed
 
 
-class _RateLimiter:
-    """SEC fair-access throttle: sleeps as needed to keep requests at or below the ceiling.
-
-    Uses ``time.monotonic`` (never affected by wall-clock changes) and an injectable sleep
-    function so tests can run the throttle logic without actually waiting (patch ``sleep`` with a
-    no-op / recording stub, or inject a fake ``monotonic``).
-    """
-
-    def __init__(
-        self,
-        *,
-        min_interval: float = _MIN_REQUEST_INTERVAL,
-        monotonic: Any = time.monotonic,
-        sleep: Any = asyncio.sleep,
-    ) -> None:
-        self._min_interval = min_interval
-        self._monotonic = monotonic
-        self._sleep = sleep
-        self._last_request: float | None = None
-
-    async def wait(self) -> None:
-        now = self._monotonic()
-        if self._last_request is not None:
-            elapsed = now - self._last_request
-            remaining = self._min_interval - elapsed
-            if remaining > 0:
-                await self._sleep(remaining)
-                now = self._monotonic()
-        self._last_request = now
-
-
 class SecForm4Source:
     def __init__(
         self,
@@ -228,7 +197,7 @@ class SecForm4Source:
         self._lookback_days = lookback_days
         self._max_filings = max_filings
         self._filter_enabled = filter_enabled
-        self._limiter = _RateLimiter(sleep=sleep)
+        self._limiter = RateLimiter(min_interval=_MIN_REQUEST_INTERVAL, sleep=sleep)
         self._sleep = sleep
 
     @property

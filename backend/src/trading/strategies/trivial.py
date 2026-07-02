@@ -27,6 +27,9 @@ class TrivialStrategy:
     ) -> Sequence[StrategyProposal]:
         net_sentiment: dict[str, float] = {}
         for signal in signals:
+            if signal.ticker is None:
+                # Unresolved-entity signal (Task 04b) — no symbol to accumulate sentiment on.
+                continue
             net_sentiment[signal.ticker] = net_sentiment.get(signal.ticker, 0.0) + (
                 signal.sentiment * signal.politician_weight * signal.source_reliability
             )

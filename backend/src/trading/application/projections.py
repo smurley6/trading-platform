@@ -20,7 +20,7 @@ def _signal_from_payload(payload: dict[str, Any]) -> Signal:
         id=str(payload["signal_id"]),
         created_at=datetime.fromisoformat(str(payload["created_at"])),
         source_type=SignalSource(str(payload["source_type"])),
-        ticker=str(payload["ticker"]),
+        ticker=(None if payload["ticker"] is None else str(payload["ticker"])),
         politician_id=(None if payload["politician_id"] is None else str(payload["politician_id"])),
         sentiment=float(payload["sentiment"]),
         politician_weight=float(payload["politician_weight"]),
