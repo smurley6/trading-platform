@@ -151,6 +151,7 @@ def _build_signal(
     source_uid: str | None,
     sector_map: SectorMapPort,
     provenance: Provenance,
+    row_index: int | None = None,
 ) -> Signal:
     """Shared signal construction: everything that does NOT depend on which path is calling.
 
@@ -161,6 +162,13 @@ def _build_signal(
     of which path is asking. The politician-weighting lookup needs SOME ticker to key the sector
     map on, so an unresolved ticker weights as if sector-unclassified (``sector_for`` -> None ->
     neutral committee-topic relevance) rather than being skipped.
+
+    ``row_index`` (historical path only) is folded into the Signal ``id``: two same-ticker,
+    same-transaction-date rows in ONE PTR would otherwise share an id, and ``rm_signals`` is
+    keyed on ``signal_id``, so the second row would silently vanish from the read model during a
+    deep backfill — unrecoverable by rebuild, since the collision is baked into the recorded
+    events and ``backfill_seen`` blocks re-emission. The live path passes no ``row_index`` and
+    its id format is unchanged.
     """
     base_weight = politician_weight_for(politician, ticker or "", sector_map)
     raw_payload: dict[str, Any] = {
@@ -176,8 +184,10 @@ def _build_signal(
     }
     if source_uid is not None:
         raw_payload["source_uid"] = source_uid
+    row_part = "" if row_index is None else f"{row_index}-"
     return Signal(
-        id=f"house-{entry.doc_id}-{ticker or 'unresolved'}-{int(txn.transaction_date.timestamp())}",
+        id=f"house-{entry.doc_id}-{row_part}"
+        f"{ticker or 'unresolved'}-{int(txn.transaction_date.timestamp())}",
         created_at=created_at,
         source_type=SignalSource.DISCLOSED_TRADE,
         ticker=ticker,
@@ -383,6 +393,7 @@ class HouseDisclosuresSource:
                             # Real disclosure data; the backfill use case re-stamps to
                             # BACKFILLED regardless (Task 02) — this adapter never pre-empts it.
                             provenance=Provenance.REAL,
+                            row_index=row_index,
                         )
                     )
 

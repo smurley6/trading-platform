@@ -123,7 +123,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BACKFILL_ENABLED", "true")
 
 
-def _install(monkeypatch: pytest.MonkeyPatch) -> dict[str, AppDeps]:
+def _install(monkeypatch: pytest.MonkeyPatch, handler: Handler = _handler) -> dict[str, AppDeps]:
     """Wire the real composition (real HouseDisclosuresSource), but swap its httpx client for a
     mock transport bound to the checked-in fixtures, and its lazy historical-roster loader for a
     fixture-backed one -- no real network anywhere in the run."""
@@ -135,7 +135,7 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> dict[str, AppDeps]:
             return captured["deps"]
         deps = real_build(settings)
         source = deps.historical_sources["house_disclosures"]
-        source._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))  # type: ignore[attr-defined]
+        source._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[attr-defined]
         source._historical_politicians_loader = _fixture_historical_roster  # type: ignore[attr-defined]
         captured["deps"] = deps
         return deps
@@ -210,6 +210,69 @@ async def test_confirm_records_unresolved_ticker_signal(monkeypatch: pytest.Monk
     assert len(unresolved) == 1
     assert unresolved[0].ticker is None
     assert unresolved[0].provenance is Provenance.BACKFILLED
+
+
+# --- Regression: id-collision hardening (row index folded into the historical Signal.id) -----
+
+_TWO_ROW_PDF = _FIXTURES / "20040002.pdf"
+_TWO_ROW_DOC_ID = "20040002"
+# One PTR by the retired member (already in the fixture roster) holding TWO same-ticker (AAPL),
+# same-transaction-date rows — the exact pre-fix Signal.id collision scenario.
+_TWO_ROW_INDEX_XML = b"""<?xml version='1.0' encoding='utf-8'?>
+<FinancialDisclosure><Member>
+    <Prefix>Hon.</Prefix>
+    <Last>Member</Last>
+    <First>Retired Senior</First>
+    <Suffix />
+    <FilingType>P</FilingType>
+    <StateDst>OH01</StateDst>
+    <Year>2024</Year>
+    <FilingDate>3/25/2024</FilingDate>
+    <DocID>20040002</DocID>
+  </Member>
+</FinancialDisclosure>"""
+
+
+def _two_row_handler(request: httpx.Request) -> httpx.Response:
+    path = request.url.path
+    if path.endswith("/2024FD.ZIP") or path.endswith("/2024FD.zip"):
+        return httpx.Response(200, content=_zip_index(_TWO_ROW_INDEX_XML, year=2024))
+    if path.endswith(f"/{_TWO_ROW_DOC_ID}.pdf"):
+        return httpx.Response(200, content=_TWO_ROW_PDF.read_bytes())
+    return httpx.Response(404)
+
+
+async def test_two_same_ticker_same_day_rows_produce_two_read_model_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One PTR with two same-ticker, same-transaction-date rows yields TWO rm_signals rows.
+
+    Pre-hardening both rows shared one Signal.id (``house-{doc}-{ticker}-{txn_ts}``); rm_signals
+    keys on signal_id, so the second row silently vanished from the Postgres read model — and the
+    collision was baked into the recorded events, unrecoverable by rebuild. Distinct ids are what
+    guarantee two rows on the Postgres primary key; the in-memory projection asserted here folds
+    the same events.
+    """
+    captured = _install(monkeypatch, handler=_two_row_handler)
+
+    rc = await backfill_job.run_backfill(
+        source_id="house_disclosures",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 12, 31, tzinfo=UTC),
+        confirm=True,
+    )
+    assert rc == 0
+    deps = captured["deps"]
+
+    signals = [s for s in await deps.read_model.all_signals() if s.ticker == "AAPL"]
+    assert len(signals) == 2  # two read-model rows, not one
+    assert len({s.id for s in signals}) == 2  # distinct ids — the collision fix itself
+    assert {s.raw_payload["source_uid"] for s in signals} == {
+        f"{_TWO_ROW_DOC_ID}:0",
+        f"{_TWO_ROW_DOC_ID}:1",
+    }
+    # Identical ticker AND transaction date — precisely the fields the old id was built from.
+    assert {s.raw_payload["transaction_date"] for s in signals} == {"2024-03-04"}
 
 
 async def test_rerun_is_idempotent_no_duplicate_signals(monkeypatch: pytest.MonkeyPatch) -> None:
