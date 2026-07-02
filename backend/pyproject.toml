@@ -87,6 +87,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "integration: tests that hit real external boundaries (Postgres, Alpaca paper)",
+    "live_smoke: tests that hit a real live external API (e.g. EDGAR); opt-in via RUN_LIVE_SMOKE",
 ]
 
 [tool.coverage.run]

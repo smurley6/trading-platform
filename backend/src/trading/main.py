@@ -451,13 +451,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
 
     sources, aclosers = _build_sources(settings, clock)
 
-    # Backfill (Task 02): the registry of HISTORICAL sources (those implementing fetch_historical).
-    # EMPTY for now — the historical fetchers are pure additions in Tasks 04a/04b, which register
-    # their adapters here. The backfill job fails cleanly on an unknown/unsupported --source,
-    # listing whatever is registered (currently nothing). Keyed by source name.
-    historical_sources: dict[str, HistoricalDataSourcePort] = _build_historical_sources(
-        settings, clock
-    )
+    # Backfill (Task 02+04a): the registry of HISTORICAL sources (those implementing
+    # fetch_historical). Task 04a registers sec_form4 here; house_disclosures (04b) is not yet
+    # wired. The backfill job fails cleanly on an unknown/unsupported --source, listing whatever
+    # is registered. Keyed by source name.
+    historical_sources, historical_aclosers = _build_historical_sources(settings, clock)
+    aclosers = [*aclosers, *historical_aclosers]
 
     political_cycle: PoliticalCycle | None = None
     if sources and political_evaluator is not None:
@@ -822,16 +821,32 @@ def _build_sources(
 
 def _build_historical_sources(
     settings: Settings, clock: SystemClock
-) -> dict[str, HistoricalDataSourcePort]:
+) -> tuple[dict[str, HistoricalDataSourcePort], list[Callable[[], Awaitable[None]]]]:
     """Construct the registry of backfill-capable (historical) sources, keyed by name.
 
-    EMPTY today: no adapter implements ``fetch_historical`` yet. Tasks 04a (sec_form4) and 04b
-    (house_disclosures) extend their adapters and register them here — one line each, nothing
-    else in the backfill path changes. Wiring the empty registry now keeps those tasks pure
-    additions and gives the backfill job a real (if currently empty) list of supported sources.
+    Registered independently of the LIVE `*_enabled` flags — backfill is a research op, gated
+    only by the source having what it needs to make requests at all (e.g. sec_form4 needs a
+    declared User-Agent per SEC fair-access policy, same field the live adapter uses, but not
+    `sec_form4_enabled`). house_disclosures (Task 04b) is not yet wired here.
+
+    Returns its own aclosers (e.g. the shared httpx client) rather than reusing `_build_sources`'
+    client, since a historical-only run (no live source enabled) would otherwise get no client.
     """
-    _ = (settings, clock)  # reserved for the historical fetchers wired in Tasks 04a/04b
-    return {}
+    aclosers: list[Callable[[], Awaitable[None]]] = []
+    sources: dict[str, HistoricalDataSourcePort] = {}
+
+    if settings.sec_form4_user_agent:
+        client = httpx.AsyncClient(timeout=settings.http_timeout_seconds)
+        aclosers.append(client.aclose)
+        form4 = SecForm4Source(
+            client=client,
+            clock=clock,
+            user_agent=settings.sec_form4_user_agent,
+            lookback_days=settings.sec_form4_lookback_days,
+        )
+        sources[form4.name] = form4
+
+    return sources, aclosers
 
 
 def create_application() -> FastAPI:

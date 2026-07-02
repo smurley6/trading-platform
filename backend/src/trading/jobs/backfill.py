@@ -8,7 +8,10 @@ labeler/learner but never order placement (Task 01's execution wall).
 USAGE::
 
     python -m trading.jobs.backfill --source sec_form4 --start 2024-07-01 --end 2026-07-01
-    python -m trading.jobs.backfill --source sec_form4 --start 2024-07-01 --end 2026-07-01 --confirm
+    python -m trading.jobs.backfill --source sec_form4 --start 2024-07-01 --end 2026-07-01 \
+        --confirm
+    python -m trading.jobs.backfill --source sec_form4 --start 2024-07-01 --end 2026-07-01 \
+        --no-filter
 
   * DRY-RUN (default): fetch the window and report what WOULD be ingested (per-source counts —
     fetched / new / duplicate / refused) WITHOUT writing anything. Always allowed.
@@ -16,6 +19,9 @@ USAGE::
     source-native ids seen + record a ``user.action`` event with the run parameters and counts.
     Requires ``BACKFILL_ENABLED=true``; a window whose span exceeds the source's max-lookback
     guard is refused.
+  * ``--no-filter``: disable a source's default volume filter (e.g. sec_form4's CIK filter to
+    COMPANY_DIRECTORY issuers), if the source implements one (``FilterableHistoricalSource``).
+    The active filter (or its absence) is recorded in the run's ``user.action`` ``filters`` field.
 
 Composition mirrors ``trading.jobs.cycle`` / ``trading.jobs.purge_synthetic``: build the same
 dependencies via the composition root, run, and ALWAYS tear down the async resources (disposing
@@ -36,6 +42,7 @@ from trading.application.backfill_signals import (
     BackfillSignals,
     supported_sources,
 )
+from trading.application.ports.data_source import FilterableHistoricalSource
 from trading.config import Settings
 from trading.domain.events import DomainEvent, EventType
 from trading.interface.app import AppDeps
@@ -71,6 +78,14 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="write events (default is a dry run); requires BACKFILL_ENABLED=true",
     )
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        help=(
+            "disable a source's default volume filter (e.g. sec_form4's CIK filter to "
+            "COMPANY_DIRECTORY issuers), if the source supports one"
+        ),
+    )
     return parser.parse_args(list(argv))
 
 
@@ -92,7 +107,9 @@ def _format_report(report: BackfillReport, *, dry_run: bool) -> str:
     return "\n".join(lines)
 
 
-async def run_backfill(*, source_id: str, start: datetime, end: datetime, confirm: bool) -> int:
+async def run_backfill(
+    *, source_id: str, start: datetime, end: datetime, confirm: bool, no_filter: bool = False
+) -> int:
     """Build dependencies, backfill the window (or dry-run), tear down. Returns an exit code.
 
     Guards, in order: the window must be non-empty; ``--confirm`` requires BACKFILL_ENABLED; the
@@ -140,6 +157,14 @@ async def run_backfill(*, source_id: str, start: datetime, end: datetime, confir
         if deps.backfill_seen is None:  # defensive: the composition root always wires this
             raise RuntimeError("backfill dedupe store is not configured")
 
+        # Toggle the source's optional volume filter (e.g. sec_form4's CIK filter) if it supports
+        # one. Checked via the runtime_checkable FilterableHistoricalSource protocol — no hasattr
+        # probing. --no-filter disables it; the filter is ON by default for sources that have one.
+        filter_description: str | None = None
+        if isinstance(source, FilterableHistoricalSource):
+            source.set_filter_enabled(not no_filter)
+            filter_description = source.filter_description()
+
         backfill = BackfillSignals(
             source=source,
             event_store=deps.event_store,
@@ -153,6 +178,7 @@ async def run_backfill(*, source_id: str, start: datetime, end: datetime, confir
 
         _emit("=== Backfill ===")
         _emit(f"mode: {'CONFIRM (writes events)' if confirm else 'DRY-RUN (no changes)'}")
+        _emit(f"filter: {filter_description or '(none active)'}")
         _emit("")
         _emit(_format_report(report, dry_run=not confirm))
 
@@ -178,7 +204,7 @@ async def run_backfill(*, source_id: str, start: datetime, end: datetime, confir
                         "duplicate": report.duplicate,
                         "refused": report.refused,
                     },
-                    "filters": {},
+                    "filters": {"description": filter_description} if filter_description else {},
                 },
                 occurred_at=deps.clock.now(),
                 correlation_id=correlation_id,
@@ -223,7 +249,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         return asyncio.run(
-            run_backfill(source_id=args.source, start=start, end=end, confirm=bool(args.confirm))
+            run_backfill(
+                source_id=args.source,
+                start=start,
+                end=end,
+                confirm=bool(args.confirm),
+                no_filter=bool(args.no_filter),
+            )
         )
     except BackfillError as exc:
         _emit(f"error: {exc}")
