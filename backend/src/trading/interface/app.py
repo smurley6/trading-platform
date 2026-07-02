@@ -21,8 +21,10 @@ from trading.application.live_trading import (
     RequestLiveTrading,
 )
 from trading.application.political_cycle import PoliticalCycle
+from trading.application.ports.backfill_seen import BackfillSeenPort
 from trading.application.ports.broker import BrokerPort, OrderNotFoundError
 from trading.application.ports.clock import ClockPort
+from trading.application.ports.data_source import HistoricalDataSourcePort
 from trading.application.ports.event_bus import EventBroadcasterPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.market_data import Quote, QuoteFeedPort, QuoteStreamPort
@@ -134,6 +136,11 @@ class AppDeps:
     background_tasks: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     # Resources to release on shutdown (e.g. the shared HTTP client for data sources).
     aclosers: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+    # Backfill (Task 02): the dedupe store and the registry of historical sources keyed by name.
+    # Read by the `python -m trading.jobs.backfill` job (not by any HTTP route). The registry is
+    # EMPTY until the historical fetchers (Tasks 04a/04b) register their adapters here.
+    backfill_seen: BackfillSeenPort | None = None
+    historical_sources: dict[str, HistoricalDataSourcePort] = field(default_factory=dict)
 
 
 def create_app(deps: AppDeps) -> FastAPI:

@@ -19,8 +19,9 @@ from trading.application.ingest_signals import IngestSignals
 from trading.application.live_trading import AssessLiveReadiness, RequestLiveTrading
 from trading.application.place_order import PlaceOrder
 from trading.application.political_cycle import PoliticalCycle
+from trading.application.ports.backfill_seen import BackfillSeenPort
 from trading.application.ports.broker import BrokerPort
-from trading.application.ports.data_source import DataSourcePort
+from trading.application.ports.data_source import DataSourcePort, HistoricalDataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
@@ -70,6 +71,7 @@ from trading.infrastructure.observability.metrics import MetricsRegistry
 from trading.infrastructure.persistence.broadcasting import BroadcastingEventStore
 from trading.infrastructure.persistence.health import DatabaseReadiness
 from trading.infrastructure.persistence.memory import InMemoryEventStore
+from trading.infrastructure.persistence.memory_backfill_seen import InMemoryBackfillSeen
 from trading.infrastructure.persistence.memory_read_model import InMemoryReadModel
 from trading.infrastructure.persistence.projecting import ProjectingEventStore
 from trading.infrastructure.politicians.congress_legislators import (
@@ -114,11 +116,13 @@ def build_dependencies(settings: Settings) -> AppDeps:
     # current on every append so hot reads query maintained projections, not a full-log replay.
     inner_store: EventStorePort
     read_model: ReadModelPort
+    backfill_seen: BackfillSeenPort
     db_engine: AsyncEngine | None = None
     if settings.database_url:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         from trading.infrastructure.persistence.postgres import PostgresEventStore
+        from trading.infrastructure.persistence.postgres_backfill_seen import PostgresBackfillSeen
         from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
 
         # pool_pre_ping issues a lightweight liveness check (SELECT 1) before handing out a
@@ -133,12 +137,15 @@ def build_dependencies(settings: Settings) -> AppDeps:
         # Read-model rows are written in the append transaction, atomically with the event.
         inner_store = PostgresEventStore(db_engine, on_append=pg_read_model.apply)
         read_model = pg_read_model
+        # Backfill dedupe lives in its own table (not the read model); Postgres-backed here.
+        backfill_seen = PostgresBackfillSeen(db_engine)
     else:
         # Default path stays fully in-memory: a projecting wrapper folds each appended event
         # into the in-memory read model synchronously (read-after-write consistency).
         memory_read_model = InMemoryReadModel()
         inner_store = ProjectingEventStore(InMemoryEventStore(clock), memory_read_model)
         read_model = memory_read_model
+        backfill_seen = InMemoryBackfillSeen()
     # /readyz probes DB connectivity when a database is configured; trivially ready otherwise.
     db_readiness = DatabaseReadiness(db_engine)
     # Wrap the store so appended events fan out to live WebSocket subscribers (FR-API-1)...
@@ -428,6 +435,15 @@ def build_dependencies(settings: Settings) -> AppDeps:
     )
 
     sources, aclosers = _build_sources(settings, clock)
+
+    # Backfill (Task 02): the registry of HISTORICAL sources (those implementing fetch_historical).
+    # EMPTY for now — the historical fetchers are pure additions in Tasks 04a/04b, which register
+    # their adapters here. The backfill job fails cleanly on an unknown/unsupported --source,
+    # listing whatever is registered (currently nothing). Keyed by source name.
+    historical_sources: dict[str, HistoricalDataSourcePort] = _build_historical_sources(
+        settings, clock
+    )
+
     political_cycle: PoliticalCycle | None = None
     if sources and political_evaluator is not None:
         lookback_start = clock.now() - timedelta(days=settings.corroboration_window_days)
@@ -529,6 +545,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
         enable_metrics=settings.enable_metrics,
         db_readiness=db_readiness,
         api_key=settings.api_key,
+        backfill_seen=backfill_seen,
+        historical_sources=historical_sources,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)
@@ -767,6 +785,20 @@ def _build_sources(
             )
         )
     return sources, [client.aclose]
+
+
+def _build_historical_sources(
+    settings: Settings, clock: SystemClock
+) -> dict[str, HistoricalDataSourcePort]:
+    """Construct the registry of backfill-capable (historical) sources, keyed by name.
+
+    EMPTY today: no adapter implements ``fetch_historical`` yet. Tasks 04a (sec_form4) and 04b
+    (house_disclosures) extend their adapters and register them here — one line each, nothing
+    else in the backfill path changes. Wiring the empty registry now keeps those tasks pure
+    additions and gives the backfill job a real (if currently empty) list of supported sources.
+    """
+    _ = (settings, clock)  # reserved for the historical fetchers wired in Tasks 04a/04b
+    return {}
 
 
 def create_application() -> FastAPI:

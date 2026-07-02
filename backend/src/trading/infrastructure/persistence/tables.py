@@ -71,6 +71,18 @@ rm_signals_table = Table(
     Index("ix_rm_signals_recorded_id", "recorded_id"),
 )
 
+# Backfill dedupe (Task 02): the source-native ids already ingested by a backfill run, keyed on
+# (source_id, source_uid). Consulted BEFORE appending signal.received events so re-running a
+# window double-appends nothing (idempotency at the event-log layer, not just the read model).
+# Rebuildable from the log: source_uid is also carried in each signal's raw_payload.
+backfill_seen_table = Table(
+    "backfill_seen",
+    metadata,
+    Column("source_id", Text, nullable=False),
+    Column("source_uid", Text, nullable=False),
+    PrimaryKeyConstraint("source_id", "source_uid", name="pk_backfill_seen"),
+)
+
 # Current open positions with cost basis, one row per (sleeve, symbol). Closed lots are
 # deleted (zero quantity), mirroring the in-memory projection.
 rm_positions_table = Table(

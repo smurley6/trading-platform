@@ -147,6 +147,18 @@ class Settings(BaseSettings):
     # env var / existing deployments don't break; unused by the composition root.
     alpaca_paper_sleeve_id: str = "sleeve-political"
 
+    def backfill_max_lookback_days(self, source_id: str) -> int | None:
+        """Per-source backfill lookback cap, or None if the source has no configured guard.
+
+        Maps a source id to its `backfill_<source>_max_lookback_days` field so the backfill job
+        need not hard-code attribute names. A source with no guard returns None (no cap enforced);
+        add a field here when a new source becomes backfillable.
+        """
+        return {
+            "sec_form4": self.backfill_sec_form4_max_lookback_days,
+            "house_disclosures": self.backfill_house_disclosures_max_lookback_days,
+        }.get(source_id)
+
     def data_key_id(self) -> str | None:
         """Resolved market-data key: the dedicated data key, else the live broker key."""
         return self.alpaca_data_key_id or self.alpaca_live_key_id
@@ -213,6 +225,18 @@ class Settings(BaseSettings):
     # SEC EDGAR "getcurrent" Atom feed (fast Form 4) — reuses sec_form4_user_agent (SEC needs a UA).
     sec_edgar_atom_enabled: bool = False
     sec_edgar_atom_max_filings: int = 100
+
+    # --- Backfill (Task 02, docs/RESEARCH-PLAN.md) -----------------------------------------------
+    # Historical-signal synthesis for the research program. OFF by construction: a dry-run of the
+    # `python -m trading.jobs.backfill` job (report what WOULD be ingested) is ALWAYS allowed, but
+    # a `--confirm` run that appends events requires BACKFILL_ENABLED=true. Backfilled signals are
+    # stamped Provenance.BACKFILLED and can never reach order placement (Task 01's execution wall).
+    backfill_enabled: bool = False
+    # Per-source lookback guard: a `--confirm` window whose span exceeds the source's cap is
+    # refused (a fat-fingered decade-long window is a mistake, not a request). One int per
+    # backfillable source; 730d (~2 years) matches the runbook's default first window.
+    backfill_sec_form4_max_lookback_days: int = 730
+    backfill_house_disclosures_max_lookback_days: int = 730
 
     http_timeout_seconds: float = 10.0
 

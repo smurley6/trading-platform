@@ -7,6 +7,7 @@ these events back; it never re-emits them.
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
@@ -36,14 +37,24 @@ async def record_signals(
     clock: ClockPort,
     signals: Sequence[Signal],
     correlation_id: str,
+    occurred_at: datetime | None = None,
 ) -> None:
+    """Append one ``signal.received`` event per signal (the single emission path).
+
+    ``occurred_at`` defaults to ``clock.now()`` — the moment the signal was OBSERVED — for live
+    ingestion. Backfill overrides it with the true public disclosure timestamp so the event's
+    ``occurred_at`` is point-in-time correct, never the ingest wall-clock (RESEARCH-PLAN §2). The
+    override applies to every signal in this call, so a backfill caller records one signal at a
+    time with that signal's own ``created_at`` (its disclosure timestamp).
+    """
+    stamp = clock.now() if occurred_at is None else occurred_at
     for signal in signals:
         await event_store.append(
             DomainEvent(
                 stream_id=f"signal-{signal.id}",
                 event_type=EventType.SIGNAL_RECEIVED,
                 payload=signal_payload(signal),
-                occurred_at=clock.now(),
+                occurred_at=stamp,
                 correlation_id=correlation_id,
             )
         )
