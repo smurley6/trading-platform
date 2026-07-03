@@ -10,6 +10,8 @@ USAGE::
 
     python -m trading.jobs.label_outcomes
     python -m trading.jobs.label_outcomes --confirm
+    python -m trading.jobs.label_outcomes --exclude-tickers NAN
+    python -m trading.jobs.label_outcomes --exclude-tickers NAN,XYZ --confirm
 
   * DRY-RUN (default): compute labels and report the ok / unresolvable split WITHOUT writing.
     Always allowed; may run against whatever historical-prices provider is wired (incl. synthetic).
@@ -18,6 +20,12 @@ USAGE::
     Requires the REAL historical-bars adapter (ENABLE_HISTORICAL_DATA + resolvable Alpaca data
     credentials) — the job refuses to STORE labels computed from the synthetic price provider, so
     fake bars never produce stored research labels (mirrors the platform's data-integrity stance).
+  * ``--exclude-tickers``: comma-separated ticker(s) (repeatable OR single comma-joined, case-
+    insensitive) to drop BEFORE labeling — e.g. known-bad signals admitted by a since-fixed
+    upstream defect (Task 04c: 44 leaked sec_form4 signals ticker NAN) that must stay in the
+    append-only event log but should not feed the research projection. Excluded signals are
+    counted (``excluded`` in the report) and, on ``--confirm``, recorded in the run's
+    ``user.action`` audit payload.
 
 No HTTP endpoint is added (the API surface stays stable; documented in MEMORY.md). Composition
 mirrors ``trading.jobs.backfill`` / ``trading.jobs.cycle``: build dependencies via the composition
@@ -55,7 +63,30 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="write labels (default is a dry run); requires the REAL historical-bars adapter",
     )
+    parser.add_argument(
+        "--exclude-tickers",
+        action="append",
+        default=[],
+        metavar="TICKER[,TICKER...]",
+        help=(
+            "ticker(s) to exclude from labeling (case-insensitive); comma-separated, and/or "
+            "repeat the flag, e.g. --exclude-tickers NAN,XYZ or --exclude-tickers NAN "
+            "--exclude-tickers XYZ"
+        ),
+    )
     return parser.parse_args(list(argv))
+
+
+def _parse_exclude_tickers(raw: Sequence[str]) -> frozenset[str] | None:
+    """Flatten repeated/comma-joined ``--exclude-tickers`` values into an upper-cased set.
+
+    Returns ``None`` (not an empty frozenset) when nothing was passed, so ``execute``'s
+    ``exclude_tickers`` stays a clean "absent" signal rather than a vacuous empty set.
+    """
+    tickers = {
+        ticker.strip().upper() for group in raw for ticker in group.split(",") if ticker.strip()
+    }
+    return frozenset(tickers) if tickers else None
 
 
 def _format_report(report: LabelReport, *, dry_run: bool) -> str:
@@ -63,6 +94,7 @@ def _format_report(report: LabelReport, *, dry_run: bool) -> str:
         f"  label_run_id:  {report.label_run_id}",
         f"  as_of:         {report.as_of.isoformat()}",
         f"  signals:       {report.signal_count}  (ticker-resolved, REAL+BACKFILLED)",
+        f"  excluded:      {report.excluded}  (dropped by --exclude-tickers, not labeled)",
         f"  labels:        {report.labels}  (one per signal x horizon)",
         f"  ok:            {report.ok}",
         f"  unresolvable:  {report.unresolvable}",
@@ -74,7 +106,7 @@ def _format_report(report: LabelReport, *, dry_run: bool) -> str:
     return "\n".join(lines)
 
 
-async def run_labeling(*, confirm: bool) -> int:
+async def run_labeling(*, confirm: bool, exclude_tickers: frozenset[str] | None = None) -> int:
     """Build dependencies, label (or dry-run), tear down. Returns an exit code.
 
     Guard: ``--confirm`` requires the REAL historical-bars adapter to be wired
@@ -99,10 +131,14 @@ async def run_labeling(*, confirm: bool) -> int:
             return 1
 
         label_run_id = str(uuid4())
-        report = await deps.label_outcomes.execute(label_run_id=label_run_id, dry_run=not confirm)
+        report = await deps.label_outcomes.execute(
+            label_run_id=label_run_id, dry_run=not confirm, exclude_tickers=exclude_tickers
+        )
 
         _emit("=== Label outcomes ===")
         _emit(f"mode: {'CONFIRM (writes labels)' if confirm else 'DRY-RUN (no changes)'}")
+        if exclude_tickers:
+            _emit(f"exclude_tickers: {', '.join(sorted(exclude_tickers))}")
         _emit("")
         _emit(_format_report(report, dry_run=not confirm))
 
@@ -143,7 +179,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as exc:  # argparse exits 2 on a usage error; normalize to 1
         return 1 if exc.code not in (0, None) else 0
     try:
-        return asyncio.run(run_labeling(confirm=bool(args.confirm)))
+        exclude_tickers = _parse_exclude_tickers(args.exclude_tickers)
+        return asyncio.run(
+            run_labeling(confirm=bool(args.confirm), exclude_tickers=exclude_tickers)
+        )
     except Exception:
         logger.exception("label-outcomes job failed")
         return 1

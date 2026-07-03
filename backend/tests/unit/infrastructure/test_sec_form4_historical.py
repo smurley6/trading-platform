@@ -38,16 +38,36 @@ _FIXTURE_BY_PATH: dict[str, str] = {
     "/files/company_tickers.json": "company_tickers.json",
 }
 
+# Filer-CIK/issuer-CIK divergence fixtures (Task 04c), isolated in their own QTR2 index + window
+# so they never leak into the QTR1 tests above (which assert exact signal counts/uids for the
+# original three fixture filings). A directory-listed filer (BAC) on a non-directory issuer's
+# (Nuveen/NAN) filing, and a two-filer-row single accession (Apple issuer + BAC reporting owner,
+# both directory members).
+_ISSUER_FILTER_FIXTURE_BY_PATH: dict[str, str] = {
+    **_FIXTURE_BY_PATH,
+    "/Archives/edgar/full-index/2024/QTR2/form.idx": "form_2024QTR2_issuer_filter.idx",
+    "/Archives/edgar/data/70858/0001140361-24-049485.txt": "submission_nan_bac_filer.txt",
+    "/Archives/edgar/data/320193/0000320193-24-000099.txt": "submission_apple_multi_filer.txt",
+}
+_ISSUER_FILTER_WINDOW_START = datetime(2024, 4, 1, tzinfo=UTC)
+_ISSUER_FILTER_WINDOW_END = datetime(2024, 6, 30, tzinfo=UTC)
+
 
 def _read(name: str) -> str:
     return (_FIXTURES / name).read_text()
 
 
-def _make_handler(seen_user_agents: list[str | None] | None = None) -> Handler:
+def _make_handler(
+    seen_user_agents: list[str | None] | None = None,
+    *,
+    fixture_by_path: dict[str, str] | None = None,
+) -> Handler:
+    paths = fixture_by_path if fixture_by_path is not None else _FIXTURE_BY_PATH
+
     def handler(request: httpx.Request) -> httpx.Response:
         if seen_user_agents is not None:
             seen_user_agents.append(request.headers.get("user-agent"))
-        fixture = _FIXTURE_BY_PATH.get(request.url.path)
+        fixture = paths.get(request.url.path)
         if fixture is None:
             return httpx.Response(404, text="not found")
         return httpx.Response(200, text=_read(fixture))
@@ -240,3 +260,60 @@ async def test_transaction_date_retained_only_in_raw_payload(clock: FixedClock) 
             # date; none of ours do, but keep the assertion meaningful either way.)
             signal.created_at != datetime.fromisoformat(signal.raw_payload["transaction_date"])
         )
+
+
+# --- Task 04c: issuer-CIK is the authoritative filter, index-row CIK is a pre-filter only -------
+
+
+async def test_directory_filer_non_directory_issuer_yields_zero_signals_and_is_counted(
+    clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reproduces the verified Nuveen/NAN leak: the index row is keyed by BAC's CIK (a directory
+    member, so the bandwidth pre-filter lets it through to a fetch), but the filing's PARSED
+    issuer is Nuveen (CIK 1074769, ticker NAN) -- NOT in COMPANY_DIRECTORY. The authoritative
+    post-fetch issuer-CIK check must drop the filing's signals entirely and count it via
+    `issuer_filtered_out`, distinct from the pre-filter's `cik_filtered_out`."""
+    async with _client(_make_handler(fixture_by_path=_ISSUER_FILTER_FIXTURE_BY_PATH)) as client:
+        source = _source(client, clock)
+        with caplog.at_level("INFO"):
+            signals = await source.fetch_historical(
+                _ISSUER_FILTER_WINDOW_START, _ISSUER_FILTER_WINDOW_END
+            )
+
+    nan_signals = [s for s in signals if s.raw_payload.get("issuer_cik") == "0001074769"]
+    assert nan_signals == []
+    assert any("1 filing(s) issuer-filtered out" in record.message for record in caplog.records)
+
+
+async def test_multi_filer_row_accession_fetched_and_emitted_exactly_once(
+    clock: FixedClock,
+) -> None:
+    """Two index rows share ONE accession (Apple's own issuer row + Bank of America's reporting-
+    owner row, both directory members, so both pass the bandwidth pre-filter). The submission must
+    be fetched exactly once (inspect the mock transport's request log) and its signal emitted
+    exactly once (no duplicate source_uid), never twice just because two filer rows pointed at
+    it."""
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        fixture = _ISSUER_FILTER_FIXTURE_BY_PATH.get(request.url.path)
+        if fixture is None:
+            return httpx.Response(404, text="not found")
+        return httpx.Response(200, text=_read(fixture))
+
+    async with _client(handler) as client:
+        source = _source(client, clock)
+        signals = await source.fetch_historical(
+            _ISSUER_FILTER_WINDOW_START, _ISSUER_FILTER_WINDOW_END
+        )
+
+    multi_filer_path = "/Archives/edgar/data/320193/0000320193-24-000099.txt"
+    assert requested_paths.count(multi_filer_path) == 1
+
+    multi_filer_signals = [
+        s for s in signals if s.raw_payload["accession"] == "0000320193-24-000099"
+    ]
+    assert len(multi_filer_signals) == 1
+    uids = [s.raw_payload["source_uid"] for s in multi_filer_signals]
+    assert len(uids) == len(set(uids))  # no duplicate source_uids

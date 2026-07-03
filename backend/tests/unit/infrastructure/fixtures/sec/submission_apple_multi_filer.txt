@@ -1,0 +1,127 @@
+<SEC-DOCUMENT>0000320193-24-000099.txt : 20240501
+<SEC-HEADER>0000320193-24-000099.hdr.sgml : 20240501
+<ACCEPTANCE-DATETIME>20240501160000
+ACCESSION NUMBER:		0000320193-24-000099
+CONFORMED SUBMISSION TYPE:	4
+PUBLIC DOCUMENT COUNT:		1
+CONFORMED PERIOD OF REPORT:	20240430
+FILED AS OF DATE:		20240501
+DATE AS OF CHANGE:		20240501
+
+REPORTING-OWNER:
+
+	OWNER DATA:
+		COMPANY CONFORMED NAME:			BANK OF AMERICA CORP /DE/
+		CENTRAL INDEX KEY:			0000070858
+		ORGANIZATION NAME:
+
+	FILING VALUES:
+		FORM TYPE:		4
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	001-36743
+		FILM NUMBER:		24530099
+
+	MAIL ADDRESS:
+		STREET 1:		100 NORTH TRYON STREET
+		CITY:			CHARLOTTE
+		STATE:			NC
+		ZIP:			28255
+
+ISSUER:
+
+	COMPANY DATA:
+		COMPANY CONFORMED NAME:			Apple Inc.
+		CENTRAL INDEX KEY:			0000320193
+		STANDARD INDUSTRIAL CLASSIFICATION:	ELECTRONIC COMPUTERS [3571]
+		ORGANIZATION NAME:           	06 Technology
+		IRS NUMBER:				942404110
+		STATE OF INCORPORATION:			CA
+		FISCAL YEAR END:			0930
+
+	BUSINESS ADDRESS:
+		STREET 1:		ONE APPLE PARK WAY
+		CITY:			CUPERTINO
+		STATE:			CA
+		ZIP:			95014
+
+	MAIL ADDRESS:
+		STREET 1:		ONE APPLE PARK WAY
+		CITY:			CUPERTINO
+		STATE:			CA
+		ZIP:			95014
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>4
+<SEQUENCE>1
+<FILENAME>form4applemulti.xml
+<DESCRIPTION>FORM 4
+<TEXT>
+<XML>
+<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0508</schemaVersion>
+    <documentType>4</documentType>
+    <periodOfReport>2024-04-30</periodOfReport>
+    <notSubjectToSection16>0</notSubjectToSection16>
+    <issuer>
+        <issuerCik>0000320193</issuerCik>
+        <issuerName>Apple Inc.</issuerName>
+        <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0000070858</rptOwnerCik>
+            <rptOwnerName>BANK OF AMERICA CORP /DE/</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isDirector>0</isDirector>
+            <isOfficer>0</isOfficer>
+            <isTenPercentOwner>1</isTenPercentOwner>
+            <officerTitle></officerTitle>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle>
+                <value>Common Stock</value>
+            </securityTitle>
+            <transactionDate>
+                <value>2024-04-30</value>
+            </transactionDate>
+            <transactionCoding>
+                <transactionFormType>4</transactionFormType>
+                <transactionCode>S</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares>
+                    <value>2500</value>
+                </transactionShares>
+                <transactionPricePerShare>
+                    <value>190.00</value>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode>
+                    <value>D</value>
+                </transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction>
+                    <value>975000</value>
+                </sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+            <ownershipNature>
+                <directOrIndirectOwnership>
+                    <value>I</value>
+                </directOrIndirectOwnership>
+            </ownershipNature>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+    <ownerSignature>
+        <signatureName>/s/ John Filer, Attorney-in-Fact for Bank of America Corp</signatureName>
+        <signatureDate>2024-05-01</signatureDate>
+    </ownerSignature>
+</ownershipDocument>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>

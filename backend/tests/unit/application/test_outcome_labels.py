@@ -390,3 +390,143 @@ async def test_rerun_replaces_rather_than_duplicates() -> None:
     count_2 = await labels.count_for_run(run_id)
 
     assert count_1 == count_2 == len(HORIZONS)
+
+
+# --- exclude_tickers (Task 04c: excludes the 44 leaked sec_form4 NAN signals) --------------------
+
+
+async def test_excluded_ticker_produces_no_labels_and_is_counted() -> None:
+    prices = PriceSeries(
+        series={
+            "AAPL": _bars(("2025-01-02", "100"), ("2025-01-03", "101")),
+            "XLK": _bars(("2025-01-02", "50"), ("2025-01-03", "50.5")),
+            "NAN": _bars(("2025-01-02", "10"), ("2025-01-03", "10.1")),
+            "SPY": _bars(("2025-01-02", "400"), ("2025-01-03", "404")),
+        }
+    )
+    labeler, labels, _store, _clock = _labeler(prices, {"AAPL": Sector.TECHNOLOGY})
+    kept = _signal(signal_id="s1", ticker="AAPL", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    excluded = _signal(
+        signal_id="s2-leaked", ticker="NAN", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC)
+    )
+    run_id = str(uuid4())
+
+    report = await labeler.execute(
+        label_run_id=run_id,
+        dry_run=False,
+        signals=[kept, excluded],
+        exclude_tickers=frozenset({"NAN"}),
+    )
+
+    stored = labels._by_run[run_id]
+    assert all(label.ticker != "NAN" for label in stored)
+    assert all(label.signal_id != "s2-leaked" for label in stored)
+    assert report.signal_count == 1  # only AAPL counted as labelable
+    assert report.excluded == 1
+    assert report.labels == len(HORIZONS)  # only AAPL's rows
+
+
+async def test_excluded_ticker_is_case_insensitive() -> None:
+    # exclude_tickers is upper-normalized; a lower/mixed-case signal ticker must still match.
+    prices = PriceSeries(series={"SPY": _bars(("2025-01-02", "100"), ("2025-01-03", "101"))})
+    labeler, labels, _store, _clock = _labeler(prices, {})
+    signal = _signal(signal_id="s1", ticker="nan", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    run_id = str(uuid4())
+
+    report = await labeler.execute(
+        label_run_id=run_id, dry_run=False, signals=[signal], exclude_tickers=frozenset({"NAN"})
+    )
+
+    assert report.signal_count == 0
+    assert report.excluded == 1
+    assert report.labels == 0
+    assert labels._by_run[run_id] == []
+
+
+async def test_exclude_tickers_absent_is_unchanged_behavior() -> None:
+    prices = PriceSeries(
+        series={
+            "AAPL": _bars(("2025-01-02", "100"), ("2025-01-03", "101")),
+            "XLK": _bars(("2025-01-02", "50"), ("2025-01-03", "50.5")),
+        }
+    )
+    labeler, labels, _store, _clock = _labeler(prices, {"AAPL": Sector.TECHNOLOGY})
+    signal = _signal(signal_id="s1", ticker="AAPL", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    run_id = str(uuid4())
+
+    report = await labeler.execute(label_run_id=run_id, dry_run=False, signals=[signal])
+
+    assert report.excluded == 0
+    assert report.signal_count == 1
+    assert report.labels == len(HORIZONS)
+    assert len(labels._by_run[run_id]) == len(HORIZONS)
+
+
+async def test_exclude_tickers_empty_frozenset_is_unchanged_behavior() -> None:
+    prices = PriceSeries(
+        series={
+            "AAPL": _bars(("2025-01-02", "100"), ("2025-01-03", "101")),
+            "XLK": _bars(("2025-01-02", "50"), ("2025-01-03", "50.5")),
+        }
+    )
+    labeler, labels, _store, _clock = _labeler(prices, {"AAPL": Sector.TECHNOLOGY})
+    signal = _signal(signal_id="s1", ticker="AAPL", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    run_id = str(uuid4())
+
+    report = await labeler.execute(
+        label_run_id=run_id, dry_run=False, signals=[signal], exclude_tickers=frozenset()
+    )
+
+    assert report.excluded == 0
+    assert report.signal_count == 1
+    assert len(labels._by_run[run_id]) == len(HORIZONS)
+
+
+async def test_audit_payload_carries_exclusion_set() -> None:
+    prices = PriceSeries(
+        series={
+            "AAPL": _bars(("2025-01-02", "100"), ("2025-01-03", "101")),
+            "XLK": _bars(("2025-01-02", "50"), ("2025-01-03", "50.5")),
+            "NAN": _bars(("2025-01-02", "10"), ("2025-01-03", "10.1")),
+        }
+    )
+    labeler, _labels, store, _clock = _labeler(prices, {"AAPL": Sector.TECHNOLOGY})
+    kept = _signal(signal_id="s1", ticker="AAPL", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    excluded = _signal(signal_id="s2", ticker="NAN", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    run_id = str(uuid4())
+
+    await labeler.execute(
+        label_run_id=run_id,
+        dry_run=False,
+        signals=[kept, excluded],
+        exclude_tickers=frozenset({"NAN"}),
+    )
+
+    actions = [
+        e.event for e in await store.read_all() if e.event.event_type == EventType.USER_ACTION
+    ]
+    assert len(actions) == 1
+    payload = actions[0].payload
+    assert payload["exclude_tickers"] == ["NAN"]
+    assert payload["excluded_count"] == 1
+
+
+async def test_audit_payload_exclusion_set_empty_when_absent() -> None:
+    prices = PriceSeries(
+        series={
+            "AAPL": _bars(("2025-01-02", "100"), ("2025-01-03", "101")),
+            "XLK": _bars(("2025-01-02", "50"), ("2025-01-03", "50.5")),
+        }
+    )
+    labeler, _labels, store, _clock = _labeler(prices, {"AAPL": Sector.TECHNOLOGY})
+    signal = _signal(signal_id="s1", ticker="AAPL", disclosed_at=datetime(2025, 1, 1, tzinfo=UTC))
+    run_id = str(uuid4())
+
+    await labeler.execute(label_run_id=run_id, dry_run=False, signals=[signal])
+
+    actions = [
+        e.event for e in await store.read_all() if e.event.event_type == EventType.USER_ACTION
+    ]
+    payload = actions[0].payload
+    assert payload["exclude_tickers"] == []
+    assert payload["excluded_count"] == 0

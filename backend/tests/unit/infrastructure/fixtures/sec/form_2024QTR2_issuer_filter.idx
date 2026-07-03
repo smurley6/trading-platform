@@ -1,0 +1,13 @@
+Description:           Master Index of EDGAR Dissemination Feed by Form Type
+Last Data Received:    June 30, 2024
+Comments:              webmaster@sec.gov
+Anonymous FTP:         ftp://ftp.sec.gov/edgar/
+
+
+
+
+Form Type   Company Name                                                  CIK         Date Filed  File Name
+---------------------------------------------------------------------------------------------------------------------------------------------
+4                Bank of America Corp                                          70858       2024-04-25  edgar/data/70858/0001140361-24-049485.txt
+4                Apple Inc.                                                    320193      2024-05-01  edgar/data/320193/0000320193-24-000099.txt
+4                Bank of America Corp                                          70858       2024-05-01  edgar/data/320193/0000320193-24-000099.txt

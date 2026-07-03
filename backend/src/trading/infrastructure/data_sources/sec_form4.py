@@ -212,7 +212,7 @@ class SecForm4Source:
     def filter_description(self) -> str | None:
         if not self._filter_enabled:
             return None
-        return "CIK filter: issuers whose tickers are in COMPANY_DIRECTORY"
+        return "Issuer CIK filter: issuers whose tickers are in COMPANY_DIRECTORY"
 
     # --- Live path (unchanged behavior) ----------------------------------------------------------
 
@@ -255,18 +255,28 @@ class SecForm4Source:
 
         Walks EDGAR's quarterly form.idx indexes covering the window, keeps form-type-4 rows
         (form 4/A amendments are counted and skipped) whose Date Filed falls in the window and
-        whose issuer CIK passes the (default-on) filter, fetches the full-submission text for
-        each kept row (ONE request per filing — header + ownership XML together), and emits one
-        Signal per classified open-market transaction. ``created_at`` = the filing's
-        ACCEPTANCE-DATETIME (converted from US/Eastern to UTC) — never the transaction date.
+        whose FILER CIK (the index row's CIK — a Form 4 is a joint filing by the issuer plus
+        every reporting owner, so this is NOT necessarily the issuer) passes the (default-on)
+        pre-filter, fetches the full-submission text for each kept row (ONE request per filing —
+        header + ownership XML together, deduplicated per accession so a filing with multiple
+        passing filer rows is fetched only once), and — when the filter is active — drops the
+        filing's signals unless the PARSED issuer CIK also passes, before emitting one Signal per
+        classified open-market transaction. ``created_at`` = the filing's ACCEPTANCE-DATETIME
+        (converted from US/Eastern to UTC) — never the transaction date.
         """
         cik_filter = await self._load_cik_filter() if self._filter_enabled else None
 
         amendments_skipped = 0
         no_ticker_skipped = 0
         cik_filtered_out = 0
+        issuer_filtered_out = 0
+        duplicate_index_rows_skipped = 0
         fetch_failed = 0
         signals: list[Signal] = []
+        # Per-call (in-memory) dedupe: one accession fetched+emitted at most once, no matter how
+        # many of its filer rows (issuer + reporting owners) pass the index pre-filter. Scoped to
+        # THIS fetch_historical call only — cross-run dedupe remains the backfill-seen store's job.
+        seen_accessions: set[str] = set()
 
         for year, quarter in _quarters_covering(start, end):
             index_text = await self._get_text(_FORM_INDEX_URL.format(year=year, quarter=quarter))
@@ -278,8 +288,27 @@ class SecForm4Source:
                     continue
                 if not (start.date() <= row.date_filed <= end.date()):
                     continue
+                # BANDWIDTH PRE-FILTER ONLY: the index row's CIK is the FILER's CIK (issuer OR any
+                # reporting owner on the joint filing), not necessarily the issuer's. This check
+                # may skip obviously-out rows before any fetch, but it is NOT the authoritative
+                # in/out decision — that happens below, against the parsed issuer CIK, once the
+                # filing is fetched. This heuristic is therefore over-inclusive by design (a
+                # directory reporting-owner's row lets a non-directory issuer's filing through to
+                # the fetch step) and never under-inclusive (an issuer is always a filer on its
+                # own Form 4s).
                 if cik_filter is not None and row.cik not in cik_filter:
                     cik_filtered_out += 1
+                    continue
+
+                # Per-accession dedupe BEFORE the fetch: the index row's File Name column encodes
+                # the accession number (e.g. ".../0000789019-24-000010.txt"), which is reliably
+                # available without a network round-trip. A single accession that appears as
+                # multiple filer rows (issuer + reporting owner(s), all sharing one filing) is
+                # therefore fetched and emitted AT MOST ONCE per call, regardless of how many of
+                # its rows pass the pre-filter above.
+                accession_hint = _accession_from_file_name(row.file_name)
+                if accession_hint is not None and accession_hint in seen_accessions:
+                    duplicate_index_rows_skipped += 1
                     continue
 
                 submission_url = _SUBMISSION_URL.format(file_name=row.file_name)
@@ -299,6 +328,9 @@ class SecForm4Source:
                 if accepted_at is None:
                     continue
                 accession = _extract_accession(submission) or row.file_name
+                if accession_hint is not None:
+                    seen_accessions.add(accession_hint)
+                seen_accessions.add(accession)
 
                 document = _extract_ownership_xml(submission)
                 if document is None:
@@ -308,6 +340,17 @@ class SecForm4Source:
                     continue
                 if not transactions[0].ticker:
                     no_ticker_skipped += 1
+                    continue
+
+                # AUTHORITATIVE filter decision: the PARSED issuer CIK from the ownership XML
+                # (same zero-padding as the index-row/company_tickers.json CIKs). This is what
+                # actually decides in/out — the index-row check above is only a bandwidth
+                # heuristic. Fixes the leak where a non-directory issuer's filing passed because a
+                # directory company was merely a co-filing reporting owner.
+                raw_issuer_cik = transactions[0].issuer_cik
+                issuer_cik = _pad_cik(raw_issuer_cik) if raw_issuer_cik else ""
+                if cik_filter is not None and issuer_cik not in cik_filter:
+                    issuer_filtered_out += 1
                     continue
 
                 for txn in transactions:
@@ -322,11 +365,14 @@ class SecForm4Source:
 
         logger.info(
             "sec_form4 historical walk: %d signal(s), %d 4/A amendment(s) skipped, "
-            "%d row(s) CIK-filtered out, %d filing(s) skipped (no issuer ticker), "
+            "%d row(s) CIK-filtered out, %d filing(s) issuer-filtered out, "
+            "%d duplicate index row(s) skipped, %d filing(s) skipped (no issuer ticker), "
             "%d filing(s) failed to fetch",
             len(signals),
             amendments_skipped,
             cik_filtered_out,
+            issuer_filtered_out,
+            duplicate_index_rows_skipped,
             no_ticker_skipped,
             fetch_failed,
         )
@@ -459,7 +505,13 @@ def _parse_recent_feed(feed: str) -> list[str]:
 @dataclass(frozen=True, slots=True)
 class _IndexRow:
     form_type: str
-    cik: str  # zero-padded 10-digit, matching company_tickers.json's cik_str once padded
+    # zero-padded 10-digit CIK of the FILER on this index row — NOT necessarily the issuer. A
+    # Form 4 is a joint filing by the issuer plus every reporting owner, and EDGAR's form.idx
+    # emits one row PER FILER, so the same accession can appear multiple times under different
+    # CIKs (the issuer's own row, plus one row per reporting owner). Matches
+    # company_tickers.json's cik_str once zero-padded, but callers must not assume `cik` is the
+    # issuer — see `fetch_historical`'s post-fetch issuer-CIK filter for the authoritative check.
+    cik: str
     date_filed: date
     file_name: str
 
@@ -574,6 +626,23 @@ def _extract_accession(submission_text: str) -> str | None:
     ``None`` (the caller then uses the index row's File Name, which encodes the same accession)
     if the header ever omits it."""
     match = _ACCESSION_RE.search(submission_text)
+    return match.group(1) if match else None
+
+
+_FILE_NAME_ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})\.txt$")
+
+
+def _accession_from_file_name(file_name: str) -> str | None:
+    """The dashed accession number encoded in a form.idx row's File Name column, WITHOUT any
+    network fetch (e.g. ``edgar/data/789019/0000789019-24-000010.txt`` ->
+    ``0000789019-24-000010``). Used to dedupe multiple filer rows for the SAME accession (issuer
+    + reporting owner(s)) before deciding whether to fetch at all — the SGML header's own
+    ``ACCESSION NUMBER:`` line (see ``_extract_accession``) is the authoritative value once a
+    filing IS fetched, but this pre-fetch hint is what makes the "one fetch per accession"
+    guarantee possible without an extra request. Returns ``None`` if the file name doesn't match
+    the expected shape (defensive; the pre-fetch dedupe is then simply skipped for that row and
+    the post-fetch accession-based dedupe still applies)."""
+    match = _FILE_NAME_ACCESSION_RE.search(file_name)
     return match.group(1) if match else None
 
 
