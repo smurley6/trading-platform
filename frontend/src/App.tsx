@@ -5,7 +5,7 @@
 // old inline header/nav is fully replaced by AppShell, but the refreshKey/`/ws/events` mechanism
 // below is untouched.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
 import { Dashboard } from "./features/dashboard/Dashboard";
@@ -84,14 +84,49 @@ export function App() {
         </div>
       ) : (
         mountedViews.map((v) => (
-          <div key={v} style={{ display: v === view ? "block" : "none", padding: 24 }}>
-            <Screen view={v} refreshKey={refreshKey} sleeves={sleeveList} />
-          </div>
+          <ScreenHost
+            key={v}
+            view={v}
+            active={v === view}
+            refreshKey={refreshKey}
+            sleeves={sleeveList}
+          />
         ))
       )}
     </AppShell>
   );
 }
+
+// Keep-alive host for one screen. Hidden screens are FROZEN: the memo comparator ignores
+// refreshKey/sleeves changes while `active` is false, so a live-event refresh re-renders (and
+// re-fetches in) only the visible screen — background screens doing loader round-trips and
+// Perspective/chart work on every WS burst was the source of scroll jank (§3.5 smoothness;
+// visual-gate feedback, 2026-07-02). A screen catches up automatically on re-activation: the
+// comparator sees `active` flip, re-renders with the CURRENT refreshKey, and its loaders re-run
+// if the key advanced while it was hidden.
+const ScreenHost = memo(
+  function ScreenHost({
+    view,
+    active,
+    refreshKey,
+    sleeves,
+  }: {
+    view: ScreenId;
+    active: boolean;
+    refreshKey: number;
+    sleeves: Sleeve[];
+  }) {
+    return (
+      <div style={{ display: active ? "block" : "none", padding: 24 }}>
+        <Screen view={view} refreshKey={refreshKey} sleeves={sleeves} />
+      </div>
+    );
+  },
+  (prev, next) =>
+    prev.view === next.view &&
+    prev.active === next.active &&
+    (next.active ? prev.refreshKey === next.refreshKey && prev.sleeves === next.sleeves : true),
+);
 
 function Screen({
   view,

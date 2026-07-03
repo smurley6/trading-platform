@@ -91,8 +91,9 @@ body {
 body {
   margin: 0;
   color: var(--tp-text-dim);
-  background: radial-gradient(1200px 600px at 50% -10%, #0f1420 0%, transparent 70%), var(--tp-bg);
-  background-attachment: fixed;
+  /* Flat ink per §3.3 (no gradients anywhere); the old fixed-attachment radial gradient was
+   * both off-spec and a scroll-repaint hazard. */
+  background: var(--bg-base, var(--tp-bg));
   font-family: var(--tp-font-sans);
   font-size: 14px;
   line-height: 1.5;

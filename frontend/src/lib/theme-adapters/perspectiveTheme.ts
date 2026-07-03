@@ -26,7 +26,9 @@ export const perspectiveCssVars: Record<string, string> = {
   "--rt-pos-cell--color": cssVars["--gain"],
   "--rt-neg-cell--color": cssVars["--loss"],
   "--interface-monospace--font-family": cssVars["--font-mono"],
-  "font-family": cssVars["--font-sans"],
+  // Plain (non-custom-property) keys must be camelCase: this object is spread into a React
+  // `style` prop (see StreamingTable.tsx), and React rejects kebab-case property names.
+  fontFamily: cssVars["--font-sans"],
   color: cssVars["--text-primary"],
 };
 
