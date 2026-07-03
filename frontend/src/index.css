@@ -67,6 +67,16 @@
   --salt-status-error-foreground: var(--loss, var(--tp-danger));
   --salt-status-warning-foreground: var(--warn, #e5a83b);
   --salt-status-success-foreground: var(--gain, var(--tp-ok));
+  /* Typography: Salt's stock theme names font families this app does not ship (its buttons were
+   * falling through to the browser serif default), and its action (button) text defaults to
+   * UPPERCASE with wide letter-spacing — off-register for this console (§3.2: Plex Sans
+   * 400/500/600, quiet instrument). Retarget the text characteristics at the §3 stacks. */
+  --salt-text-fontFamily: var(--font-sans, var(--tp-font-sans));
+  --salt-text-fontFamily-code: var(--font-mono, var(--tp-font-mono));
+  --salt-text-action-fontFamily: var(--font-sans, var(--tp-font-sans));
+  --salt-text-action-textTransform: none;
+  --salt-text-action-letterSpacing: 0.02em;
+  --salt-text-action-fontWeight: 500;
 }
 
 * {

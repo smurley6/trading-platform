@@ -4,8 +4,12 @@
 import "@finos/perspective-viewer";
 import "@finos/perspective-viewer-datagrid";
 import "@finos/perspective-viewer/dist/css/themes.css";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import { perspectiveClient } from "../lib/perspective";
+import {
+  perspectiveBaseTheme,
+  perspectiveCssVars,
+} from "../lib/theme-adapters/perspectiveTheme";
 
 // Minimal structural types for the bits of the Perspective API we touch — kept local so a
 // patch-level type change upstream doesn't break our build, and so the viewer's `any`-typed
@@ -44,7 +48,7 @@ export function StreamingTable({ data, config, height = 320 }: StreamingTablePro
         if (!tableRef.current) {
           tableRef.current = await worker.table(data);
           await viewer.load(tableRef.current);
-          if (config) await viewer.restore(config);
+          await viewer.restore({ theme: perspectiveBaseTheme, ...(config ?? {}) });
         } else {
           await tableRef.current.replace(data);
         }
@@ -70,7 +74,7 @@ export function StreamingTable({ data, config, height = 320 }: StreamingTablePro
       ref={(element) => {
         viewerRef.current = element;
       }}
-      style={{ height, width: "100%" }}
+      style={{ height, width: "100%", ...(perspectiveCssVars as CSSProperties) }}
     />
   );
 }

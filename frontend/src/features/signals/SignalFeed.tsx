@@ -108,7 +108,9 @@ interface SignalFeedProps {
 }
 
 export function SignalFeed({ refreshKey }: SignalFeedProps) {
-  const signals = useLoader(() => api.signalFeed(300), [refreshKey]);
+  // Keep the default window small enough to read at a glance (visual-gate feedback,
+  // 2026-07-02); the full filterable feed is the Phase C Signals rebuild (§5.3).
+  const signals = useLoader(() => api.signalFeed(100), [refreshKey]);
   const conviction = useLoader(() => api.conviction(), [refreshKey]);
   const [selected, setSelected] = useState<SignalFeedItem | null>(null);
 
