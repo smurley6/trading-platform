@@ -37,6 +37,11 @@ class Politician:
     # SYNTHETIC by default (fail-closed): the fictional seed roster stays synthetic; a real
     # congressional-roster adapter stamps REAL. A signal is only REAL if its politician is REAL.
     provenance: Provenance = Provenance.SYNTHETIC
+    # Optional given/preferred name distinct from the official first name (congress-legislators'
+    # `name.nickname` field, e.g. official "Richard" / nickname "Rick") — Task 07 name-matching
+    # fix (docs/RESEARCH-PLAN.md). ``None`` when the source has no nickname on file; matching
+    # treats it as an alternate acceptable first-name token, never a requirement.
+    nickname: str | None = None
 
     def __post_init__(self) -> None:
         if self.base_weight < 0:

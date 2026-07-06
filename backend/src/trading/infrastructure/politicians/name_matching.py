@@ -1,24 +1,34 @@
-"""Robust politician name matching for the news pipeline (FR-POL-1).
+"""Robust politician name matching for the news pipeline (FR-POL-1) and filer-string resolution
+(Task 07, docs/RESEARCH-PLAN.md).
 
-Identify which REAL member of Congress (out of ~540) a piece of free text refers to.
-The naive longest-name-first substring scan in
-:mod:`trading.infrastructure.politicians.repository` is too crude at that scale: bare
-surnames collide ("Johnson" appears many times in the roster *and* as an ordinary English
-word), producing false positives and arbitrary guesses.
+Identify which REAL member of Congress (out of ~540) a piece of text refers to. Two distinct
+matching problems live here, deliberately kept SEPARATE:
 
-This module is a PURE, deterministic replacement. It matches in two ways, from most to
-least specific:
+1. :func:`find_politician` — FREE TEXT (news articles, disclosed-trade filer names as they were
+   originally used). The naive longest-name-first substring scan in
+   :mod:`trading.infrastructure.politicians.repository` is too crude at ~540-member scale: bare
+   surnames collide ("Johnson" appears many times in the roster *and* as an ordinary English
+   word), producing false positives and arbitrary guesses. This function matches in two ways,
+   from most to least specific:
 
-1. **Full name** — the member's official full name on word boundaries, case-insensitively
-   (e.g. ``"Elizabeth Warren"``).
-2. **Honorific + surname** — an honorific (``Sen.``/``Senator``/``Rep.``/
-   ``Representative``/``Congressman``/``Congresswoman``/``Congressmember``) immediately
-   followed by a member's surname, but ONLY when that surname is UNAMBIGUOUS in the roster.
+   * **Full name** — the member's official full name on word boundaries, case-insensitively.
+   * **Honorific + surname** — an honorific immediately followed by a member's surname, but ONLY
+     when that surname is UNAMBIGUOUS in the roster.
 
-A bare surname with neither an honorific nor a first name never matches, so a common word
-that happens to equal a surname (e.g. "the long johnson rod") is ignored. When several
-candidates match, the longest (most word tokens) wins; ties break deterministically on a
-stable sort key so identical input always yields identical output.
+   A bare surname with neither an honorific nor a first name never matches. When several
+   candidates match, the longest (most word tokens) wins; ties break deterministically.
+
+2. :func:`resolve_filer` — STRUCTURED FILER STRINGS from the House Clerk's disclosure index
+   (``"Hon. Richard W. Allen"``, ``"Rob Bresnahan Jr"``, ``"Marjorie Taylor Mrs Greene"``, ...).
+   These are short "Prefix First [Middle] Last [Suffix]"-shaped strings, not prose, so a
+   different, PRECISION-FIRST algorithm applies: normalize both the filer string and every
+   roster name (Unicode NFKD accent stripping, suffix tolerance, courtesy-title stripping
+   anywhere in the string), then require the normalized (first OR nickname) token AND the
+   normalized last-name token to both be present, ignoring any middle tokens. A filer string
+   must resolve to EXACTLY ONE roster entry: zero or multiple surviving candidates is a
+   deliberate non-match (see :class:`UnmatchedReason`) — fuzzy/edit-distance matching is NOT
+   used here, because a false positive would attribute a non-member's PTR to a member, which is
+   worse than a miss.
 
 No I/O, no network, no mutation of inputs, full type annotations, no ``Any``.
 """
@@ -26,13 +36,17 @@ No I/O, no network, no mutation of inputs, full type annotations, no ``Any``.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import Literal
 
 from trading.domain.politicians import Politician
 
-# Honorifics that license a surname-only reference. Stored lowercased; a trailing period in
-# the source text is stripped before lookup, so "sen." and "sen" both resolve here.
+# Honorifics that license a surname-only reference in `find_politician`, or that may appear
+# anywhere in a `resolve_filer` filer string (stripped before matching). Stored lowercased; a
+# trailing period in the source text is stripped before lookup, so "sen."/"sen" and "hon."/"hon"
+# both resolve here.
 _HONORIFICS: frozenset[str] = frozenset(
     {
         "sen",
@@ -42,17 +56,43 @@ _HONORIFICS: frozenset[str] = frozenset(
         "congressman",
         "congresswoman",
         "congressmember",
+        "hon",
     }
 )
+
+# Name suffixes tolerated (with or without punctuation) in `resolve_filer` — never significant
+# for identity, so stripped from both roster names and filer strings before comparison.
+_SUFFIXES: frozenset[str] = frozenset({"jr", "sr", "ii", "iii", "iv"})
+
+# Courtesy titles that can appear ANYWHERE in a filer string (not just as a leading prefix, e.g.
+# the Clerk's "Marjorie Taylor Mrs Greene" embeds one mid-string) — stripped wherever they occur.
+_COURTESY_TITLES: frozenset[str] = frozenset({"mr", "mrs", "ms", "dr"})
+
+# Tokens that carry no identity information in a filer string: honorifics, courtesy titles, and
+# suffixes are all stripped the same way regardless of position.
+_FILER_NOISE_TOKENS: frozenset[str] = _HONORIFICS | _COURTESY_TITLES | _SUFFIXES
 
 # A token is a run of letters, digits, apostrophes or hyphens (so "O'Brien" / "Ortiz-Cruz"
 # stay intact). Surrounding punctuation/whitespace forms the word boundaries.
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'\-]*")
 
+UnmatchedReason = Literal["no_candidate", "ambiguous"]
+
+
+def _strip_accents(text: str) -> str:
+    """Unicode NFKD accent stripping: "Sánchez" -> "Sanchez" (Task 07)."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercased word tokens with trailing periods already excluded by the token regex."""
-    return [match.group(0).lower() for match in _TOKEN_RE.finditer(text)]
+    """Lowercased, accent-stripped word tokens with trailing periods excluded by the token regex.
+
+    Accents are stripped BEFORE tokenizing (not per-match) so an accented letter does not act as
+    a word-boundary character — e.g. "Sánchez" must tokenize as one token ("sanchez"), not split
+    into "s" / "nchez" at the "á".
+    """
+    return [match.group(0).lower() for match in _TOKEN_RE.finditer(_strip_accents(text))]
 
 
 def _name_tokens(name: str) -> tuple[str, ...]:
@@ -124,3 +164,87 @@ def find_politician(text: str, politicians: Sequence[Politician]) -> Politician 
     if not candidates:
         return None
     return min(candidates, key=lambda c: c[0])[1]
+
+
+def _filer_identity_tokens(text: str) -> tuple[str, ...]:
+    """Tokenize a filer/roster name, dropping honorifics/courtesy-titles/suffixes anywhere.
+
+    Accent-stripped and lowercased (via :func:`_tokenize`), then noise tokens are filtered out
+    regardless of position — a Clerk filer string can embed a courtesy title mid-string
+    ("Marjorie Taylor Mrs Greene"), not just as a leading prefix.
+    """
+    return tuple(token for token in _tokenize(text) if token not in _FILER_NOISE_TOKENS)
+
+
+class _RosterCandidate:
+    """A roster entry's normalized identity: acceptable first-name tokens + one last-name token."""
+
+    __slots__ = ("first_tokens", "last_token", "politician")
+
+    def __init__(
+        self, politician: Politician, first_tokens: frozenset[str], last_token: str
+    ) -> None:
+        self.politician = politician
+        self.first_tokens = first_tokens
+        self.last_token = last_token
+
+
+def _roster_candidate(politician: Politician) -> _RosterCandidate | None:
+    """Build a :class:`_RosterCandidate` from a roster entry's official name (+ nickname).
+
+    The LAST identity token of the normalized official name is treated as the surname; the
+    FIRST identity token is treated as the given name. Any tokens in between are middle
+    names/initials and are intentionally ignored (Task 07). The nickname (if present) is
+    normalized the same way and added as an additional acceptable "first name" token.
+    """
+    identity = _filer_identity_tokens(politician.name)
+    if not identity:
+        return None
+    first_tokens = {identity[0]}
+    if politician.nickname:
+        nickname_tokens = _filer_identity_tokens(politician.nickname)
+        if nickname_tokens:
+            # A nickname is itself a given name (e.g. "Rick"), never multi-token; use the
+            # whole normalized nickname as one more acceptable first-name token.
+            first_tokens.add(" ".join(nickname_tokens))
+    last_token = identity[-1]
+    return _RosterCandidate(politician, frozenset(first_tokens), last_token)
+
+
+def resolve_filer(
+    text: str, politicians: Sequence[Politician]
+) -> tuple[Politician | None, UnmatchedReason | None]:
+    """Resolve a House Clerk filer string to EXACTLY ONE roster entry, or refuse (Task 07).
+
+    Normalizes both ``text`` and every roster name/nickname (accent stripping, honorific /
+    courtesy-title / suffix removal anywhere in the string), then matches on normalized
+    ``(first OR nickname) + last``, ignoring any middle tokens. Returns
+    ``(politician, None)`` on exactly one surviving candidate, or ``(None, reason)`` where
+    ``reason`` is ``"no_candidate"`` (zero matches) or ``"ambiguous"`` (more than one distinct
+    politician survives normalization) — the caller (``house_disclosures.py``) increments an
+    ``unmatched_filers`` counter keyed by this reason.
+
+    Deliberately NOT fuzzy: no edit-distance/similarity scoring. A false positive would
+    attribute a non-member's PTR to the wrong member, which is worse than a miss.
+    """
+    filer_tokens = _filer_identity_tokens(text)
+    if len(filer_tokens) < 2:
+        return None, "no_candidate"
+    filer_first, filer_last = filer_tokens[0], filer_tokens[-1]
+
+    matches: dict[str, Politician] = {}
+    for politician in politicians:
+        candidate = _roster_candidate(politician)
+        if candidate is None:
+            continue
+        if candidate.last_token != filer_last:
+            continue
+        if filer_first not in candidate.first_tokens:
+            continue
+        matches[politician.id] = politician
+
+    if not matches:
+        return None, "no_candidate"
+    if len(matches) > 1:
+        return None, "ambiguous"
+    return next(iter(matches.values())), None

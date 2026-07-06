@@ -83,6 +83,18 @@ class _FakeHistoricalSource:
         return list(self._batch)
 
 
+class _FakeSummarizingHistoricalSource(_FakeHistoricalSource):
+    """A fake historical source that ALSO implements SummarizingHistoricalSource (Task 07),
+    exercising the job's generic isinstance-checked wiring independent of house_disclosures."""
+
+    def __init__(self, name: str, batch: Sequence[Signal], *, summary: dict[str, object]) -> None:
+        super().__init__(name, batch)
+        self._summary = summary
+
+    def last_run_summary(self) -> dict[str, object] | None:
+        return self._summary
+
+
 @dataclass
 class _FakeDeps:
     """The AppDeps surface the backfill job reads."""
@@ -191,6 +203,61 @@ async def test_confirm_records_events_and_user_action(
     assert action["source"] == "sec_form4"
     assert action["counts"] == {"fetched": 2, "new": 2, "duplicate": 0, "refused": 0}
     assert "recorded 2 new backfilled signal(s)" in capsys.readouterr().out
+
+
+async def test_summarizing_source_diagnostics_appear_in_report_and_user_action(
+    monkeypatch: pytest.MonkeyPatch, clock: FixedClock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A source implementing SummarizingHistoricalSource (Task 07) has its last_run_summary()
+    folded into both the printed report and the --confirm user.action event's
+    ``diagnostics`` field — generic job-level wiring, not house_disclosures-specific."""
+    summary = {
+        "signals": 1,
+        "unmatched_filers": {"no_candidate": 3, "ambiguous": 1},
+        "amount_parse_misses": 2,
+    }
+    source = _FakeSummarizingHistoricalSource(
+        "sec_form4", [_hist_signal(source_uid="u1")], summary=summary
+    )
+    store, seen, sources = _wiring(clock, source)
+    settings = Settings(_env_file=None, backfill_enabled=True)
+    _patch(monkeypatch, clock=clock, store=store, seen=seen, sources=sources, settings=settings)
+
+    rc = await backfill.run_backfill(
+        source_id="sec_form4",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 6, 1, tzinfo=UTC),
+        confirm=True,
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "amount_parse_misses" in out
+    actions = await _user_actions(store)
+    assert len(actions) == 1
+    assert actions[0]["diagnostics"] == summary
+
+
+async def test_non_summarizing_source_has_no_diagnostics_section(
+    monkeypatch: pytest.MonkeyPatch, clock: FixedClock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A source that does NOT implement SummarizingHistoricalSource (e.g. the plain fake used by
+    the other tests here) records an empty diagnostics field and prints no diagnostics block."""
+    source = _FakeHistoricalSource("sec_form4", [_hist_signal(source_uid="u1")])
+    store, seen, sources = _wiring(clock, source)
+    settings = Settings(_env_file=None, backfill_enabled=True)
+    _patch(monkeypatch, clock=clock, store=store, seen=seen, sources=sources, settings=settings)
+
+    rc = await backfill.run_backfill(
+        source_id="sec_form4",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2024, 6, 1, tzinfo=UTC),
+        confirm=True,
+    )
+
+    assert rc == 0
+    actions = await _user_actions(store)
+    assert actions[0]["diagnostics"] == {}
 
 
 async def test_confirm_lookback_guard_refuses_overlong_window(

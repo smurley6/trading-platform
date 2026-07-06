@@ -22,6 +22,10 @@ USAGE::
   * ``--no-filter``: disable a source's default volume filter (e.g. sec_form4's CIK filter to
     COMPANY_DIRECTORY issuers), if the source implements one (``FilterableHistoricalSource``).
     The active filter (or its absence) is recorded in the run's ``user.action`` ``filters`` field.
+  * A source that implements ``SummarizingHistoricalSource`` (Task 07, docs/RESEARCH-PLAN.md —
+    ``house_disclosures`` is the first) additionally reports its own diagnostic counters
+    (``unmatched_filers`` by reason, ``amount_parse_misses``) in both the printed summary and, on
+    ``--confirm``, the run's ``user.action`` event.
 
 Composition mirrors ``trading.jobs.cycle`` / ``trading.jobs.purge_synthetic``: build the same
 dependencies via the composition root, run, and ALWAYS tear down the async resources (disposing
@@ -32,7 +36,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -42,7 +46,10 @@ from trading.application.backfill_signals import (
     BackfillSignals,
     supported_sources,
 )
-from trading.application.ports.data_source import FilterableHistoricalSource
+from trading.application.ports.data_source import (
+    FilterableHistoricalSource,
+    SummarizingHistoricalSource,
+)
 from trading.config import Settings
 from trading.domain.events import DomainEvent, EventType
 from trading.interface.app import AppDeps
@@ -104,6 +111,18 @@ def _format_report(report: BackfillReport, *, dry_run: bool) -> str:
         lines.append(f"  committed: {'YES' if report.committed else 'NO (nothing new)'}")
         if report.correlation_id is not None:
             lines.append(f"  correlation_id: {report.correlation_id}")
+    return "\n".join(lines)
+
+
+def _format_summary(summary: Mapping[str, object]) -> str:
+    """Render a :class:`SummarizingHistoricalSource` diagnostic summary (Task 07).
+
+    Generic over whatever keys the source's ``last_run_summary()`` returns — this job does not
+    know source-specific counter names, it just prints them (``house_disclosures`` is the first
+    source to report ``unmatched_filers``/``amount_parse_misses``, see the module docstring)."""
+    lines = ["  diagnostics:"]
+    for key, value in summary.items():
+        lines.append(f"    {key}: {value}")
     return "\n".join(lines)
 
 
@@ -176,11 +195,23 @@ async def run_backfill(
             start=start, end=end, correlation_id=correlation_id, dry_run=not confirm
         )
 
+        # A source MAY additionally report source-specific diagnostic counters (Task 07,
+        # docs/RESEARCH-PLAN.md — house_disclosures' unmatched_filers/amount_parse_misses is the
+        # first). Checked via the runtime_checkable SummarizingHistoricalSource protocol, same
+        # isinstance pattern as the volume filter above; only set once fetch_historical has run
+        # (i.e. after backfill.execute()), so a dry-run's counters reflect this exact call.
+        summary: Mapping[str, object] | None = None
+        if isinstance(source, SummarizingHistoricalSource):
+            summary = source.last_run_summary()
+
         _emit("=== Backfill ===")
         _emit(f"mode: {'CONFIRM (writes events)' if confirm else 'DRY-RUN (no changes)'}")
         _emit(f"filter: {filter_description or '(none active)'}")
         _emit("")
         _emit(_format_report(report, dry_run=not confirm))
+        if summary is not None:
+            _emit("")
+            _emit(_format_summary(summary))
 
         if not confirm:
             _emit("")
@@ -205,6 +236,7 @@ async def run_backfill(
                         "refused": report.refused,
                     },
                     "filters": {"description": filter_description} if filter_description else {},
+                    "diagnostics": dict(summary) if summary is not None else {},
                 },
                 occurred_at=deps.clock.now(),
                 correlation_id=correlation_id,

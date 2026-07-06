@@ -23,6 +23,7 @@ import pytest
 
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
 from trading.config import Settings
+from trading.domain.events import EventType
 from trading.domain.politicians import DEFAULT_BASE_WEIGHTS, Politician, PoliticianRole
 from trading.domain.provenance import Provenance
 from trading.infrastructure.politicians.repository import StaticPoliticianRepository
@@ -273,6 +274,146 @@ async def test_two_same_ticker_same_day_rows_produce_two_read_model_rows(
     }
     # Identical ticker AND transaction date — precisely the fields the old id was built from.
     assert {s.raw_payload["transaction_date"] for s in signals} == {"2024-03-04"}
+
+
+# --- Per-run diagnostic summary surfaced through the job (Task 07, docs/RESEARCH-PLAN.md) ------
+
+
+async def test_dry_run_prints_diagnostic_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """house_disclosures implements SummarizingHistoricalSource, so a dry-run's printed report
+    includes its unmatched_filers/amount_parse_misses counters, not just fetched/new/duplicate."""
+    _install(monkeypatch)
+
+    rc = await backfill_job.run_backfill(
+        source_id="house_disclosures", start=_WINDOW_START, end=_WINDOW_END, confirm=False
+    )
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "diagnostics:" in out
+    assert "unmatched_filers" in out
+    assert "amount_parse_misses" in out
+
+
+async def test_confirm_records_diagnostics_in_user_action_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The --confirm run's user.action event carries the source's diagnostic counters, so the
+    run's precision loss is auditable from the event log, not just a point-in-time log line."""
+    captured = _install(monkeypatch)
+
+    rc = await backfill_job.run_backfill(
+        source_id="house_disclosures", start=_WINDOW_START, end=_WINDOW_END, confirm=True
+    )
+    assert rc == 0
+    deps = captured["deps"]
+
+    events = list(await deps.event_store.read_all())
+    user_actions = [e for e in events if e.event.event_type == EventType.USER_ACTION]
+    assert len(user_actions) == 1
+    payload = user_actions[0].event.payload
+    assert payload["action"] == "backfill"
+    diagnostics = payload["diagnostics"]
+    assert "unmatched_filers" in diagnostics
+    assert "amount_parse_misses" in diagnostics
+    assert isinstance(diagnostics["unmatched_filers"], dict)
+    assert "no_candidate" in diagnostics["unmatched_filers"]
+    assert "ambiguous" in diagnostics["unmatched_filers"]
+
+
+# --- Scope C verdict (Task 07, docs/RESEARCH-PLAN.md): roster-unmatched filings are NEVER -----
+# --- recorded in backfill_seen, so no clearing mechanism is needed before a post-fix re-run. ---
+
+
+async def _roster_missing_unresolved_member() -> PoliticianRepositoryPort:
+    """The SAME fixture roster as ``_fixture_historical_roster`` but WITHOUT the unresolved-
+    ticker fixture's member -- so DocID 20040001 is genuinely roster-unmatched (not merely an
+    unresolved-ticker case), the exact scenario the 291/890 corpus measurement hit."""
+    return StaticPoliticianRepository(
+        [
+            _politician(_SINGLE_TXN_MEMBER, "pol-1"),
+            _politician(_MULTI_TXN_MEMBER, "pol-2"),
+        ]
+    )
+
+
+def _install_missing_member(monkeypatch: pytest.MonkeyPatch) -> dict[str, AppDeps]:
+    """Like ``_install``, but the historical roster loader OMITS the unresolved-ticker fixture's
+    member entirely -- so DocID 20040001 is genuinely roster-unmatched (not merely an
+    unresolved-ticker case), the exact scenario the 291/890 corpus measurement hit."""
+    captured: dict[str, AppDeps] = {}
+
+    def build_once(settings: Settings) -> AppDeps:
+        if "deps" in captured:
+            return captured["deps"]
+        deps_ = build_dependencies(settings)
+        source = deps_.historical_sources["house_disclosures"]
+        source._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))  # type: ignore[attr-defined]
+        source._historical_politicians_loader = _roster_missing_unresolved_member  # type: ignore[attr-defined]
+        captured["deps"] = deps_
+        return deps_
+
+    monkeypatch.setattr(backfill_job, "Settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(backfill_job, "build_dependencies", build_once)
+    return captured
+
+
+async def test_roster_unmatched_filing_is_not_recorded_in_backfill_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proves the Scope C verdict empirically: BackfillSignals.mark() is only ever called on
+    signals it actually records (application/backfill_signals.py), and a roster-unmatched filer
+    never reaches Signal construction at all (HouseDisclosuresSource.fetch_historical skips it
+    before building one) -- so its DocID is absent from backfill_seen after a --confirm run."""
+    captured = _install_missing_member(monkeypatch)
+
+    rc = await backfill_job.run_backfill(
+        source_id="house_disclosures", start=_WINDOW_START, end=_WINDOW_END, confirm=True
+    )
+    assert rc == 0
+    deps = captured["deps"]
+
+    # The unmatched filer's DocID never produced a signal at all.
+    signals = list(await deps.read_model.all_signals())
+    assert all(s.raw_payload.get("doc_id") != _UNRESOLVED_DOC_ID for s in signals)
+
+    # And critically: NOTHING is recorded in backfill_seen for that DocID's row uid, so a
+    # post-fix re-run (once the roster resolves this filer) would NOT be blocked by dedupe.
+    assert deps.backfill_seen is not None
+    seen = await deps.backfill_seen.seen("house_disclosures", [f"{_UNRESOLVED_DOC_ID}:0"])
+    assert seen == set()
+
+
+async def test_post_fix_reroster_ingests_the_previously_unmatched_filing_with_no_extra_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Simulates the exact re-run scenario Scope C asks about: run once with a roster that
+    cannot resolve the filer (nothing recorded for it), then run again over the SAME window with
+    the fix in place (roster now resolves them) -- the filing is ingested with NO manual
+    backfill_seen clearing step, because it was never marked seen in the first place."""
+    captured = _install_missing_member(monkeypatch)
+
+    first_rc = await backfill_job.run_backfill(
+        source_id="house_disclosures", start=_WINDOW_START, end=_WINDOW_END, confirm=True
+    )
+    assert first_rc == 0
+    deps = captured["deps"]
+    signals_after_first = list(await deps.read_model.all_signals())
+    assert all(s.raw_payload.get("doc_id") != _UNRESOLVED_DOC_ID for s in signals_after_first)
+
+    # "Fix" the roster in place (as a post-fix redeploy would) -- NO backfill_seen mutation.
+    source = deps.historical_sources["house_disclosures"]
+    source._historical_politicians_loader = _fixture_historical_roster  # type: ignore[attr-defined]
+    source._historical_politicians_cache = None  # type: ignore[attr-defined]  # force reload
+
+    second_rc = await backfill_job.run_backfill(
+        source_id="house_disclosures", start=_WINDOW_START, end=_WINDOW_END, confirm=True
+    )
+    assert second_rc == 0
+    signals_after_second = list(await deps.read_model.all_signals())
+    assert any(s.raw_payload.get("doc_id") == _UNRESOLVED_DOC_ID for s in signals_after_second)
 
 
 async def test_rerun_is_idempotent_no_duplicate_signals(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -372,3 +372,106 @@ async def test_provenance_is_real_and_pit_confidence_exact(clock: FixedClock) ->
     assert signals
     assert all(s.provenance is Provenance.REAL for s in signals)
     assert all(s.pit_confidence == "exact" for s in signals)
+
+
+# --- Per-run summary counters: unmatched_filers (by reason), amount_parse_misses (Task 07) -----
+
+
+async def test_source_implements_summarizing_historical_source_protocol() -> None:
+    """``HouseDisclosuresSource`` is the first implementer of the optional
+    ``SummarizingHistoricalSource`` capability (Task 07, docs/RESEARCH-PLAN.md)."""
+    from trading.application.ports.data_source import SummarizingHistoricalSource
+
+    client = _client(_handler())
+    source = HouseDisclosuresSource(
+        client=client,
+        politicians=StaticPoliticianRepository(),
+        sector_map=StaticSectorMap(),
+        clock=FixedClock(datetime(2025, 12, 31, tzinfo=UTC)),
+    )
+    assert isinstance(source, SummarizingHistoricalSource)
+
+
+async def test_last_run_summary_is_none_before_any_fetch(clock: FixedClock) -> None:
+    source, _ = _source(_handler(), clock)
+    assert source.last_run_summary() is None
+
+
+async def test_last_run_summary_reports_unmatched_filers_by_reason(clock: FixedClock) -> None:
+    """A roster with an AMBIGUOUS entry (two distinct politicians sharing normalized identity
+    with the multi-txn filer "Richard W. Allen") plus a totally-unresolvable filer (the
+    unresolved-ticker fixture's "Retired Senior Member" absent from the roster) drives BOTH
+    unmatched_filers reasons in one run, asserted via the summary object the job/use case reads
+    (not just the log line)."""
+
+    async def ambiguous_roster() -> PoliticianRepositoryPort:
+        # Two distinct roster entries both normalize to first="richard", last="allen" (the
+        # middle initial "W." is an ignored middle token) -> the multi-txn filer "Hon. Richard
+        # W. Allen" is genuinely ambiguous. Aderholt (single-txn) still resolves normally. The
+        # unresolved-ticker fixture's member is entirely absent from this roster -> no_candidate.
+        return _combined_repo(
+            _SINGLE_TXN_MEMBER,
+            _MULTI_TXN_MEMBER,
+            "Richard Allen",
+        )
+
+    source, client = _source(_handler(), clock, historical_politicians=ambiguous_roster)
+    async with client:
+        signals = await source.fetch_historical(_WINDOW_START, _WINDOW_END)
+
+    # The ambiguous filer's PTR produced no signals at all.
+    assert all(s.raw_payload["doc_id"] != _MULTI_TXN_DOC_ID for s in signals)
+    assert all(s.raw_payload["doc_id"] != _UNRESOLVED_DOC_ID for s in signals)
+
+    summary = source.last_run_summary()
+    assert summary is not None
+    unmatched = summary["unmatched_filers"]
+    assert isinstance(unmatched, dict)
+    assert unmatched["ambiguous"] >= 1
+    assert unmatched["no_candidate"] >= 1
+
+
+async def test_last_run_summary_reports_amount_parse_misses(clock: FixedClock) -> None:
+    """The unresolved-ticker fixture PDF (``20040001.pdf``) has no recognizable amount bracket,
+    so it is a genuine amount-parse miss counted in the summary alongside the resolved fixtures'
+    correctly-parsed brackets."""
+    source, client = _source(_handler(), clock)
+    async with client:
+        await source.fetch_historical(_WINDOW_START, _WINDOW_END)
+
+    summary = source.last_run_summary()
+    assert summary is not None
+    assert isinstance(summary["amount_parse_misses"], int)
+    assert isinstance(summary["signals"], int)
+    assert isinstance(summary["unresolved_ticker"], int)
+    assert isinstance(summary["unparseable_pdfs"], int)
+    assert isinstance(summary["paper_filings_skipped"], int)
+
+
+async def test_last_run_summary_reflects_the_most_recent_call(clock: FixedClock) -> None:
+    """A second ``fetch_historical`` call over a narrower window (excluding the ambiguous-roster
+    filer entirely) replaces the summary, rather than accumulating across calls."""
+
+    async def empty_roster() -> PoliticianRepositoryPort:
+        return StaticPoliticianRepository()
+
+    source, client = _source(_handler(), clock, historical_politicians=empty_roster)
+    async with client:
+        await source.fetch_historical(_WINDOW_START, _WINDOW_END)
+        first_summary = source.last_run_summary()
+        assert first_summary is not None
+        first_unmatched = first_summary["unmatched_filers"]
+        assert isinstance(first_unmatched, dict)
+        assert first_unmatched["no_candidate"] >= 1
+
+        # A narrower window with no matching index entries at all -> zero unmatched this time.
+        await source.fetch_historical(
+            datetime(2023, 1, 1, tzinfo=UTC), datetime(2023, 12, 31, tzinfo=UTC)
+        )
+        second_summary = source.last_run_summary()
+        assert second_summary is not None
+        second_unmatched = second_summary["unmatched_filers"]
+        assert isinstance(second_unmatched, dict)
+        assert second_unmatched["no_candidate"] == 0
+        assert second_unmatched["ambiguous"] == 0
+        assert second_summary["signals"] == 0
