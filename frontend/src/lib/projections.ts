@@ -174,3 +174,73 @@ export function equitySeries(events: StoredEventDto[], sleeveId: string): Equity
   }
   return points;
 }
+
+/**
+ * Pool-level equity curve (Overview §5.1: "Equity curve … pool-level") — the shared capital pool
+ * is the SUM of every sleeve's equity (MEMORY.md §5.2: "one pool = the one Alpaca book"), and
+ * `portfolio.snapshot` events are recorded per-sleeve, so this sums each sleeve's latest-known
+ * equity as of every snapshot timestamp across all sleeves (a running "last value carried
+ * forward" per sleeve, summed at each distinct timestamp) rather than one sleeve's series alone.
+ */
+export function poolEquitySeries(events: StoredEventDto[]): EquityPoint[] {
+  const snapshots = events
+    .filter((e) => e.event_type === "portfolio.snapshot")
+    .map((e) => ({
+      sleeveId: str(e.payload.sleeve_id),
+      equity: Number(str(e.payload.equity, "0")),
+      time: new Date(e.occurred_at).getTime(),
+    }))
+    .filter((s) => s.sleeveId && Number.isFinite(s.equity) && Number.isFinite(s.time))
+    .sort((a, b) => a.time - b.time);
+
+  const latestBySleeve = new Map<string, number>();
+  const points: EquityPoint[] = [];
+  let lastTime = 0;
+  for (const s of snapshots) {
+    latestBySleeve.set(s.sleeveId, s.equity);
+    const total = [...latestBySleeve.values()].reduce((sum, v) => sum + v, 0);
+    let time = Math.floor(s.time / 1000);
+    if (time <= lastTime) time = lastTime + 1;
+    lastTime = time;
+    points.push({ time, value: total });
+  }
+  return points;
+}
+
+/** Largest peak-to-trough decline over an equity series, as a positive percentage — mirrors the
+ *  backend's pure `domain/metrics.py::max_drawdown_pct` exactly (same peak-tracking algorithm),
+ *  applied client-side to the pool equity curve since there is no live drawdown endpoint (only a
+ *  backtest-scoped one) and this needs zero backend change. */
+export function maxDrawdownPct(points: EquityPoint[]): number {
+  let peak: number | null = null;
+  let worst = 0;
+  for (const p of points) {
+    if (peak === null || p.value > peak) peak = p.value;
+    if (peak !== null && peak > 0) {
+      const drawdown = ((peak - p.value) / peak) * 100;
+      if (drawdown > worst) worst = drawdown;
+    }
+  }
+  return worst;
+}
+
+/** Day P&L: latest pool equity minus the last equity value recorded before local midnight today —
+ *  or the earliest point of the day if trading started after midnight. Zero when there's under
+ *  two points (nothing to diff against yet). */
+export function dayPnl(points: EquityPoint[]): number {
+  if (points.length < 2) return 0;
+  const latest = points[points.length - 1]!;
+  const startOfDay = new Date(latest.time * 1000);
+  startOfDay.setHours(0, 0, 0, 0);
+  const startOfDaySec = Math.floor(startOfDay.getTime() / 1000);
+
+  let baseline = points[0]!;
+  for (const p of points) {
+    if (p.time <= startOfDaySec) {
+      baseline = p;
+    } else {
+      break;
+    }
+  }
+  return latest.value - baseline.value;
+}

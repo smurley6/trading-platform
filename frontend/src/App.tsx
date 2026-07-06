@@ -4,11 +4,18 @@
 // internals unchanged in this phase — only the container/chrome/theming around them changes; the
 // old inline header/nav is fully replaced by AppShell, but the refreshKey/`/ws/events` mechanism
 // below is untouched.
+//
+// UI Phase B (docs/UI-DESIGN.md §5.1): the "dashboard" screen id/route (`/`) now renders the
+// rebuilt Overview (features/overview/Overview.tsx) instead of the old Dashboard — same
+// screen-id/route mapping (useHistoryRoute is unchanged), only the component swapped. Algorithms
+// and Markets keep their own routes/screens unchanged this phase (see MEMORY.md §8 for the
+// deferral — §2's "fold into Overview"/"demote to Ticker Pane" absorption is not yet a route
+// deletion).
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
-import { Dashboard } from "./features/dashboard/Dashboard";
+import { Overview } from "./features/overview/Overview";
 import { Markets } from "./features/markets/Markets";
 import { Proposals } from "./features/proposals/Proposals";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
@@ -139,7 +146,7 @@ function Screen({
 }) {
   switch (view) {
     case "dashboard":
-      return <Dashboard refreshKey={refreshKey} sleeves={sleeves} />;
+      return <Overview refreshKey={refreshKey} sleeves={sleeves} />;
     case "algorithms":
       return <Algorithms refreshKey={refreshKey} sleeves={sleeves} />;
     case "markets":

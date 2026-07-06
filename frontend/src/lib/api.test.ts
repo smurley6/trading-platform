@@ -90,6 +90,12 @@ describe("api request building", () => {
     expect(fetchMock.mock.calls[0]![1]?.method).toBe("POST");
   });
 
+  it("GETs the correlation-filtered events route (Chain Inspector)", async () => {
+    fetchMock.mockResolvedValue(okResponse([]));
+    await api.eventsByCorrelation("corr/1");
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/events?correlation_id=corr%2F1");
+  });
+
   it("includes the sleeve_id query when submitting signals with a sleeve", async () => {
     fetchMock.mockResolvedValue(okResponse({ correlation_id: "c", orders: [] }));
     await api.submitSignals(

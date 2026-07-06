@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   backtestCurve,
   blotterRows,
+  dayPnl,
   equitySeries,
   latestSnapshots,
+  maxDrawdownPct,
+  poolEquitySeries,
   positionRows,
   riskRows,
 } from "./projections";
+import type { EquityPoint } from "./projections";
 import type { BacktestPoint, StoredEventDto } from "./types";
 
 let seq = 0;
@@ -204,5 +208,89 @@ describe("backtestCurve", () => {
       { t: "2026-01-01T00:00:00Z", equity: 7 },
     ]);
     expect(curve.map((p) => p.value)).toEqual([7]);
+  });
+});
+
+describe("poolEquitySeries", () => {
+  it("sums each sleeve's latest-known equity at every distinct snapshot timestamp", () => {
+    const events = [
+      evt("portfolio.snapshot", { sleeve_id: "a", equity: "1000" }, "2026-01-01T00:00:00.000Z"),
+      evt("portfolio.snapshot", { sleeve_id: "b", equity: "500" }, "2026-01-01T00:00:05.000Z"),
+      evt("portfolio.snapshot", { sleeve_id: "a", equity: "1100" }, "2026-01-01T00:00:10.000Z"),
+    ];
+    const series = poolEquitySeries(events);
+    // t0: only "a" known -> 1000. t1: "a" 1000 + "b" 500 -> 1500. t2: "a" 1100 + "b" 500 -> 1600.
+    expect(series.map((p) => p.value)).toEqual([1000, 1500, 1600]);
+  });
+
+  it("ignores non-snapshot events and ties are made strictly increasing", () => {
+    const events = [
+      evt("order.filled", { sleeve_id: "a", symbol: "AAPL" }, "2026-01-01T00:00:00.000Z"),
+      evt("portfolio.snapshot", { sleeve_id: "a", equity: "10" }, "2026-01-01T00:00:00.000Z"),
+      evt("portfolio.snapshot", { sleeve_id: "b", equity: "20" }, "2026-01-01T00:00:00.000Z"),
+    ];
+    const series = poolEquitySeries(events);
+    expect(series.map((p) => p.value)).toEqual([10, 30]);
+    expect(series[1]!.time).toBe(series[0]!.time + 1);
+  });
+
+  it("returns [] when there are no snapshots", () => {
+    expect(poolEquitySeries([evt("order.filled", { sleeve_id: "a" })])).toEqual([]);
+  });
+});
+
+describe("maxDrawdownPct", () => {
+  it("returns 0 for a monotonically increasing series", () => {
+    const points: EquityPoint[] = [
+      { time: 1, value: 100 },
+      { time: 2, value: 110 },
+      { time: 3, value: 120 },
+    ];
+    expect(maxDrawdownPct(points)).toBe(0);
+  });
+
+  it("finds the largest peak-to-trough decline as a positive percentage", () => {
+    const points: EquityPoint[] = [
+      { time: 1, value: 100 },
+      { time: 2, value: 80 }, // -20% from peak 100
+      { time: 3, value: 150 }, // new peak
+      { time: 4, value: 120 }, // -20% from peak 150
+    ];
+    expect(maxDrawdownPct(points)).toBeCloseTo(20, 5);
+  });
+
+  it("returns 0 for an empty series", () => {
+    expect(maxDrawdownPct([])).toBe(0);
+  });
+});
+
+describe("dayPnl", () => {
+  it("returns 0 with fewer than two points", () => {
+    expect(dayPnl([])).toBe(0);
+    expect(dayPnl([{ time: 1, value: 100 }])).toBe(0);
+  });
+
+  it("diffs the latest value against the last value before local midnight today", () => {
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const beforeToday = Math.floor(midnight.getTime() / 1000) - 3600; // yesterday
+    const laterToday = Math.floor(midnight.getTime() / 1000) + 3600; // today
+    const points: EquityPoint[] = [
+      { time: beforeToday, value: 1000 },
+      { time: laterToday, value: 1050 },
+    ];
+    expect(dayPnl(points)).toBe(50);
+  });
+
+  it("falls back to the earliest point when trading only started after midnight", () => {
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    const t0 = Math.floor(midnight.getTime() / 1000) + 60;
+    const t1 = t0 + 3600;
+    const points: EquityPoint[] = [
+      { time: t0, value: 1000 },
+      { time: t1, value: 900 },
+    ];
+    expect(dayPnl(points)).toBe(-100);
   });
 });

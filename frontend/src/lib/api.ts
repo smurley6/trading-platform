@@ -59,6 +59,11 @@ export const api = {
   events: (limit = 500) => request<StoredEventDto[]>(`/events?limit=${limit}`),
   eventsByStream: (streamId: string) =>
     request<StoredEventDto[]>(`/events?stream_id=${encodeURIComponent(streamId)}`),
+  // Chain Inspector (docs/UI-DESIGN.md §6): the full correlation chain for one signal→...→fill
+  // lineage. Backend already supports this filter (interface/app.py `GET /events`) — no backend
+  // change needed for Phase B.
+  eventsByCorrelation: (correlationId: string) =>
+    request<StoredEventDto[]>(`/events?correlation_id=${encodeURIComponent(correlationId)}`),
 
   killSwitch: () => request<KillSwitchState>("/kill-switch"),
   setKillSwitch: (engaged: boolean) =>

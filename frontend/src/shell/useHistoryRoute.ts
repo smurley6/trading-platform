@@ -1,7 +1,10 @@
 // Minimal History-API hook mapping pathname <-> active screen — NO router dependency (§10 /
 // pre-resolved ambiguity #2: no router is approved for this phase). Handles browser back/forward
-// and lets screens deep-link via a plain URL. Query-param state (`/review?proposal=…`) is
-// explicitly OUT of scope for Phase A per the task spec — only the bare pathname is mapped.
+// and lets screens deep-link via a plain URL. Query-param state (`/review?proposal=…`) was OUT of
+// scope for Phase A; Phase B (docs/UI-DESIGN.md §2 Ticker Pane) needs exactly one query param —
+// `?ticker=LMT` — to survive reload, so `useTickerQueryParam` below adds that single case without
+// growing this into a general query-string router (`/review?proposal=…` is explicitly deferred to
+// Phase C per the task spec).
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -69,4 +72,42 @@ export function useHistoryRoute(): [ScreenId, (screen: ScreenId) => void] {
   }, []);
 
   return [screen, navigate];
+}
+
+/**
+ * Two-way binding between the `?ticker=` query param and the Ticker Pane's open/closed state
+ * (docs/UI-DESIGN.md §2: "Route-addressable as `?ticker=LMT` so deep links survive"). Reads the
+ * initial value from `window.location.search` on mount (so a deep link opens the pane on load),
+ * pushes a history entry when a ticker opens/changes/closes (so back/forward + reload all work),
+ * and stays in sync with external navigation via `popstate`. Deliberately scoped to just this one
+ * param — see the module docblock above for why a general query-string router is out of scope.
+ */
+export function useTickerQueryParam(): [string | null, (ticker: string | null) => void] {
+  const [ticker, setTickerState] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("ticker"),
+  );
+
+  useEffect(() => {
+    function onPopState(): void {
+      setTickerState(new URLSearchParams(window.location.search).get("ticker"));
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const setTicker = useCallback((next: string | null) => {
+    setTickerState((current) => {
+      if (current === next) return current;
+      const url = new URL(window.location.href);
+      if (next) {
+        url.searchParams.set("ticker", next);
+      } else {
+        url.searchParams.delete("ticker");
+      }
+      window.history.pushState(null, "", `${url.pathname}${url.search}`);
+      return next;
+    });
+  }, []);
+
+  return [ticker, setTicker];
 }

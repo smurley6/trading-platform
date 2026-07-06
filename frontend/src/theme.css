@@ -133,6 +133,152 @@
   transition: background-color var(--duration-overlay) var(--ease-out);
 }
 
+/* §3 AG Grid adapter consumer rule (lib/theme-adapters/agGridTheme.ts's `agGridCssVars`) — the
+   "`.ag-theme-tp` rule does not exist yet" placeholder from Phase A now lands here, Phase B's
+   first §3-themed grid (Overview positions/sleeves). Values are all `var(--...)`, so this class
+   itself carries zero literal colors/sizes — it only routes tokens.ts's cssVars into AG Grid's
+   own `--ag-*` custom-property theming surface (AG Grid 32.x predates the v33 JS Theming API). */
+.ag-theme-tp {
+  --ag-background-color: transparent;
+  --ag-foreground-color: var(--text-primary);
+  --ag-header-background-color: var(--bg-surface);
+  --ag-header-foreground-color: var(--text-secondary);
+  --ag-odd-row-background-color: var(--bg-surface);
+  --ag-row-hover-color: var(--bg-raised);
+  --ag-selected-row-background-color: var(--bg-raised);
+  --ag-border-color: var(--border);
+  --ag-row-border-color: var(--border);
+  --ag-header-column-separator-color: transparent;
+  --ag-input-focus-border-color: var(--accent);
+  --ag-range-selection-border-color: var(--accent);
+  --ag-font-family: var(--font-sans);
+  --ag-font-size: var(--font-size-default);
+  --ag-row-height: var(--row-height-dense);
+  --ag-header-height: var(--row-height-dense);
+  --ag-borders: none;
+  --ag-header-column-resize-handle-color: var(--border);
+  --ag-wrapper-border-radius: var(--radius-pane);
+}
+.ag-theme-tp .ag-header-cell-text {
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+/* §3.2: every numeric cell is mono/tabular. */
+.ag-theme-tp .ag-cell {
+  font-variant-numeric: tabular-nums;
+}
+.ag-theme-tp .ag-cell.ag-right-aligned-cell {
+  font-family: var(--font-mono);
+}
+
+/* §3.4 grid cell flash on live update: background pulses --gain/--loss at 12% alpha, 400ms decay.
+   Applied via a transient class (added then removed after the animation) rather than a
+   long-lived one, so repeated flashes on the same cell always restart cleanly. Compositor-only
+   (background-color is a paint, not layout — the only one of the three sanctioned effects that
+   isn't transform/opacity, called out explicitly by §3.4 itself as "background pulses"). */
+.tp-cell-flash-gain {
+  animation: tp-cell-flash-gain var(--duration-flash) var(--ease-out);
+}
+.tp-cell-flash-loss {
+  animation: tp-cell-flash-loss var(--duration-flash) var(--ease-out);
+}
+@keyframes tp-cell-flash-gain {
+  from {
+    background-color: color-mix(in srgb, var(--gain) 12%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+@keyframes tp-cell-flash-loss {
+  from {
+    background-color: color-mix(in srgb, var(--loss) 12%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+/* Phase B event ticker (Overview, §5.1 / §3.4 "event-ticker row insert — 150ms slide") —
+   compositor-only translate+fade so inserting a new row at 24px row height never reflows
+   siblings mid-animation. */
+.tp-ticker-row-enter {
+  animation: tp-ticker-row-enter var(--duration-row) var(--ease-out);
+}
+@keyframes tp-ticker-row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* shell/SlideOver.tsx (Phase B, §3/§6) — the shared right slide-over surface for Chain Inspector
+   and Ticker Pane. Fixed full-height right pane; enter is 120ms translate+fade (§3.4 "overlay
+   enter"), compositor-only (§3.5: transform/opacity only, never width/height/left/right — the
+   pane's width is a fixed CSS value, not animated). Stacking depth cue (§3.5 "Overlay behavior":
+   opening a second slide-over pushes the first left 8px at 60% opacity) is driven by the
+   `data-depth` attribute SlideOver sets from useSlideOverDepth. */
+.tp-slideover-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+}
+.tp-slideover-content {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100vh;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--overlay-shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: tp-slideover-enter var(--duration-overlay) var(--ease-out);
+  transition:
+    transform var(--duration-overlay) var(--ease-out),
+    opacity var(--duration-overlay) var(--ease-out);
+}
+@keyframes tp-slideover-enter {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+/* Pushed-back layer: depth 0 is frontmost (no push); depth >= 1 shifts left 8px at 60% opacity,
+   same amount regardless of how many layers are further back still (§3.5 says "8px", not
+   cumulative — two stacked panes is the max this app ever opens at once). */
+.tp-slideover-content[data-depth="0"] {
+  transform: translateX(0);
+  opacity: 1;
+}
+.tp-slideover-content[data-depth]:not([data-depth="0"]) {
+  transform: translateX(-8px);
+  opacity: 0.6;
+}
+
+.tp-slideover-title {
+  margin: 0;
+  padding: var(--space-unit) calc(var(--space-unit) * 4);
+  padding-top: calc(var(--space-unit) * 4);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-pane-title);
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: calc(var(--space-unit) * 3);
+}
+
 /* shell/NavRail.tsx active-item indicator — active = --accent left rule (§4), transform/opacity
    only per §3.5 (compositor-only transitions; never animates width/height/top/left). */
 .tp-nav-item {
