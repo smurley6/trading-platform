@@ -10,6 +10,12 @@ folded from events on append — it is populated by an explicit labeler run and 
 re-running the labeler. ``replace_run`` gives rebuild semantics: a rerun of a given
 ``label_run_id`` deletes that run's rows first, then writes the fresh batch, so re-running never
 duplicates (each run id is self-cleaning).
+
+``latest_run_id``/``labels_for_run`` (Task 05, docs/RESEARCH-PLAN.md §2-§3) are the minimal READ
+extension the diagnostic job needs; no migration was required (no `created_at` column exists on
+the `outcome_labels` table). "Latest" is defined by insertion order (the surrogate `id` primary
+key in Postgres; append order in memory) since a `label_run_id` is a UUID with no embedded
+ordering of its own.
 """
 
 from collections.abc import Sequence
@@ -62,4 +68,18 @@ class OutcomeLabelsPort(Protocol):
 
     async def count_for_run(self, label_run_id: str) -> int:
         """The number of label rows currently stored for ``label_run_id``."""
+        ...
+
+    async def latest_run_id(self) -> str | None:
+        """The most recently WRITTEN ``label_run_id`` (by insertion order), or ``None`` if empty.
+
+        "Most recent" is insertion order, not a timestamp column (there is none) and not the
+        `label_run_id` string's own ordering (it is an opaque UUID) — the last row written, by
+        whichever run wrote it last (a rerun's `replace_run` counts as a fresh write for this
+        purpose, since it deletes-then-reinserts that run's rows).
+        """
+        ...
+
+    async def labels_for_run(self, label_run_id: str) -> Sequence[OutcomeLabel]:
+        """Every label row stored for ``label_run_id`` (empty if the run id is unknown/empty)."""
         ...
