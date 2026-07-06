@@ -275,6 +275,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
             key_id=data_key_id,
             secret_key=data_secret_key,
             base_url=settings.alpaca_data_base_url,
+            clock=clock,
+            feed=settings.alpaca_data_feed,
         )
         live_aclosers.append(history_client.aclose)
         real_historical_prices = True

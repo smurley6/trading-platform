@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     alpaca_data_stream_url: str = "wss://stream.data.alpaca.markets/v2/iex"
     alpaca_data_key_id: str | None = None
     alpaca_data_secret_key: str | None = None
+    # Optional historical-bars feed override (Task 09), UNSET by default: the historical-bars
+    # adapter sends NO `feed` query param at all, letting Alpaca pick its default entitled feed.
+    # Do NOT default this to "iex" — consolidated-tape (SIP) bar quality must hold corpus-wide
+    # for the labeler/backtest; this is an escape hatch for a specific subscription/incident,
+    # not a standing choice. Set e.g. `ALPACA_DATA_FEED=iex` only if a real 403 requires it.
+    alpaca_data_feed: str | None = None
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.
     default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPCX"]
 
