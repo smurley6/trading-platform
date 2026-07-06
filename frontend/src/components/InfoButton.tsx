@@ -10,7 +10,7 @@
 // call sites (Backtest.tsx, RiskDashboard.tsx ×3) need no changes.
 
 import * as Popover from "@radix-ui/react-popover";
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { colors, shape, type as typeTokens } from "../lib/tokens";
 
 interface InfoButtonProps {
@@ -21,10 +21,29 @@ interface InfoButtonProps {
 }
 
 export function InfoButton({ title, children, align = "left" }: InfoButtonProps) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  // The popover is portalled to <body>, so the shell's keep-alive display:none screen hiding
+  // can't hide it — an open panel would float over whatever screen the operator navigates to.
+  // While open, watch the trigger: the moment it stops intersecting the viewport (its screen was
+  // hidden, or it scrolled fully out of view and the anchored panel would detach), close.
+  useEffect(() => {
+    if (!open) return;
+    const el = triggerRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => !entry.isIntersecting)) setOpen(false);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [open]);
+
   return (
-    <Popover.Root>
+    <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
         <button
+          ref={triggerRef}
           type="button"
           aria-label={`What does "${title}" do?`}
           className="tp-info-trigger"

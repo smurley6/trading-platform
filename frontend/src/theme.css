@@ -326,7 +326,9 @@
   color: var(--accent);
   border-color: var(--accent);
 }
-.tp-info-popover {
+/* Scoped to [data-state="open"]: an unconditional animation makes Radix Presence wait for an
+ * animationend that never re-fires on close, leaving the closed popover mounted and visible. */
+.tp-info-popover[data-state="open"] {
   animation: tp-info-popover-enter var(--duration-overlay) var(--ease-out);
 }
 @keyframes tp-info-popover-enter {
