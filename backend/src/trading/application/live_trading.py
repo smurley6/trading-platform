@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from trading.application.data_integrity import non_real_signals
+from trading.application.data_integrity import execution_barred
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.projections import signals_from_events
@@ -147,17 +147,19 @@ class AssessLiveReadiness:
         )
 
     async def _data_provenance_check(self) -> LiveCheck:
-        # Anti-placeholder: no SYNTHETIC/placeholder signal may taint the live decision path. An
-        # empty window passes (nothing fake present) — the trade-time guard still blocks any fake
-        # that arrives, and the startup preflight already requires real market data.
+        # Anti-placeholder: no SYNTHETIC/placeholder or BACKFILLED signal may taint the live
+        # decision path (the execution wall, data_integrity.execution_barred). An empty window
+        # passes (nothing barred present) — the trade-time guard still blocks any fake that
+        # arrives, and the startup preflight already requires real market data.
         events = await self._event_store.read_all()
         window = signals_from_events(events, now=self._clock.now(), window_days=self._window_days)
-        fake = non_real_signals(window)
+        fake = execution_barred(window)
         if fake:
             return LiveCheck(
                 "data_provenance_real",
                 False,
-                f"{len(fake)} SYNTHETIC/placeholder signal(s) in the window — refusing live",
+                f"{len(fake)} SYNTHETIC/placeholder/BACKFILLED signal(s) in the window — "
+                "refusing live",
             )
         detail = (
             f"all {len(window)} in-window signal(s) are REAL"
