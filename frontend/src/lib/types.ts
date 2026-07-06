@@ -14,13 +14,18 @@ export interface Sleeve {
   status: SleeveStatus;
 }
 
-export type Provenance = "REAL" | "SYNTHETIC";
+// Origin trust level (domain/provenance.py). BACKFILLED (research program, Tasks 01-04) is real
+// historical data reconstructed after the fact — badge in --chain violet outline; SYNTHETIC is
+// fabricated — magenta filled badge; REAL is the unmarked default (§3.1).
+export type Provenance = "REAL" | "BACKFILLED" | "SYNTHETIC";
 
 export interface SignalFeedItem {
   signal_id: string;
   occurred_at: string;
   source_type: SignalSourceType;
-  ticker: string;
+  // null = unresolved entity (backfilled signal whose asset name never matched a ticker) —
+  // rendered as a muted em-dash and FILTERABLE (§5.3: research data must be findable).
+  ticker: string | null;
   politician_id: string | null;
   sentiment: number;
   politician_weight: number;
@@ -270,4 +275,37 @@ export interface ProposalsResult {
 export interface ProposalsExecuteResult {
   correlation_id: string;
   orders: OrderDto[];
+}
+
+// Read-only risk pre-check (GET /risk/precheck, UI Phase C §5.2) — mirrors RiskPrecheckOut /
+// RiskCheckOut in interface/schemas.py EXACTLY. Decimal fields arrive as strings (same
+// serialization as /capital). `enabled: false` (empty checks) = the pre-check is not configured
+// on the backend — render a disabled state, like the other graceful feed shapes.
+export type RiskVerdict = "approved" | "modified" | "rejected";
+
+export interface RiskCheckDto {
+  /** Stable machine key: kill_switch | price | sleeve_equity | drawdown | trade_size | concentration | buying_power */
+  name: string;
+  /** Human label rendered in the evidence pane: "size", "concentration", "BP", ... */
+  label: string;
+  passed: boolean;
+  /** Configured limit as text; null for non-limit gates (kill switch / price). */
+  limit: string | null;
+  /** Current value going in (money/pct text); null when not applicable. */
+  current: string | null;
+  /** Value after this order; null when not applicable. */
+  projected: string | null;
+  reason: string;
+}
+
+export interface RiskPrecheckResult {
+  enabled: boolean;
+  symbol: string;
+  side: string;
+  requested_quantity: string;
+  approved_quantity: string;
+  /** RiskVerdict.value — empty string on the disabled shape. */
+  verdict: RiskVerdict | "";
+  reason: string;
+  checks: RiskCheckDto[];
 }

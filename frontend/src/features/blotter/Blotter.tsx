@@ -1,288 +1,356 @@
-// Order blotter and positions (FR-UI-3), both AG Grid surfaces projected from the event log.
-// Open orders carry an inline Cancel action wired to POST /orders/{client_order_id}/cancel; the
-// cancel is optimistic (the row flips to "canceling…" immediately) and the live event stream
-// drives the authoritative refresh once the backend records the cancellation.
+// Blotter `/blotter` (UI Phase C, docs/UI-DESIGN.md §5.4): a single newest-first AG Grid on the
+// §3 `.ag-theme-tp` adapter — submitted ts · sleeve · ticker · side (order-side colored) · qty ·
+// type · lifecycle-colored status chip · fill price · client order id (mono, click-copies with a
+// toast). Row click → Chain Inspector on the order's correlation id (the full §6 lifecycle).
+// `x` on the focused cancelable row → cancel with the §7 single-confirm keystroke, optimistic
+// (the chip flips to canceling immediately; the live event stream is authoritative).
+//
+// Projection + chip mapping live in orderLifecycle.ts (pure, tested). All visual values are §3
+// tokens; c/t hotkeys ride the shared focused-row model (shell/useScreenOverlays.ts).
 
-import type { ColDef, ICellRendererParams } from "ag-grid-community";
-import { Button, StackLayout } from "@salt-ds/core";
-import { useState } from "react";
-import { DataGrid } from "../../components/DataGrid";
-import {
-  Badge,
-  EmptyState,
-  LoadingState,
-  MetricTile,
-  Panel,
-  SectionHeader,
-} from "../../components/ui";
+import type { CellFocusedEvent, ColDef, ICellRendererParams } from "ag-grid-community";
+import { AgGridReact } from "ag-grid-react";
+import "ag-grid-community/styles/ag-grid.css";
+import "ag-grid-community/styles/ag-theme-quartz.css";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useHotkeys } from "react-hotkeys-hook";
+import { useToast } from "../../components/Toast";
 import { api } from "../../lib/api";
-import { formatNumber, formatTime } from "../../lib/format";
-import { blotterRows, positionRows } from "../../lib/projections";
-import type { BlotterRow, PositionRow } from "../../lib/projections";
-import { color, numeric, pillStyle, radius, space, text, transitions } from "../../lib/tokens";
+import { formatMoney, formatNumber, formatTime, formatTimeUtc } from "../../lib/format";
+import { colors, layout, shape, type as typeTokens, withAlpha } from "../../lib/tokens";
 import { useLoader } from "../../lib/useLoader";
-
-// Statuses that mean the order is done — no Cancel action and not part of "open orders".
-const TERMINAL_STATUSES = new Set([
-  "filled",
-  "canceled",
-  "cancelled",
-  "rejected",
-  "expired",
-  "submit_failed",
-  "done_for_day",
-]);
-
-function isOpen(row: BlotterRow): boolean {
-  return !TERMINAL_STATUSES.has(row.status.toLowerCase());
-}
-
-// Map a raw order status to a pill tone so the grid reads at a glance. Fills are "ok", hard
-// failures are "danger", cancellations/expiries are muted, and everything still working is accent.
-function statusTone(status: string): "accent" | "ok" | "danger" | "warn" | "muted" {
-  const s = status.toLowerCase();
-  if (s === "filled") return "ok";
-  if (s === "rejected" || s === "submit_failed") return "danger";
-  if (s === "partially_filled") return "warn";
-  if (TERMINAL_STATUSES.has(s)) return "muted";
-  return "accent";
-}
-
-// Side rendered as a tinted pill — buy green / sell red — matching the semantic P&L palette.
-const SideCell = (params: ICellRendererParams<BlotterRow>) => {
-  const side = (params.value as string | undefined) ?? params.data?.side;
-  if (!side) return null;
-  const tone =
-    side.toLowerCase() === "buy" ? "ok" : side.toLowerCase() === "sell" ? "danger" : "muted";
-  return <span style={{ ...pillStyle(tone), textTransform: "uppercase" }}>{side}</span>;
-};
-
-const positionColumns: ColDef<PositionRow>[] = [
-  { headerName: "Sleeve", field: "sleeve_id" },
-  { headerName: "Symbol", field: "symbol", maxWidth: 140 },
-  {
-    headerName: "Quantity",
-    field: "quantity",
-    type: "rightAlignedColumn",
-    maxWidth: 180,
-    valueFormatter: (p) => formatNumber(p.value as number, 4),
-    cellRenderer: (p: ICellRendererParams<PositionRow>) => {
-      const qty = p.value as number;
-      return (
-        <span style={{ ...numeric(), color: qty >= 0 ? color.ok : color.dangerText }}>
-          {formatNumber(qty, 4)}
-        </span>
-      );
-    },
-  },
-];
+import { ChainInspector } from "../../shell/ChainInspector";
+import { ConfirmChip } from "../../shell/ConfirmChip";
+import { SlideOverStackProvider } from "../../shell/SlideOverStackProvider";
+import { ShellEmptyState, SkeletonRows } from "../../shell/states";
+import { TickerPane } from "../../shell/TickerPane";
+import { useScreenOverlays } from "../../shell/useScreenOverlays";
+import { isCancelable, orderRows, statusChip, type OrderRow, type StatusTone } from "./orderLifecycle";
 
 interface BlotterProps {
+  active: boolean;
   refreshKey: number;
 }
 
-export function Blotter({ refreshKey }: BlotterProps) {
+export function Blotter({ active, refreshKey }: BlotterProps) {
+  const toast = useToast();
   const events = useLoader(() => api.events(1000), [refreshKey]);
-  const all = events.data ?? [];
+  const rows = useMemo(() => orderRows(events.data ?? []), [events.data]);
 
-  // Optimistic local state for in-flight cancels, keyed by client_order_id. Cleared whenever the
-  // event log reloads (refreshKey changes) so the authoritative projection wins.
-  const [canceling, setCanceling] = useState<Set<string>>(new Set());
-  const [cancelError, setCancelError] = useState<string | null>(null);
+  // ---- Optimistic cancels (cleared implicitly: once the cancel event lands, the projection
+  // reports a terminal status and the flag no longer matters; rollback on API failure).
+  const [canceling, setCanceling] = useState<ReadonlySet<string>>(new Set());
+  const cancel = useCallback(
+    (row: OrderRow) => {
+      setCanceling((prev) => new Set(prev).add(row.client_order_id));
+      api
+        .cancelOrder(row.client_order_id)
+        .then(() => {
+          toast.success(`Cancel requested for ${row.client_order_id}`);
+        })
+        .catch((err: unknown) => {
+          setCanceling((prev) => {
+            const next = new Set(prev);
+            next.delete(row.client_order_id);
+            return next;
+          });
+          toast.error(
+            `Cancel ${row.client_order_id} failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    },
+    [toast],
+  );
 
-  async function cancel(row: BlotterRow): Promise<void> {
-    setCancelError(null);
-    setCanceling((prev) => new Set(prev).add(row.client_order_id));
-    try {
-      await api.cancelOrder(row.client_order_id);
-      // The live event stream bumps refreshKey, which reloads the blotter and clears this row's
-      // optimistic flag below.
-    } catch (err) {
-      setCanceling((prev) => {
-        const next = new Set(prev);
-        next.delete(row.client_order_id);
-        return next;
-      });
-      setCancelError(err instanceof Error ? err.message : String(err));
-    }
-  }
+  // ---- Focused row (AG Grid cell focus) + shared overlays: click/c → chain, t → chart.
+  const [focusedRow, setFocusedRow] = useState<OrderRow | null>(null);
+  const focusedRowRef = useRef<OrderRow | null>(null);
+  focusedRowRef.current = focusedRow;
+  const overlays = useScreenOverlays(active, {
+    correlationId: () => focusedRowRef.current?.correlation_id ?? null,
+    ticker: () => focusedRowRef.current?.symbol ?? null,
+  });
 
-  const rows = blotterRows(all);
-  // Effective optimistic set: an order is only still "canceling" if the latest projection also
-  // shows it open. Once the cancel lands in the event log the order leaves the open set, so we
-  // drop its optimistic flag (derived during render — never mutate the state Set in place).
-  const stillOpen = new Set(rows.filter(isOpen).map((r) => r.client_order_id));
-  const effectiveCanceling = new Set([...canceling].filter((id) => stillOpen.has(id)));
+  const onCellFocused = useCallback((e: CellFocusedEvent<OrderRow>) => {
+    if (e.rowIndex == null) return;
+    const node = e.api.getDisplayedRowAtIndex(e.rowIndex);
+    setFocusedRow(node?.data ?? null);
+  }, []);
 
-  const StatusCell = (params: ICellRendererParams<BlotterRow>) => {
-    const row = params.data;
-    if (!row) return null;
-    const inFlight = effectiveCanceling.has(row.client_order_id);
-    const label = inFlight ? "canceling…" : row.status;
-    const tone = inFlight ? "warn" : statusTone(row.status);
-    return <Badge tone={tone}>{label}</Badge>;
-  };
+  // ---- `x` on the focused cancelable row → confirm chip (§5.4 / §7 single confirm).
+  const [pendingCancel, setPendingCancel] = useState<OrderRow | null>(null);
+  useHotkeys(
+    "x",
+    () => {
+      const row = focusedRowRef.current;
+      if (row && isCancelable(row) && !canceling.has(row.client_order_id)) {
+        setPendingCancel(row);
+      }
+    },
+    {
+      enabled: active && !overlays.overlayOpen && pendingCancel === null,
+      enableOnFormTags: false,
+    },
+    [active, overlays.overlayOpen, pendingCancel, canceling],
+  );
 
-  const CancelCell = (params: ICellRendererParams<BlotterRow>) => {
-    const row = params.data;
-    if (!row || !isOpen(row)) return null;
-    const inFlight = effectiveCanceling.has(row.client_order_id);
-    return (
-      <Button
-        disabled={inFlight}
-        onClick={() => void cancel(row)}
+  const copyOrderId = useCallback(
+    (id: string) => {
+      void navigator.clipboard
+        .writeText(id)
+        .then(() => toast.info(`Copied ${id}`))
+        .catch(() => toast.error(`Could not copy ${id}`));
+    },
+    [toast],
+  );
+
+  const columns = useMemo<ColDef<OrderRow>[]>(
+    () => buildColumns(canceling, copyOrderId),
+    [canceling, copyOrderId],
+  );
+
+  const initialLoading = events.loading && !events.data;
+
+  return (
+    <SlideOverStackProvider>
+      <div
         style={{
-          height: 28,
-          padding: "0 14px",
-          borderRadius: radius.md,
-          transition: transitions("background", "border-color"),
+          display: "flex",
+          flexDirection: "column",
+          gap: layout.x3,
+          height: `calc(100vh - var(--status-bar-height) - ${layout.x6 * 2}px)`,
+          minHeight: 0,
         }}
       >
-        {inFlight ? "Canceling…" : "Cancel"}
-      </Button>
+        {/* Header strip: count + the pending-cancel confirm chip (keyboard flow: x → Enter). */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: layout.x3,
+            flexShrink: 0,
+            minHeight: shape.rowHeightTicker,
+          }}
+        >
+          <span
+            className="tp-numeric"
+            style={{ color: colors.textSecondary, fontSize: typeTokens.scale.meta }}
+          >
+            {rows.length} order{rows.length === 1 ? "" : "s"} ·{" "}
+            {rows.filter(isCancelable).length} open
+          </span>
+          <span style={{ flex: 1 }} />
+          {pendingCancel && (
+            <ConfirmChip
+              label={`Cancel ${pendingCancel.symbol} ${pendingCancel.client_order_id}`}
+              onConfirm={() => {
+                const row = pendingCancel;
+                setPendingCancel(null);
+                if (row) cancel(row);
+              }}
+              onCancel={() => setPendingCancel(null)}
+            />
+          )}
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0 }}>
+          {initialLoading ? (
+            <SkeletonRows rows={3} />
+          ) : events.error ? (
+            <ShellEmptyState message={`Could not load orders: ${events.error}`} />
+          ) : rows.length === 0 ? (
+            <ShellEmptyState message="No orders yet — approvals and cycle trades will appear here as they execute." />
+          ) : (
+            <div className="ag-theme-tp" style={{ height: "100%", width: "100%" }}>
+              <AgGridReact<OrderRow>
+                rowData={rows}
+                columnDefs={columns}
+                defaultColDef={{ sortable: true, resizable: true, flex: 1 }}
+                getRowId={(p) => p.data.client_order_id}
+                rowHeight={shape.rowHeightDense}
+                headerHeight={shape.rowHeightDense}
+                onRowClicked={(e) => {
+                  // The coid cell's click-to-copy must not ALSO open the Chain Inspector. AG
+                  // Grid's own row listener fires before React's synthetic stopPropagation can,
+                  // so the guard has to live here, on the underlying DOM event's target.
+                  const target = e.event?.target as HTMLElement | null;
+                  if (target?.closest("[data-no-row-click]")) return;
+                  if (e.data) overlays.openChain(e.data.correlation_id);
+                }}
+                onCellFocused={onCellFocused}
+                animateRows
+              />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <ChainInspector
+        correlationId={overlays.correlationId}
+        onClose={overlays.closeChain}
+        returnFocusRef={overlays.lastRowRef}
+      />
+      <TickerPane
+        ticker={overlays.ticker}
+        onClose={overlays.closeTicker}
+        returnFocusRef={overlays.lastRowRef}
+      />
+    </SlideOverStackProvider>
+  );
+}
+
+// ---- Columns ------------------------------------------------------------------------------------
+
+const RIGHT_ALIGNED = "ag-right-aligned-cell";
+
+// §5.4 chip tones → §3.1 tokens. `lossOutline` = --loss border/text, transparent fill; the
+// filled/gain-loss chips get a low-alpha fill of the same reserved color.
+function chipColors(tone: StatusTone): { border: string; color: string; background: string } {
+  switch (tone) {
+    case "muted":
+      return { border: colors.border, color: colors.textMuted, background: "transparent" };
+    case "accent":
+      return {
+        border: colors.accent,
+        color: colors.accent,
+        background: withAlpha(colors.accent, 0.1),
+      };
+    case "gain":
+      return { border: colors.gain, color: colors.gain, background: withAlpha(colors.gain, 0.1) };
+    case "loss":
+      return { border: colors.loss, color: colors.loss, background: withAlpha(colors.loss, 0.1) };
+    case "lossOutline":
+      return { border: colors.loss, color: colors.loss, background: "transparent" };
+  }
+}
+
+function buildColumns(
+  canceling: ReadonlySet<string>,
+  copyOrderId: (id: string) => void,
+): ColDef<OrderRow>[] {
+  const StatusCell = (params: ICellRendererParams<OrderRow>) => {
+    const row = params.data;
+    if (!row) return null;
+    const inFlight = canceling.has(row.client_order_id) && isCancelable(row);
+    const chip = statusChip(row.status, row.side);
+    const palette = chipColors(inFlight ? "muted" : chip.tone);
+    return (
+      <span
+        style={{
+          border: `1px solid ${palette.border}`,
+          borderRadius: shape.radiusBadge,
+          padding: `0 ${layout.x1}px`,
+          fontFamily: "var(--font-sans)",
+          fontSize: typeTokens.scale.meta,
+          fontWeight: 600,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+          color: palette.color,
+          background: palette.background,
+        }}
+      >
+        {inFlight ? "canceling…" : chip.label}
+      </span>
     );
   };
 
-  const orderColumns: ColDef<BlotterRow>[] = [
-    {
-      headerName: "Time",
-      field: "occurred_at",
-      maxWidth: 130,
-      valueFormatter: (p) => formatTime(p.value as string),
-    },
-    { headerName: "Sleeve", field: "sleeve_id" },
-    { headerName: "Symbol", field: "symbol", maxWidth: 110 },
-    { headerName: "Side", field: "side", maxWidth: 110, cellRenderer: SideCell },
-    { headerName: "Qty", field: "quantity", maxWidth: 110, type: "rightAlignedColumn" },
-    {
-      headerName: "Status",
-      field: "status",
-      maxWidth: 170,
-      cellRenderer: StatusCell,
-      valueFormatter: (p) =>
-        p.data && effectiveCanceling.has(p.data.client_order_id)
-          ? "canceling…"
-          : (p.value as string),
-    },
-    { headerName: "Broker ID", field: "broker_order_id" },
-    {
-      headerName: "",
-      colId: "actions",
-      maxWidth: 130,
-      sortable: false,
-      filter: false,
-      cellRenderer: CancelCell,
-    },
-  ];
-
-  const positions = positionRows(all);
-  // First-load only: show a spinner while the very first events request is in flight. On
-  // refresh (data already present) the grids stay put rather than flashing the spinner.
-  const initialLoading = events.loading && !events.data;
-  const loadError = events.error;
-
-  // Summary metrics — derived from the current projection for the KPI strip.
-  const openCount = rows.filter(isOpen).length;
-  const filledCount = rows.filter((r) => r.status.toLowerCase() === "filled").length;
-  const rejectedCount = rows.filter((r) =>
-    ["rejected", "submit_failed"].includes(r.status.toLowerCase()),
-  ).length;
-
-  return (
-    <StackLayout gap={2}>
-      <div
+  const CoidCell = (params: ICellRendererParams<OrderRow, string>) => {
+    const id = params.value;
+    if (!id) return null;
+    return (
+      <button
+        type="button"
+        title={`${id} — click to copy`}
+        data-no-row-click // consumed by onRowClicked's guard (see grid props)
+        onClick={() => copyOrderId(id)}
+        className="tp-numeric"
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-          gap: space.lg,
+          cursor: "copy",
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          color: colors.textSecondary,
+          fontSize: typeTokens.scale.body,
+          maxWidth: "100%",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
         }}
       >
-        <MetricTile
-          label="Open Orders"
-          value={openCount}
-          tone="accent"
-          hint="Working / cancelable"
-        />
-        <MetricTile label="Filled" value={filledCount} tone="ok" hint="Completed today" />
-        <MetricTile
-          label="Rejected"
-          value={rejectedCount}
-          tone={rejectedCount > 0 ? "danger" : "neutral"}
-          hint="Rejected / failed"
-        />
-        <MetricTile label="Positions" value={positions.length} hint="Sleeve × symbol" />
-      </div>
+        {id}
+      </button>
+    );
+  };
 
-      <Panel>
-        <SectionHeader
-          eyebrow="Live"
-          title="Positions"
-          caption="Net open quantity per sleeve and symbol"
-          actions={
-            positions.length > 0 ? (
-              <Badge tone="muted">
-                {positions.length} {positions.length === 1 ? "row" : "rows"}
-              </Badge>
-            ) : undefined
-          }
-        />
-        {initialLoading ? (
-          <LoadingState label="Loading positions…" />
-        ) : loadError ? (
-          <EmptyState title="Couldn't load positions" message={loadError} icon="⚠" />
-        ) : positions.length > 0 ? (
-          <DataGrid<PositionRow>
-            rows={positions}
-            columns={positionColumns}
-            getRowId={(r) => `${r.sleeve_id}|${r.symbol}`}
-            height={240}
-          />
-        ) : (
-          <EmptyState
-            title="No open positions"
-            message="Fills will appear here as orders execute."
-            icon="◇"
-          />
-        )}
-      </Panel>
-
-      <Panel>
-        <SectionHeader
-          eyebrow="Order flow"
-          title="Order blotter"
-          caption="Every order from the event log — open orders can be canceled inline"
-          actions={
-            <div style={{ display: "flex", alignItems: "center", gap: space.sm }}>
-              {cancelError && (
-                <span style={{ ...text.caption, color: color.dangerText }}>{cancelError}</span>
-              )}
-              {rows.length > 0 && (
-                <Badge tone={openCount > 0 ? "accent" : "muted"} dot={openCount > 0}>
-                  {openCount} open
-                </Badge>
-              )}
-            </div>
-          }
-        />
-        {initialLoading ? (
-          <LoadingState label="Loading orders…" />
-        ) : loadError ? (
-          <EmptyState title="Couldn't load orders" message={loadError} icon="⚠" />
-        ) : rows.length > 0 ? (
-          <DataGrid<BlotterRow>
-            rows={rows}
-            columns={orderColumns}
-            getRowId={(r) => r.client_order_id}
-            height={420}
-          />
-        ) : (
-          <EmptyState
-            title="No orders yet"
-            message="Submit signals to generate order activity."
-            icon="◎"
-          />
-        )}
-      </Panel>
-    </StackLayout>
-  );
+  return [
+    {
+      headerName: "Submitted",
+      field: "occurred_at",
+      cellRenderer: (p: ICellRendererParams<OrderRow, string>) =>
+        p.value ? (
+          <span className="tp-numeric" title={formatTimeUtc(p.value)} style={{ color: colors.textSecondary }}>
+            {formatTime(p.value)}
+          </span>
+        ) : null,
+      minWidth: 150,
+      sort: "desc",
+    },
+    { headerName: "Sleeve", field: "sleeve_id", minWidth: 110 },
+    {
+      headerName: "Ticker",
+      field: "symbol",
+      cellRenderer: (p: ICellRendererParams<OrderRow, string>) => (
+        <span className="tp-numeric" style={{ fontWeight: 600, color: colors.textPrimary }}>
+          {p.value}
+        </span>
+      ),
+      maxWidth: 100,
+    },
+    {
+      headerName: "Side",
+      field: "side",
+      cellRenderer: (p: ICellRendererParams<OrderRow, string>) => {
+        const side = (p.value ?? "").toLowerCase();
+        if (!side) return null;
+        return (
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: typeTokens.scale.meta,
+              fontWeight: 600,
+              letterSpacing: "0.04em",
+              color: side === "sell" ? colors.loss : colors.gain,
+            }}
+          >
+            {side.toUpperCase()}
+          </span>
+        );
+      },
+      maxWidth: 90,
+    },
+    {
+      headerName: "Qty",
+      field: "quantity",
+      valueFormatter: (p) => formatNumber((p.value as string) ?? "", 4),
+      cellClass: RIGHT_ALIGNED,
+      headerClass: RIGHT_ALIGNED,
+      maxWidth: 100,
+    },
+    { headerName: "Type", field: "order_type", maxWidth: 100 },
+    { headerName: "Status", field: "status", cellRenderer: StatusCell, minWidth: 130 },
+    {
+      headerName: "Fill price",
+      field: "fill_price",
+      valueFormatter: (p) => (p.value ? formatMoney(p.value as string) : "—"),
+      cellClass: RIGHT_ALIGNED,
+      headerClass: RIGHT_ALIGNED,
+      maxWidth: 120,
+    },
+    {
+      headerName: "Client order id",
+      field: "client_order_id",
+      cellRenderer: CoidCell,
+      minWidth: 180,
+    },
+  ];
 }

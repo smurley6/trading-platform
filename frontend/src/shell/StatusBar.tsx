@@ -7,8 +7,9 @@
 // endpoints (pre-resolved ambiguity #3). Buying-power fetch failure renders the FeedWarningBanner
 // state convention (§7) instead of a blank/zeroed figure.
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { api } from "../lib/api";
+import { getResolutions, subscribeResolutions } from "../lib/proposalResolutions";
 import { colors, layout, shape, type as typeTokens, withAlpha } from "../lib/tokens";
 import type { Sleeve } from "../lib/types";
 import { useLoader } from "../lib/useLoader";
@@ -41,7 +42,13 @@ export function StatusBar({
 
   const live = sleeves.some((s) => s.mode === "live");
   const cycleMode = proposals.data?.mode ?? null;
-  const unreviewedCount = proposals.data?.proposals.length ?? 0;
+  // Unreviewed = the server's proposal set minus the symbols the operator already resolved this
+  // session (Review's optimistic approve/reject store) — the count decrements in the same frame
+  // as the queue row's exit animation (§5.2 "queue count in the status bar decrements live"); the
+  // live event stream then makes it authoritative on the next refresh.
+  const resolutions = useSyncExternalStore(subscribeResolutions, getResolutions);
+  const unreviewedCount =
+    proposals.data?.proposals.filter((p) => !resolutions.has(p.symbol)).length ?? 0;
   const buyingPower = capital.data?.enabled
     ? Number(capital.data.buying_power).toLocaleString(undefined, {
         style: "currency",

@@ -223,6 +223,25 @@
   }
 }
 
+/* Phase C Review queue (§5.2 "Approved/rejected rows drop out with the ticker-insert animation
+   reversed") — the SAME 150ms row-op duration and 4px translate as .tp-ticker-row-enter, run in
+   the reverse direction with the §3.5 exit curve (--ease-in; enters use --ease-out). Not a new
+   animation: it is sanctioned effect (3), reversed. `forwards` holds the row invisible for the
+   frame between animationend and React unmounting it. Compositor-only (opacity/transform). */
+.tp-row-exit {
+  animation: tp-row-exit var(--duration-row) var(--ease-in) forwards;
+}
+@keyframes tp-row-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
 /* shell/SlideOver.tsx (Phase B, §3/§6) — the shared right slide-over surface for Chain Inspector
    and Ticker Pane. Fixed full-height right pane; enter is 120ms translate+fade (§3.4 "overlay
    enter"), compositor-only (§3.5: transform/opacity only, never width/height/left/right — the

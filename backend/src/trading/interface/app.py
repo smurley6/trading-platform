@@ -35,11 +35,13 @@ from trading.application.ports.trade_updates import TradeUpdatesStreamPort
 from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch
+from trading.application.risk_precheck import PrecheckRisk
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
 from trading.application.sync_orders import SyncOrders
 from trading.domain.conviction import ConvictionThresholds, compute_conviction
 from trading.domain.events import DomainEvent, EventType
+from trading.domain.orders import OrderSide
 from trading.domain.positions import MarkedPosition, mark_positions
 from trading.domain.sleeves import TradingMode
 from trading.infrastructure.observability.metrics import MetricsRegistry
@@ -72,6 +74,7 @@ from trading.interface.schemas import (
     QuoteOut,
     QuotesOut,
     ReconcileOut,
+    RiskPrecheckOut,
     SignalFeedItem,
     SignalIn,
     SleeveModeIn,
@@ -113,6 +116,10 @@ class AppDeps:
     cycle_trade_mode: str = "auto"
     scan_proposals: ScanProposals | None = None
     execute_proposals: ExecuteProposals | None = None
+    # Read-only risk pre-check per sleeve (UI Phase C §5.2): runs RiskGate against current
+    # context so the Review screen shows the verdict before approval. Empty => endpoint reports
+    # the disabled shape (enabled:false), mirroring evaluators/scan_proposals default-safety.
+    precheckers: dict[str, PrecheckRisk] = field(default_factory=dict)
     backtest_runner: Callable[[], Awaitable[BacktestResult]] | None = None
     assess_readiness: AssessLiveReadiness | None = None
     request_live: RequestLiveTrading | None = None
@@ -332,6 +339,32 @@ def create_app(deps: AppDeps) -> FastAPI:
             correlation_id=result.correlation_id,
             orders=[OrderOut.from_broker(o) for o in result.orders],
         )
+
+    @app.get("/risk/precheck", response_model=RiskPrecheckOut)
+    async def risk_precheck(
+        symbol: Annotated[str, Query()],
+        side: Annotated[str, Query()],
+        quantity: Annotated[Decimal, Query(gt=0)],
+        sleeve_id: Annotated[str | None, Query()] = None,
+    ) -> RiskPrecheckOut:
+        # Read-only: runs RiskGate against the current account/market context so the Review
+        # screen (§5.2) can show the verdict + per-check breakdown BEFORE approval. Writes no
+        # events, mutates no state. GET => no auth dependency (reads stay open).
+        if sleeve_id is not None:
+            _require_sleeve(deps, sleeve_id)
+        target = sleeve_id or deps.default_sleeve_id
+        checker = deps.precheckers.get(target)
+        if checker is None:
+            # Graceful disabled shape (like /capital), so the frontend renders unconditionally.
+            return RiskPrecheckOut.disabled()
+        try:
+            order_side = OrderSide(side)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"invalid side '{side}' (expected 'buy' or 'sell')"
+            ) from exc
+        result = await checker.execute(side=order_side, quantity=quantity, symbol=symbol)
+        return RiskPrecheckOut.from_result(result)
 
     @app.get("/quotes", response_model=QuotesOut)
     async def quotes(symbols: Annotated[str | None, Query()] = None) -> QuotesOut:

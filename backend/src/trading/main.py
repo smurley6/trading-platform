@@ -33,6 +33,7 @@ from trading.application.ports.trade_updates import TradeUpdate, TradeUpdatesStr
 from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
+from trading.application.risk_precheck import PrecheckRisk
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
 from trading.application.sync_orders import SyncOrders
 from trading.config import Settings
@@ -336,6 +337,10 @@ def build_dependencies(settings: Settings) -> AppDeps:
     evaluators: dict[str, EvaluateSignals] = {}
     order_syncs_by_id: dict[str, SyncOrders] = {}  # per-sleeve: ingest async broker fills
     brokers_by_id: dict[str, BrokerPort] = {}  # per-sleeve routing broker, for manual cancel
+    # Read-only risk pre-check per sleeve (UI Phase C §5.2): reuses the SAME per-sleeve router
+    # broker + shared risk_gate/risk_limits/market_data/kill_switch as the evaluator, so the
+    # Review screen's pre-check evaluates against the same context the live cycle would.
+    precheckers: dict[str, PrecheckRisk] = {}
     political_evaluator: EvaluateSignals | None = None
     for sleeve_id, _strategy_id, strategy in sleeve_specs:
         sleeve = registry.get(sleeve_id).sleeve
@@ -360,6 +365,13 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
+        precheckers[sleeve_id] = PrecheckRisk(
+            risk_gate=risk_gate,
+            risk_limits=risk_limits,
+            broker=router,
+            market_data=market_data,
+            kill_switch=kill_switch,
+        )
         # Order-sync stays per-sleeve: each SyncOrders acts ONLY on client_order_ids in its own
         # log, so polling the shared book never cross-imports another algo's fills (FR-REC).
         order_syncs_by_id[sleeve_id] = SyncOrders(
@@ -564,6 +576,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         ],
         scan_proposals=scan_proposals,
         execute_proposals=execute_proposals,
+        precheckers=precheckers,
         backtest_runner=run_backtest,
         assess_readiness=assess_readiness,
         request_live=request_live,

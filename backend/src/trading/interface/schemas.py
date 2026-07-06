@@ -15,6 +15,7 @@ from trading.application.ports.market_data import Quote
 from trading.application.ports.read_model import SignalRecord
 from trading.application.proposals import PredictedCandidate, ProposalCandidate
 from trading.application.reconcile import ReconciliationReport
+from trading.application.risk_precheck import RiskPrecheckResult
 from trading.application.sleeve_registry import SleeveState
 from trading.application.sync_orders import SyncReport
 from trading.domain.events import StoredEvent
@@ -345,6 +346,70 @@ class LiveReadinessOut(BaseModel):
             checks=[
                 LiveCheckOut(name=c.name, passed=c.passed, detail=c.detail) for c in report.checks
             ],
+        )
+
+
+class RiskCheckOut(BaseModel):
+    # One named risk gate's outcome, iterated by §5.2's evidence pane to render
+    # "RISK PRE-CHECK ✓ size ✓ concentration ✓ BP" (label + passed) with limit/current/
+    # projected/reason available on hover or expand.
+    name: str  # stable machine key: kill_switch|price|sleeve_equity|drawdown|trade_size|...
+    label: str  # human label rendered in the evidence pane: "size", "concentration", "BP", ...
+    passed: bool
+    limit: str | None  # configured limit as text; None for non-limit gates (kill switch/price)
+    current: str | None  # current value going in (money/pct text); None when not applicable
+    projected: str | None  # value after this order; None when not applicable
+    reason: str  # human sentence
+
+
+class RiskPrecheckOut(BaseModel):
+    # Read-only risk pre-check for a single prospective order (§5.2). `enabled` is False (with an
+    # empty checks list) when the pre-check is not configured, so the SPA renders unconditionally
+    # exactly like CapitalOut's disabled shape.
+    enabled: bool
+    symbol: str
+    side: str
+    requested_quantity: Decimal
+    approved_quantity: Decimal
+    verdict: str  # RiskVerdict.value: approved|modified|rejected
+    reason: str
+    checks: list[RiskCheckOut]
+
+    @classmethod
+    def from_result(cls, result: RiskPrecheckResult) -> "RiskPrecheckOut":
+        return cls(
+            enabled=True,
+            symbol=result.symbol,
+            side=result.side,
+            requested_quantity=result.requested_quantity,
+            approved_quantity=result.approved_quantity,
+            verdict=result.verdict,
+            reason=result.reason,
+            checks=[
+                RiskCheckOut(
+                    name=c.name,
+                    label=c.label,
+                    passed=c.passed,
+                    limit=c.limit,
+                    current=c.current,
+                    projected=c.projected,
+                    reason=c.reason,
+                )
+                for c in result.checks
+            ],
+        )
+
+    @classmethod
+    def disabled(cls) -> "RiskPrecheckOut":
+        return cls(
+            enabled=False,
+            symbol="",
+            side="",
+            requested_quantity=Decimal("0"),
+            approved_quantity=Decimal("0"),
+            verdict="",
+            reason="",
+            checks=[],
         )
 
 

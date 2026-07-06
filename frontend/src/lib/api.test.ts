@@ -90,6 +90,36 @@ describe("api request building", () => {
     expect(fetchMock.mock.calls[0]![1]?.method).toBe("POST");
   });
 
+  it("GETs /risk/precheck with symbol/side/quantity (and optional sleeve_id) query params", async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        enabled: true,
+        symbol: "LMT",
+        side: "buy",
+        requested_quantity: "9",
+        approved_quantity: "9",
+        verdict: "approved",
+        reason: "ok",
+        checks: [],
+      }),
+    );
+    const result = await api.riskPrecheck({ symbol: "LMT", side: "buy", quantity: "9" });
+    expect(result.verdict).toBe("approved");
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/risk/precheck?symbol=LMT&side=buy&quantity=9");
+
+    await api.riskPrecheck({ symbol: "NOC", side: "sell", quantity: "2.5", sleeveId: "pol/1" });
+    expect(fetchMock.mock.calls[1]![0]).toBe(
+      "/api/risk/precheck?symbol=NOC&side=sell&quantity=2.5&sleeve_id=pol%2F1",
+    );
+  });
+
+  it("throws (does NOT resolve to a disabled shape) when /risk/precheck 404s pre-deploy", async () => {
+    fetchMock.mockResolvedValue(errorResponse(404, "Not Found"));
+    await expect(
+      api.riskPrecheck({ symbol: "LMT", side: "buy", quantity: "9" }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   it("GETs the correlation-filtered events route (Chain Inspector)", async () => {
     fetchMock.mockResolvedValue(okResponse([]));
     await api.eventsByCorrelation("corr/1");

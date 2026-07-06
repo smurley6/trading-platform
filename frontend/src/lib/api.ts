@@ -16,6 +16,7 @@ import type {
   ProposalsResult,
   QuotesResult,
   ReconcileReport,
+  RiskPrecheckResult,
   SignalFeedItem,
   SignalInput,
   Sleeve,
@@ -105,6 +106,21 @@ export const api = {
   // Returns 409 ("backtesting is not configured") when no historical market-data adapter is
   // wired; callers surface that as an explanatory empty state (see Backtest.tsx).
   backtest: () => request<BacktestResult>("/backtest", { method: "POST" }),
+
+  // Read-only risk pre-check for one prospective order (UI Phase C §5.2): runs the RiskGate
+  // against the current account/market context so the Review screen shows the verdict BEFORE
+  // approval. Writes no events. NOT wrapped in a graceful catch: the endpoint's own disabled
+  // shape is `enabled: false`, while a thrown ApiError (e.g. 404 until the backend deploys the
+  // route) is a distinct "pre-check unavailable" state the Review screen renders explicitly.
+  riskPrecheck: (params: { symbol: string; side: string; quantity: string; sleeveId?: string }) => {
+    const query = new URLSearchParams({
+      symbol: params.symbol,
+      side: params.side,
+      quantity: params.quantity,
+    });
+    if (params.sleeveId) query.set("sleeve_id", params.sleeveId);
+    return request<RiskPrecheckResult>(`/risk/precheck?${query.toString()}`);
+  },
 
   // Cancel a still-open order by its client order id. Backend records it as an order event,
   // so the live event stream drives the blotter refresh.

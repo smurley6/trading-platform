@@ -1,32 +1,32 @@
 // Minimal History-API hook mapping pathname <-> active screen — NO router dependency (§10 /
-// pre-resolved ambiguity #2: no router is approved for this phase). Handles browser back/forward
-// and lets screens deep-link via a plain URL. Query-param state (`/review?proposal=…`) was OUT of
-// scope for Phase A; Phase B (docs/UI-DESIGN.md §2 Ticker Pane) needs exactly one query param —
-// `?ticker=LMT` — to survive reload, so `useTickerQueryParam` below adds that single case without
-// growing this into a general query-string router (`/review?proposal=…` is explicitly deferred to
-// Phase C per the task spec).
+// pre-resolved ambiguity #2: no router is approved). Handles browser back/forward and lets
+// screens deep-link via a plain URL.
+//
+// UI Phase C (§2 "7 screens → 5"): the Markets and Algorithms screens are DELETED — Markets is
+// absorbed by the Ticker Pane (`?ticker=` slide-over, Phase B) and Algorithms by Overview's
+// sleeves grid (Phase B). Their old paths (`/markets`, `/algorithms`) simply fall through
+// `screenForPath`'s default and land on Overview.
+//
+// Query-param state: Phase B added exactly one param (`?ticker=`); Phase C needs `/review?
+// proposal=…` and `/signals?provenance=…&source=…` (§7 "every screen state that matters is
+// addressable"), so the one-off ticker hook is generalized into `useScreenQueryParam` — still
+// deliberately NOT a router: one hook instance binds one param for one keep-alive screen, gated
+// on that screen being `active` so a hidden (display:none, keep-alive) screen never reacts to a
+// param that now belongs to the visible one.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-export type ScreenId =
-  | "dashboard"
-  | "algorithms"
-  | "markets"
-  | "proposals"
-  | "signals"
-  | "blotter"
-  | "risk";
+export type ScreenId = "dashboard" | "proposals" | "signals" | "blotter" | "risk";
 
-// Pathname <-> screen mapping (§2 IA route names, applied to the CURRENT 7 screen names since
-// Phase A keeps every existing screen's identity — the §2 5-screen consolidation is Phase B+).
+// Pathname <-> screen mapping (§2 IA route names for the five §4 destinations, applied to the
+// current screen ids). Unknown paths (including the retired /markets and /algorithms) fall back
+// to Overview.
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/": "dashboard",
   "/review": "proposals",
   "/signals": "signals",
   "/blotter": "blotter",
   "/system": "risk",
-  "/markets": "markets",
-  "/algorithms": "algorithms",
 };
 
 const SCREEN_TO_PATH: Record<ScreenId, string> = {
@@ -35,8 +35,6 @@ const SCREEN_TO_PATH: Record<ScreenId, string> = {
   signals: "/signals",
   blotter: "/blotter",
   risk: "/system",
-  markets: "/markets",
-  algorithms: "/algorithms",
 };
 
 function screenForPath(pathname: string): ScreenId {
@@ -74,40 +72,72 @@ export function useHistoryRoute(): [ScreenId, (screen: ScreenId) => void] {
   return [screen, navigate];
 }
 
+function readParam(key: string): string | null {
+  return new URLSearchParams(window.location.search).get(key);
+}
+
+function writeParam(key: string, value: string | null, mode: "push" | "replace"): void {
+  const url = new URL(window.location.href);
+  const current = url.searchParams.get(key);
+  if (current === value) return; // URL already agrees — no redundant history entry
+  if (value !== null) {
+    url.searchParams.set(key, value);
+  } else {
+    url.searchParams.delete(key);
+  }
+  const next = `${url.pathname}${url.search}`;
+  if (mode === "push") {
+    window.history.pushState(null, "", next);
+  } else {
+    window.history.replaceState(null, "", next);
+  }
+}
+
 /**
- * Two-way binding between the `?ticker=` query param and the Ticker Pane's open/closed state
- * (docs/UI-DESIGN.md §2: "Route-addressable as `?ticker=LMT` so deep links survive"). Reads the
- * initial value from `window.location.search` on mount (so a deep link opens the pane on load),
- * pushes a history entry when a ticker opens/changes/closes (so back/forward + reload all work),
- * and stays in sync with external navigation via `popstate`. Deliberately scoped to just this one
- * param — see the module docblock above for why a general query-string router is out of scope.
+ * Two-way binding between ONE query param and one keep-alive screen's state (§7 route-addressable
+ * state: `?ticker=`, `/review?proposal=…`, `/signals?provenance=…&source=…`).
+ *
+ * Semantics, matched to the keep-alive ScreenHost model (App.tsx):
+ * - The initial value is read from the URL on mount (deep links survive reload). Screens mount on
+ *   first VISIT, i.e. while active, so a deep-linked param opens on the screen it belongs to.
+ * - `popstate` (back/forward) syncs state ONLY while `active` — a hidden screen must never pop a
+ *   modal overlay (or stale filter state) over the visible one because the URL changed.
+ * - Setting a value writes the URL: `mode: "push"` adds a history entry (overlay open/close — the
+ *   Phase B ticker behavior, so Back closes the pane), `mode: "replace"` rewrites in place
+ *   (selection/filter state that changes on every keystroke — j/k selection must not spam
+ *   history).
+ * - Navigating screens pushes a bare pathname (useHistoryRoute), so params do not leak across
+ *   screens; the owning screen additionally clears its state on deactivation (see
+ *   useScreenOverlays / the Review + Signals screens).
  */
-export function useTickerQueryParam(): [string | null, (ticker: string | null) => void] {
-  const [ticker, setTickerState] = useState<string | null>(() =>
-    new URLSearchParams(window.location.search).get("ticker"),
-  );
+export function useScreenQueryParam(
+  key: string,
+  active: boolean,
+  mode: "push" | "replace" = "push",
+): [string | null, (value: string | null) => void] {
+  const [value, setValueState] = useState<string | null>(() => readParam(key));
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   useEffect(() => {
+    if (!active) return;
     function onPopState(): void {
-      setTickerState(new URLSearchParams(window.location.search).get("ticker"));
+      setValueState(readParam(key));
     }
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [key, active]);
 
-  const setTicker = useCallback((next: string | null) => {
-    setTickerState((current) => {
-      if (current === next) return current;
-      const url = new URL(window.location.href);
-      if (next) {
-        url.searchParams.set("ticker", next);
-      } else {
-        url.searchParams.delete("ticker");
-      }
-      window.history.pushState(null, "", `${url.pathname}${url.search}`);
-      return next;
-    });
-  }, []);
+  const setValue = useCallback(
+    (next: string | null) => {
+      setValueState((current) => {
+        if (current === next) return current;
+        writeParam(key, next, modeRef.current);
+        return next;
+      });
+    },
+    [key],
+  );
 
-  return [ticker, setTicker];
+  return [value, setValue];
 }

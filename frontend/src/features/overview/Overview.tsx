@@ -1,49 +1,41 @@
-// Overview `/` (docs/UI-DESIGN.md §5.1) — the rebuilt glance-target screen replacing the old
-// Dashboard content. Three-band layout, no scrolling at 1440×900: capital strip / equity curve +
-// positions grid / sleeves grid + event ticker. Algorithms is folded in per §2 (sleeves grid
-// section) — the Algorithms screen/route itself is NOT removed this phase (see the Phase B
-// report for the deferral rationale).
+// Overview `/` (docs/UI-DESIGN.md §5.1, reduced per operator direction 2026-07-06) — the
+// glance-target screen: capital strip (equity / day P&L / drawdown), a compact equity curve,
+// and the positions grid. Nothing else: the sleeves grid and live event ticker were removed at
+// the Phase C visual gate ("no reason to have that much information on the overview page") —
+// sleeve health lives on System, the live feed and chain access live on Signals/Blotter/Review.
+// No scrolling at 1440×900 (the host is viewport-locked in App.tsx).
 //
 // Built ENTIRELY on the §3 token system (colors/layout/shape/type from lib/tokens.ts) — this is
 // new-code, so unlike the legacy screens it does not touch the old `color`/`space`/`text` exports.
 //
-// Owns: the live event stream for the ticker (its own useEventStream subscription, since the
-// ticker needs every individual event, not just a refresh signal — App.tsx's refreshKey debounce
-// is for the rest of the shell); the Chain Inspector / Ticker Pane overlay state for this screen;
-// and the `c`/`t` scoped hotkeys operating on "the currently focused row" (event ticker rows,
-// including via SleevesGrid/PositionsGrid symbol click for the Ticker Pane). Both overlays are
-// screen-scoped per the Phase B ambiguity note in the final report (§4's global "anywhere" is
-// Overview-only until Review/Blotter/Signals are rebuilt in Phase C).
+// The Ticker Pane stays mounted for the `?ticker=` deep link (route-addressable per §2) via the
+// shared focused-row model (shell/useScreenOverlays.ts); with the event ticker gone this screen
+// has no focused-row source, so the `c`/`t` hotkeys are inert here (their getters return null).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useHotkeys } from "react-hotkeys-hook";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "../../lib/api";
 import { dayPnl, maxDrawdownPct, poolEquitySeries } from "../../lib/projections";
 import { colors, layout, shape, type as typeTokens } from "../../lib/tokens";
-import type { Sleeve, StoredEventDto } from "../../lib/types";
-import { useEventStream } from "../../lib/useEventStream";
 import { useLoader } from "../../lib/useLoader";
-import { ChainInspector } from "../../shell/ChainInspector";
 import { TickerPane } from "../../shell/TickerPane";
 import { SlideOverStackProvider } from "../../shell/SlideOverStackProvider";
-import { useTickerQueryParam } from "../../shell/useHistoryRoute";
+import { useScreenOverlays } from "../../shell/useScreenOverlays";
 import { CapitalStrip } from "./CapitalStrip";
-import { EventTicker } from "./EventTicker";
 import { OverviewEquityCurve } from "./OverviewEquityCurve";
 import { PositionsGrid } from "./PositionsGrid";
 import { livePositionToRow, type PositionRowView } from "./positionRows";
 import { positionRows as eventPositionRows } from "../../lib/projections";
-import { SleevesGrid, type SleeveRowView } from "./SleevesGrid";
 
 interface OverviewProps {
   active: boolean;
   refreshKey: number;
-  sleeves: Sleeve[];
 }
 
-const MAX_TICKER_EVENTS = 500;
+// Compact curve band height (a structural dimension, not a §3 token value): tall enough to read
+// the pool trend at a glance, small enough that positions own the rest of the viewport.
+const EQUITY_BAND_PX = 240;
 
-export function Overview({ active, refreshKey, sleeves }: OverviewProps) {
+export function Overview({ active, refreshKey }: OverviewProps) {
   const eventsLoader = useLoader(() => api.events(1000), [refreshKey]);
   const capital = usePolled(() => api.capital(), refreshKey, {
     enabled: false,
@@ -57,125 +49,43 @@ export function Overview({ active, refreshKey, sleeves }: OverviewProps) {
     positions: [],
   });
 
-  // Live rolling tail: this screen's own /ws/events subscription (on top of App.tsx's
-  // refreshKey-debounced one) so the ticker gets every individual event to insert-animate,
-  // capped at MAX_TICKER_EVENTS so the tail doesn't grow unbounded across a long session.
-  const [liveEvents, setLiveEvents] = useState<StoredEventDto[]>([]);
-  const onEvent = useCallback((event: StoredEventDto) => {
-    setLiveEvents((prev) => {
-      if (prev.some((e) => e.event_id === event.event_id)) return prev;
-      const next = [...prev, event];
-      return next.length > MAX_TICKER_EVENTS ? next.slice(next.length - MAX_TICKER_EVENTS) : next;
-    });
-  }, []);
-  useEventStream(onEvent);
-
-  // Seed the ticker with the initial page of events once, then let the live stream take over —
-  // avoids both an empty ticker on first paint and double-counting events already in that page.
-  const seeded = useRef(false);
-  useEffect(() => {
-    if (seeded.current || !eventsLoader.data) return;
-    seeded.current = true;
-    setLiveEvents((prev) => {
-      const seen = new Set(prev.map((e) => e.event_id));
-      const seedRows = eventsLoader.data!.filter((e) => !seen.has(e.event_id));
-      return [...seedRows, ...prev].slice(-MAX_TICKER_EVENTS);
-    });
-  }, [eventsLoader.data]);
-
   const allEvents = useMemo(() => eventsLoader.data ?? [], [eventsLoader.data]);
   const equitySeriesData = useMemo(() => poolEquitySeries(allEvents), [allEvents]);
   const drawdownPct = useMemo(() => maxDrawdownPct(equitySeriesData), [equitySeriesData]);
   const dayPnlValue = useMemo(() => dayPnl(equitySeriesData), [equitySeriesData]);
 
-  const positionRows: PositionRowView[] = livePositions.enabled
-    ? livePositions.positions.map(livePositionToRow)
-    : eventPositionRows(allEvents).map((r) => ({
-        key: `${r.sleeve_id}|${r.symbol}`,
-        sleeve_id: r.sleeve_id,
-        symbol: r.symbol,
-        quantity: r.quantity,
-        avg_price: null,
-        last: null,
-        market_value: null,
-        unrealized_pnl: null,
-      }));
+  // Prefer the endpoint's rows whenever it returns any — even with the Alpaca feed disabled
+  // (`enabled: false`) the backend serves PaperBroker-derived positions with real avg/last/
+  // market-value/P&L, which beats the event-projection fallback's null prices (a wall of
+  // em-dashes; operator visual-gate feedback, 2026-07-06). The projection fallback remains for
+  // when the endpoint itself is unreachable (api.ts catch → empty positions).
+  const positionRows: PositionRowView[] =
+    livePositions.positions.length > 0
+      ? livePositions.positions.map(livePositionToRow)
+      : eventPositionRows(allEvents).map((r) => ({
+          key: `${r.sleeve_id}|${r.symbol}`,
+          sleeve_id: r.sleeve_id,
+          symbol: r.symbol,
+          quantity: r.quantity,
+          avg_price: null,
+          last: null,
+          market_value: null,
+          unrealized_pnl: null,
+        }));
 
-  const capBySleeve = new Map(capital.allocations.map((a) => [a.sleeve_id, a] as const));
-  const sleeveRows: SleeveRowView[] = sleeves.map((s) => {
-    const alloc = capBySleeve.get(s.id);
-    return {
-      id: s.id,
-      strategy_id: s.strategy_id,
-      mode: s.mode,
-      status: s.status,
-      held_value: alloc ? Number(alloc.market_value) : Number(s.allocated_capital),
-    };
+  // Overlay state via the shared focused-row model: only the `?ticker=` deep-link binding is
+  // live on this screen (no focused-row source remains — see docblock).
+  const overlays = useScreenOverlays(active, {
+    correlationId: () => null,
+    ticker: () => null,
   });
-
-  // --- Overlay state: Chain Inspector + Ticker Pane, both screen-scoped for now (see docblock).
-  const [correlationId, setCorrelationId] = useState<string | null>(null);
-  const [ticker, setTicker] = useTickerQueryParam();
-  const [focusedEvent, setFocusedEvent] = useState<StoredEventDto | null>(null);
-  const lastRowRef = useRef<HTMLElement | null>(null);
-
-  const openChainFor = useCallback((event: StoredEventDto, rowEl?: HTMLElement) => {
-    if (rowEl) lastRowRef.current = rowEl;
-    setCorrelationId(event.correlation_id);
-  }, []);
-
-  const openTickerFor = useCallback(
-    (symbol: string, rowEl?: HTMLElement) => {
-      if (rowEl) lastRowRef.current = rowEl;
-      setTicker(symbol);
-    },
-    [setTicker],
-  );
-
-  // Bug fix (2026-07-06): both slide-overs are portaled Radix Dialogs, so App.tsx's ScreenHost
-  // `display: none` hiding can't hide them — Overview stays keep-alive-mounted (App.tsx) and a
-  // dialog left open here would survive navigation to another screen, sitting over it with
-  // Radix's modal scroll lock still engaged. Close both overlays the moment this screen is
-  // deactivated so the scroll lock releases and the fixed overlay unmounts.
-  useEffect(() => {
-    if (active) return;
-    setCorrelationId(null);
-    if (ticker !== null) setTicker(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run on activation transitions
-  }, [active]);
-
-  // `c` / `t` on the currently focused ticker row (§4/§6: "Invoked with `c` anywhere a row has a
-  // correlation id" / "click or `t` on focused row"). Each key is disabled only while ITS OWN
-  // overlay is already open (so it doesn't re-fire into that overlay's own content) — the two
-  // stay independently available so `t` still opens the Ticker Pane on top of an open Chain
-  // Inspector and vice versa, which is exactly how §3.5's stacking behavior gets exercised from
-  // the keyboard (open one, then invoke the other on the same focused row). Also gated on `active`
-  // (2026-07-06 fix) so these hotkeys, which stay registered while Overview is hidden, cannot
-  // open a modal overlay over whatever screen is actually on top.
-  useHotkeys(
-    "c",
-    () => {
-      if (focusedEvent) openChainFor(focusedEvent);
-    },
-    { enabled: active && correlationId === null, enableOnFormTags: false },
-    [active, focusedEvent, correlationId],
-  );
-  useHotkeys(
-    "t",
-    () => {
-      const symbol = focusedEvent ? tickerFromEvent(focusedEvent) : null;
-      if (symbol) openTickerFor(symbol);
-    },
-    { enabled: active && ticker === null, enableOnFormTags: false },
-    [active, focusedEvent, ticker],
-  );
 
   return (
     <SlideOverStackProvider>
       <div
         style={{
           display: "grid",
-          gridTemplateRows: "auto 1fr 1fr",
+          gridTemplateRows: `auto ${EQUITY_BAND_PX}px minmax(0, 1fr)`,
           height: "100%",
           gap: layout.x3,
         }}
@@ -196,36 +106,20 @@ export function Overview({ active, refreshKey, sleeves }: OverviewProps) {
           />
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: layout.x3, minHeight: 0 }}>
-          <Band title="Equity curve">
-            <OverviewEquityCurve data={equitySeriesData} />
-          </Band>
-          <Band title="Positions">
-            <PositionsGrid rows={positionRows} />
-          </Band>
-        </div>
+        <Band title="Equity curve">
+          <OverviewEquityCurve data={equitySeriesData} />
+        </Band>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: layout.x3, minHeight: 0 }}>
-          <Band title="Sleeves">
-            <SleevesGrid rows={sleeveRows} />
-          </Band>
-          <Band title="Event ticker">
-            <EventTicker
-              events={liveEvents}
-              focusedEventId={focusedEvent?.event_id ?? null}
-              onFocusRow={setFocusedEvent}
-              onSelect={(event, rowEl) => openChainFor(event, rowEl)}
-            />
-          </Band>
-        </div>
+        <Band title="Positions">
+          <PositionsGrid rows={positionRows} />
+        </Band>
       </div>
 
-      <ChainInspector
-        correlationId={correlationId}
-        onClose={() => setCorrelationId(null)}
-        returnFocusRef={lastRowRef}
+      <TickerPane
+        ticker={overlays.ticker}
+        onClose={overlays.closeTicker}
+        returnFocusRef={overlays.lastRowRef}
       />
-      <TickerPane ticker={ticker} onClose={() => setTicker(null)} returnFocusRef={lastRowRef} />
     </SlideOverStackProvider>
   );
 }
@@ -261,13 +155,6 @@ function Band({ title, children }: { title: string; children: React.ReactNode })
       <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
     </div>
   );
-}
-
-function tickerFromEvent(event: StoredEventDto): string | null {
-  const p = event.payload;
-  if (typeof p.symbol === "string") return p.symbol;
-  if (typeof p.ticker === "string") return p.ticker;
-  return null;
 }
 
 // Lightweight polling loader shared shape (mirrors Dashboard.tsx's useLivePositions/useCapital,

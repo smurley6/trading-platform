@@ -9,14 +9,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { colors, layout, shape, type as typeTokens } from "../lib/tokens";
 import type { ScreenId } from "./useHistoryRoute";
 
+// The five §4 destinations — Markets/Algorithms were deleted with the Phase C §2 consolidation.
 const DESTINATIONS: { id: ScreenId; label: string }[] = [
   { id: "dashboard", label: "Overview" },
   { id: "proposals", label: "Review" },
   { id: "signals", label: "Signals" },
   { id: "blotter", label: "Blotter" },
   { id: "risk", label: "System" },
-  { id: "markets", label: "Markets" },
-  { id: "algorithms", label: "Algorithms" },
 ];
 
 export function CommandPalette({

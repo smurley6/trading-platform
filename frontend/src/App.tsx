@@ -5,21 +5,19 @@
 // old inline header/nav is fully replaced by AppShell, but the refreshKey/`/ws/events` mechanism
 // below is untouched.
 //
-// UI Phase B (docs/UI-DESIGN.md §5.1): the "dashboard" screen id/route (`/`) now renders the
-// rebuilt Overview (features/overview/Overview.tsx) instead of the old Dashboard — same
-// screen-id/route mapping (useHistoryRoute is unchanged), only the component swapped. Algorithms
-// and Markets keep their own routes/screens unchanged this phase (see MEMORY.md §8 for the
-// deferral — §2's "fold into Overview"/"demote to Ticker Pane" absorption is not yet a route
-// deletion).
+// UI Phase C (docs/UI-DESIGN.md §2, §5.2-5.4): the §2 "7 screens → 5" consolidation is complete —
+// the Markets and Algorithms screens are DELETED (absorbed by the Ticker Pane and Overview's
+// sleeves grid respectively in Phase B; their routes fall back to Overview), the "proposals"
+// screen id/route (/review) renders the rebuilt Review master-detail loop, and Signals/Blotter
+// are refit as single §3-themed AG Grids. Screens now receive `active` so their focused-row
+// hotkeys (c/t, j/k, x — shell/useScreenOverlays.ts) stay gated to the visible screen.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { Algorithms } from "./features/algorithms/Algorithms";
 import { Blotter } from "./features/blotter/Blotter";
 import { Overview } from "./features/overview/Overview";
-import { Markets } from "./features/markets/Markets";
-import { Proposals } from "./features/proposals/Proposals";
+import { Review } from "./features/review/Review";
 import { RiskDashboard } from "./features/risk/RiskDashboard";
-import { SignalFeed } from "./features/signals/SignalFeed";
+import { Signals } from "./features/signals/Signals";
 import { api } from "./lib/api";
 import type { Sleeve, StoredEventDto } from "./lib/types";
 import { type ConnectionStatus, useEventStream } from "./lib/useEventStream";
@@ -123,8 +121,19 @@ const ScreenHost = memo(
     refreshKey: number;
     sleeves: Sleeve[];
   }) {
+    // Overview is the one no-scroll screen (§5.1, reduced to the status glance 2026-07-06): its
+    // root uses height:100% + grid bands (`auto 240px minmax(0,1fr)`), which only lay out
+    // correctly if this host resolves a definite height — without it the percentage collapses
+    // to auto and the bands size to content. Lock the host to the shell-main viewport for
+    // "dashboard"; every other screen keeps auto height and scrolls inside .tp-shell-main.
     return (
-      <div style={{ display: active ? "block" : "none", padding: 24 }}>
+      <div
+        style={{
+          display: active ? "block" : "none",
+          padding: 24,
+          ...(view === "dashboard" ? { height: "100%", overflow: "hidden" } : {}),
+        }}
+      >
         <Screen view={view} active={active} refreshKey={refreshKey} sleeves={sleeves} />
       </div>
     );
@@ -148,17 +157,13 @@ function Screen({
 }) {
   switch (view) {
     case "dashboard":
-      return <Overview active={active} refreshKey={refreshKey} sleeves={sleeves} />;
-    case "algorithms":
-      return <Algorithms refreshKey={refreshKey} sleeves={sleeves} />;
-    case "markets":
-      return <Markets refreshKey={refreshKey} />;
+      return <Overview active={active} refreshKey={refreshKey} />;
     case "proposals":
-      return <Proposals refreshKey={refreshKey} />;
+      return <Review active={active} refreshKey={refreshKey} />;
     case "signals":
-      return <SignalFeed refreshKey={refreshKey} />;
+      return <Signals active={active} refreshKey={refreshKey} />;
     case "blotter":
-      return <Blotter refreshKey={refreshKey} />;
+      return <Blotter active={active} refreshKey={refreshKey} />;
     case "risk":
       return <RiskDashboard refreshKey={refreshKey} sleeves={sleeves} />;
   }

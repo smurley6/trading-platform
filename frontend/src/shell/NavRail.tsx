@@ -1,7 +1,7 @@
 // 48px icon nav rail (§4): icons only, tooltips on hover, active state = --accent left rule.
-// Pre-resolved ordering (task spec): the five §4 destinations first (Overview->Dashboard,
-// Review->Proposals, Signals->Signal feed, Blotter->Blotter, System->Risk), then Markets and
-// Algorithms as temporary trailing entries — carries all 7 existing screens, orphaning none.
+// Exactly the five §4 destinations — Phase C completed the §2 "7 → 5" consolidation, so the
+// temporary trailing Markets/Algorithms entries are gone (absorbed by the Ticker Pane and
+// Overview's sleeves grid).
 
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { colors, shape, type as typeTokens } from "../lib/tokens";
@@ -13,16 +13,13 @@ interface NavEntry {
   glyph: string;
 }
 
-// §4 ASCII diagram glyphs (◉ ▤ ⇄ ☰ ⚙) assigned to the five mapped destinations in order, then
-// two trailing temporary entries for the screens §2 has not yet folded elsewhere.
+// §4 ASCII diagram glyphs (◉ ▤ ⇄ ☰ ⚙) assigned to the five destinations in order.
 const NAV_ENTRIES: NavEntry[] = [
   { id: "dashboard", label: "Overview", glyph: "◉" },
   { id: "proposals", label: "Review", glyph: "▤" },
   { id: "signals", label: "Signals", glyph: "⇄" },
   { id: "blotter", label: "Blotter", glyph: "☰" },
   { id: "risk", label: "System", glyph: "⚙" },
-  { id: "markets", label: "Markets", glyph: "◈" },
-  { id: "algorithms", label: "Algorithms", glyph: "◫" },
 ];
 
 export function NavRail({

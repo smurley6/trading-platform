@@ -30,7 +30,18 @@ ReactDOM.createRoot(container).render(
         <Toaster
           position="bottom-right"
           duration={4000}
-          toastOptions={{ style: { fontFamily: "var(--font-mono)", fontSize: typeTokens.scale.default } }}
+          toastOptions={{
+            style: {
+              fontFamily: "var(--font-mono)",
+              fontSize: typeTokens.scale.default,
+              // Sonner's stock toast is light-theme (white card) — pull it onto the §3 surface
+              // tokens so toasts sit flush with the rest of the console.
+              background: "var(--bg-raised)",
+              border: "1px solid var(--border)",
+              color: "var(--text-primary)",
+              boxShadow: "var(--overlay-shadow)",
+            },
+          }}
         />
       </ToastProvider>
     </SaltProvider>
