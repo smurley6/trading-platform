@@ -307,3 +307,35 @@
   opacity: 1;
   transform: scaleY(1);
 }
+
+/* components/InfoButton.tsx (2026-07-06 Radix Popover rewrite) — trigger idle/open coloring via
+   Radix's own [data-state] attribute (avoids reintroducing local open-state just for styling),
+   and the popover's overlay-enter animation. Reuses the SAME duration/easing/opacity/4px-translate
+   values as .tp-palette-content's tp-overlay-enter keyframe (§3.4 "overlay enter — 120ms
+   translate+fade") rather than that keyframe verbatim, since tp-overlay-enter bakes in
+   translate(-50%, …) for the centered palette, which would shift an anchored popover half its
+   width left. No new curve/duration introduced — only the 3 sanctioned effects exist. */
+.tp-info-trigger {
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition:
+    color var(--duration-overlay) var(--ease-out),
+    border-color var(--duration-overlay) var(--ease-out);
+}
+.tp-info-trigger[data-state="open"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tp-info-popover {
+  animation: tp-info-popover-enter var(--duration-overlay) var(--ease-out);
+}
+@keyframes tp-info-popover-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

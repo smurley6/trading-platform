@@ -36,13 +36,14 @@ import { positionRows as eventPositionRows } from "../../lib/projections";
 import { SleevesGrid, type SleeveRowView } from "./SleevesGrid";
 
 interface OverviewProps {
+  active: boolean;
   refreshKey: number;
   sleeves: Sleeve[];
 }
 
 const MAX_TICKER_EVENTS = 500;
 
-export function Overview({ refreshKey, sleeves }: OverviewProps) {
+export function Overview({ active, refreshKey, sleeves }: OverviewProps) {
   const eventsLoader = useLoader(() => api.events(1000), [refreshKey]);
   const capital = usePolled(() => api.capital(), refreshKey, {
     enabled: false,
@@ -131,19 +132,33 @@ export function Overview({ refreshKey, sleeves }: OverviewProps) {
     [setTicker],
   );
 
+  // Bug fix (2026-07-06): both slide-overs are portaled Radix Dialogs, so App.tsx's ScreenHost
+  // `display: none` hiding can't hide them — Overview stays keep-alive-mounted (App.tsx) and a
+  // dialog left open here would survive navigation to another screen, sitting over it with
+  // Radix's modal scroll lock still engaged. Close both overlays the moment this screen is
+  // deactivated so the scroll lock releases and the fixed overlay unmounts.
+  useEffect(() => {
+    if (active) return;
+    setCorrelationId(null);
+    if (ticker !== null) setTicker(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run on activation transitions
+  }, [active]);
+
   // `c` / `t` on the currently focused ticker row (§4/§6: "Invoked with `c` anywhere a row has a
   // correlation id" / "click or `t` on focused row"). Each key is disabled only while ITS OWN
   // overlay is already open (so it doesn't re-fire into that overlay's own content) — the two
   // stay independently available so `t` still opens the Ticker Pane on top of an open Chain
   // Inspector and vice versa, which is exactly how §3.5's stacking behavior gets exercised from
-  // the keyboard (open one, then invoke the other on the same focused row).
+  // the keyboard (open one, then invoke the other on the same focused row). Also gated on `active`
+  // (2026-07-06 fix) so these hotkeys, which stay registered while Overview is hidden, cannot
+  // open a modal overlay over whatever screen is actually on top.
   useHotkeys(
     "c",
     () => {
       if (focusedEvent) openChainFor(focusedEvent);
     },
-    { enabled: correlationId === null, enableOnFormTags: false },
-    [focusedEvent, correlationId],
+    { enabled: active && correlationId === null, enableOnFormTags: false },
+    [active, focusedEvent, correlationId],
   );
   useHotkeys(
     "t",
@@ -151,8 +166,8 @@ export function Overview({ refreshKey, sleeves }: OverviewProps) {
       const symbol = focusedEvent ? tickerFromEvent(focusedEvent) : null;
       if (symbol) openTickerFor(symbol);
     },
-    { enabled: ticker === null, enableOnFormTags: false },
-    [focusedEvent, ticker],
+    { enabled: active && ticker === null, enableOnFormTags: false },
+    [active, focusedEvent, ticker],
   );
 
   return (

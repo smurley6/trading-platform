@@ -125,7 +125,7 @@ const ScreenHost = memo(
   }) {
     return (
       <div style={{ display: active ? "block" : "none", padding: 24 }}>
-        <Screen view={view} refreshKey={refreshKey} sleeves={sleeves} />
+        <Screen view={view} active={active} refreshKey={refreshKey} sleeves={sleeves} />
       </div>
     );
   },
@@ -137,16 +137,18 @@ const ScreenHost = memo(
 
 function Screen({
   view,
+  active,
   refreshKey,
   sleeves,
 }: {
   view: ScreenId;
+  active: boolean;
   refreshKey: number;
   sleeves: Sleeve[];
 }) {
   switch (view) {
     case "dashboard":
-      return <Overview refreshKey={refreshKey} sleeves={sleeves} />;
+      return <Overview active={active} refreshKey={refreshKey} sleeves={sleeves} />;
     case "algorithms":
       return <Algorithms refreshKey={refreshKey} sleeves={sleeves} />;
     case "markets":

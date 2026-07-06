@@ -25,11 +25,16 @@
   --tp-hairline-strong: rgba(255, 255, 255, 0.14);
   --tp-faint-border: rgba(148, 163, 184, 0.22);
 
+  /* 2026-07-06 site-wide font unification: indirect through the §3 vars (injected by
+   * applyThemeVars() in main.tsx, before first paint) so legacy consumers render the same IBM
+   * Plex faces as the new shell; literal fallbacks mirror tokens.ts type.fontSans/fontMono
+   * belt-and-suspenders in case the vars are ever unset. */
   --tp-font-sans:
-    "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    var(--font-sans, "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif);
   --tp-font-mono:
-    ui-monospace, "SFMono-Regular", "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono",
-    monospace;
+    var(--font-mono, "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace);
 }
 
 /* ================================================================================================

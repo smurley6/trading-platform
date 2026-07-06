@@ -28,13 +28,19 @@ export function applyThemeVars(): void {
   }
 }
 
+// 2026-07-06 site-wide font unification: the 600 face is registered for the weight RANGE
+// "600 800" (FontFace accepts ranges), not just "600". Legacy `text.display/h1/h2/h3`,
+// `pillStyle`, and other 700/800-weight requests now resolve to the real Plex 600 glyphs
+// instead of the browser's synthesized (faux-bold) 600 face — still only three genuine
+// weights shipped (§3.2: 400/500/600 only), just mapped onto the full weight range legacy
+// screens still request.
 const FONT_FACES: { family: string; url: string; weight: string }[] = [
   { family: "IBM Plex Sans", url: ibmPlexSans400, weight: "400" },
   { family: "IBM Plex Sans", url: ibmPlexSans500, weight: "500" },
-  { family: "IBM Plex Sans", url: ibmPlexSans600, weight: "600" },
+  { family: "IBM Plex Sans", url: ibmPlexSans600, weight: "600 800" },
   { family: "IBM Plex Mono", url: ibmPlexMono400, weight: "400" },
   { family: "IBM Plex Mono", url: ibmPlexMono500, weight: "500" },
-  { family: "IBM Plex Mono", url: ibmPlexMono600, weight: "600" },
+  { family: "IBM Plex Mono", url: ibmPlexMono600, weight: "600 800" },
 ];
 
 let fontsRegistered = false;

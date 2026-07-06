@@ -1,94 +1,74 @@
-// A small "ⓘ" (i-in-a-circle) button that reveals an explanatory panel on click — use it next
-// to any runnable action so the user can verify what it does BEFORE running it.
+// A small "i" (i-in-a-circle) button that reveals an explanatory panel in an anchored popover —
+// use it next to any runnable action so the user can verify what it does BEFORE running it.
 //
-// The panel renders IN-FLOW (it expands the page downward) rather than as a floating overlay, so
-// it can never be clipped by a Card's bounds or run off the viewport — the whole thing is always
-// scrollable into view. Closes on click-outside or Escape.
+// 2026-07-06: rewritten on @radix-ui/react-popover (§10-approved, already installed — no new
+// dep). The panel used to render IN-FLOW, expanding its parent flex row and pushing page content
+// downward; it now renders in a Radix Portal, anchored to the trigger via floating-ui collision
+// detection, so opening it causes ZERO layout shift and it can never run off the viewport (it
+// flips side automatically near an edge). Follows the in-repo Radix pattern in
+// shell/NavRail.tsx's Tooltip.Content. Public API (title/children/align) is unchanged so all 4
+// call sites (Backtest.tsx, RiskDashboard.tsx ×3) need no changes.
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { color, radius, shadow } from "../lib/tokens";
+import * as Popover from "@radix-ui/react-popover";
+import { type ReactNode } from "react";
+import { colors, shape, type as typeTokens } from "../lib/tokens";
 
 interface InfoButtonProps {
   title: string;
   children: ReactNode;
-  /** Which edge the expanding panel aligns to under the button; default "left". */
+  /** Which edge the popover aligns to under the button; default "left". */
   align?: "left" | "right";
 }
 
 export function InfoButton({ title, children, align = "left" }: InfoButtonProps) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent): void {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    function onKey(e: KeyboardEvent): void {
-      if (e.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   return (
-    <div
-      ref={ref}
-      style={{
-        display: "inline-flex",
-        flexDirection: "column",
-        alignItems: align === "right" ? "flex-end" : "flex-start",
-        gap: 8,
-      }}
-    >
-      <button
-        type="button"
-        aria-label={`What does "${title}" do?`}
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 18,
-          height: 18,
-          borderRadius: "50%",
-          padding: 0,
-          cursor: "pointer",
-          fontSize: 12,
-          fontStyle: "italic",
-          fontFamily: "Georgia, 'Times New Roman', serif",
-          fontWeight: 700,
-          lineHeight: 1,
-          color: open ? color.accentText : color.muted,
-          background: "transparent",
-          border: `1px solid ${open ? color.accentBorder : "rgba(148,163,184,0.45)"}`,
-        }}
-      >
-        i
-      </button>
-      {open && (
-        <div
-          role="region"
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label={`What does "${title}" do?`}
+          className="tp-info-trigger"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 18,
+            height: 18,
+            borderRadius: "50%",
+            padding: 0,
+            cursor: "pointer",
+            fontSize: typeTokens.scale.body,
+            fontFamily: typeTokens.fontSans,
+            fontWeight: 600,
+            fontStyle: "normal",
+            lineHeight: 1,
+            background: "transparent",
+          }}
+        >
+          i
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="bottom"
+          align={align === "right" ? "end" : "start"}
+          sideOffset={6}
+          collisionPadding={12}
           aria-label={title}
+          className="tp-shell tp-info-popover"
           style={{
             width: 360,
             maxWidth: "min(92vw, 520px)",
-            padding: 14,
-            borderRadius: radius.lg,
-            background: color.panelRaised,
-            border: `1px solid ${color.faintBorder}`,
-            boxShadow: shadow.popover,
-            fontSize: 13,
+            padding: 12,
+            background: colors.bgRaised,
+            border: `1px solid ${colors.border}`,
+            borderRadius: shape.radiusPane,
+            boxShadow: shape.overlayShadow,
+            color: colors.textSecondary,
+            fontSize: typeTokens.scale.default,
             lineHeight: 1.5,
-            color: color.textDim,
             textAlign: "left",
-            cursor: "default",
-            whiteSpace: "normal",
+            zIndex: 1100,
           }}
         >
           <div
@@ -97,29 +77,31 @@ export function InfoButton({ title, children, align = "left" }: InfoButtonProps)
               justifyContent: "space-between",
               alignItems: "center",
               marginBottom: 8,
+              gap: 8,
             }}
           >
-            <strong style={{ color: color.text }}>{title}</strong>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              aria-label="Close"
-              style={{
-                cursor: "pointer",
-                background: "transparent",
-                border: "none",
-                color: color.muted,
-                fontSize: 16,
-                lineHeight: 1,
-                padding: 0,
-              }}
-            >
-              ×
-            </button>
+            <strong style={{ color: colors.textPrimary, fontWeight: 600 }}>{title}</strong>
+            <Popover.Close asChild>
+              <button
+                type="button"
+                aria-label="Close"
+                style={{
+                  cursor: "pointer",
+                  background: "transparent",
+                  border: "none",
+                  color: colors.textSecondary,
+                  fontSize: 16,
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </Popover.Close>
           </div>
           {children}
-        </div>
-      )}
-    </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

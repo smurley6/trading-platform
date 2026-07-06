@@ -10,7 +10,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 import type { EquityPoint } from "../lib/projections";
-import { color } from "../lib/tokens";
+import { color, font } from "../lib/tokens";
 
 interface EquityCurveProps {
   data: EquityPoint[];
@@ -35,8 +35,7 @@ export function EquityCurve({ data, height = 280, benchmark }: EquityCurveProps)
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
         textColor: color.muted,
-        fontFamily:
-          "ui-monospace, SFMono-Regular, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace",
+        fontFamily: font.mono,
       },
       grid: {
         vertLines: { color: "rgba(255,255,255,0.04)" },

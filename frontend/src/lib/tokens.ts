@@ -16,9 +16,11 @@
 //      `pnlColor`) — still imported by all 7 existing screens and their shared components. Per
 //      the Phase A spec, existing screens keep their internals unchanged in this phase
 //      (container/chrome/theming only), so every one of these exports is CONTRACT: unchanged in
-//      name, shape, and value. Do not remove or rename them. Note the §3 system's own space
+//      name and shape. Do not remove or rename them. Note the §3 system's own space
 //      scale is exported as `layout` (not `space`) specifically to avoid colliding with this
-//      legacy `space` export.
+//      legacy `space` export. EXCEPTION (2026-07-06): `font`'s VALUE was retargeted at the §3
+//      IBM Plex stacks as part of site-wide font unification — every other export's value is
+//      still unchanged.
 //
 // Phase B/C will migrate screen internals onto the §3 system; until then both systems coexist.
 
@@ -220,28 +222,12 @@ export const z = { strip: 30, popover: 50, toast: 1000, modal: 1100 } as const;
 
 // Font stacks. `sans` is the UI face; `mono` is used for every numeric figure so columns align
 // and prices read like a terminal. Ship a tabular/mono treatment via `numeric`.
-export const font = {
-  sans: [
-    "Inter",
-    "system-ui",
-    "-apple-system",
-    "Segoe UI",
-    "Roboto",
-    "Helvetica",
-    "Arial",
-    "sans-serif",
-  ].join(", "),
-  mono: [
-    "ui-monospace",
-    "SFMono-Regular",
-    "SF Mono",
-    "JetBrains Mono",
-    "Menlo",
-    "Consolas",
-    "Liberation Mono",
-    "monospace",
-  ].join(", "),
-} as const;
+//
+// 2026-07-06 site-wide font unification: retargeted at the §3 IBM Plex stacks (was Inter /
+// system-mono) so every legacy screen renders the same typeface as the new shell — name and
+// shape unchanged (both members remain plain strings), only the VALUE changed, per the
+// operator's explicit font-unification request. See MEMORY.md changelog.
+export const font = { sans: type.fontSans, mono: type.fontMono } as const;
 
 // Type scale (px) with sensible weights/tracking. Screens should reach for `text.*` rather than
 // hardcoding font sizes so hierarchy stays consistent.
