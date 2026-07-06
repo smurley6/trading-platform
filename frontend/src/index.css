@@ -91,6 +91,11 @@
 html,
 body {
   height: 100%;
+  /* The shell owns ALL scrolling (.tp-shell-main is the scroll container; the shell is exactly
+   * 100vh). The document itself must never scroll — without this, any absolutely-positioned
+   * escapee anchored to the initial containing block (see .tp-shell-main in theme.css) opens a
+   * scrollable void below the shell. */
+  overflow: hidden;
 }
 
 body {

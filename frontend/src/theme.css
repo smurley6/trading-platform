@@ -36,6 +36,11 @@
   flex: 1;
   min-width: 0;
   overflow: auto;
+  /* Containing block for absolutely-positioned descendants: without this, escapees whose
+   * nearest positioned ancestor is the ICB (e.g. AG Grid's ag-aria-description-container,
+   * a 1px a11y helper placed at the grid's document coordinates) extend the VIEWPORT's
+   * scrollable overflow past the 100vh shell — the document itself scrolls into blank space. */
+  position: relative;
   background: var(--bg-base);
 }
 
