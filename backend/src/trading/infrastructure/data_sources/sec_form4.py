@@ -68,11 +68,20 @@ from trading.infrastructure.reference import COMPANY_DIRECTORY
 
 logger = logging.getLogger(__name__)
 
-# Per-source-type reliability prior for corporate-insider trades. Defined HERE (not in the
-# data_sources __init__) per the adapter's brief. Form 4 is hard, legally-mandated disclosure
-# but is lagged (filed up to two business days after the trade) and indirect, so it sits a touch
-# below contract awards yet above noisy statements.
-RELIABILITY_INSIDER_TRADE = 0.75
+# Per-source-type reliability priors for corporate-insider trades, SIDE-AWARE (Task 10,
+# docs/RESEARCH-PLAN.md; Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 68,242 ok labels,
+# 2026-07-07). Originally a single flat prior (``RELIABILITY_INSIDER_TRADE = 0.75``) covering both
+# sides; Phase 6's five adversarially-verified analyses refuted that flat prior: the only verified
+# directional edge is PURCHASES (ex-LUV 60.9% direction-aligned / +1.01% mean, n=724, monotone by
+# horizon), while SALES are anti-predictive as bearish inputs (sold stocks outperformed their
+# sector, +2.26% at h=20, n=13,110; side-aligned sale hit rate 45.5-48.2%). Purchases keep a
+# reduced (not equal) reliability pending a larger sample — see the re-review trigger in
+# docs/RESEARCH-PLAN.md ("Re-review triggers"); sales are zeroed out of conviction entirely (still
+# ingested/recorded/labeled — this is a conviction-weighting change only, never a data-collection
+# one; see `_SENTIMENT_BY_CODE`/`_RELIABILITY_BY_CODE` below and their use in `_live_signal` /
+# `_historical_signal`).
+RELIABILITY_INSIDER_PURCHASE = 0.60
+RELIABILITY_INSIDER_SALE = 0.0
 
 _RECENT_FEED = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&output=atom"
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -98,6 +107,13 @@ _SALE_CODE = "S"
 _PURCHASE_SENTIMENT = 0.5
 _SALE_SENTIMENT = -0.5
 _SENTIMENT_BY_CODE = {_PURCHASE_CODE: _PURCHASE_SENTIMENT, _SALE_CODE: _SALE_SENTIMENT}
+# Side-aware reliability lookup (Task 10): the SAME per-signal stamp mechanism as
+# `_SENTIMENT_BY_CODE` above, keyed on the identical already-classified `code`, so the split lands
+# at the adapter stamp site rather than inventing a parallel lookup mechanism.
+_RELIABILITY_BY_CODE = {
+    _PURCHASE_CODE: RELIABILITY_INSIDER_PURCHASE,
+    _SALE_CODE: RELIABILITY_INSIDER_SALE,
+}
 
 # SEC fair-access policy: <= 10 requests/second. A simple monotonic sleep-based limiter is
 # sufficient for our sequential (non-parallel) walk.
@@ -438,7 +454,7 @@ def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
         politician_id=None,
         sentiment=txn.sentiment,
         politician_weight=_value_weight(txn.value),
-        source_reliability=RELIABILITY_INSIDER_TRADE,
+        source_reliability=_RELIABILITY_BY_CODE[txn.code],
         raw_payload=payload,
         # Real SEC disclosure, no politician dependency -> REAL.
         provenance=Provenance.REAL,
@@ -476,7 +492,7 @@ def _historical_signal(
         politician_id=None,
         sentiment=txn.sentiment,
         politician_weight=_value_weight(txn.value),
-        source_reliability=RELIABILITY_INSIDER_TRADE,
+        source_reliability=_RELIABILITY_BY_CODE[txn.code],
         raw_payload=payload,
         # Real SEC disclosure; the backfill use case re-stamps to BACKFILLED regardless (Task 02).
         provenance=Provenance.REAL,

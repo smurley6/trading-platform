@@ -73,7 +73,6 @@ from trading.application.ports.reference_data import SectorMapPort
 from trading.domain.politicians import Politician
 from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
-from trading.infrastructure.data_sources import RELIABILITY_DISCLOSED_TRADE
 from trading.infrastructure.data_sources.throttle import RateLimiter
 from trading.infrastructure.data_sources.weighting import politician_weight_for
 from trading.infrastructure.politicians.name_matching import resolve_filer
@@ -92,6 +91,18 @@ _EFILED_DOC_ID_MIN_LEN = 8
 # Purchases read bullish, sales bearish; magnitude is modest since the leg is lagged.
 _BUY_SENTIMENT = 0.5
 _SELL_SENTIMENT = -0.5
+
+# Conviction-weight prior for House disclosures — BENCHED to 0.0 (Task 10, docs/RESEARCH-PLAN.md;
+# Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 68,242 ok labels, 2026-07-07). House
+# disclosures previously shared `infrastructure/data_sources/__init__.py::RELIABILITY_DISCLOSED_
+# TRADE` (0.7, also used by congress_trades/senate_efd); Phase 6 found House is direction-aligned
+# zero under every cut (measured 0.504 vs the 0.70 prior), with the apparent h=20 sector premium a
+# mega-cap composition artifact, refuting that shared prior FOR THIS SOURCE. House now defines its
+# OWN constant (no longer imports the shared one) so benching it cannot silently affect
+# congress_trades/senate_efd, which keep the unrefuted 0.7 prior. Benching is a conviction WEIGHT
+# only: ingestion, recording, and labeling of House signals are unchanged (data keeps accruing for
+# the re-review trigger in docs/RESEARCH-PLAN.md, "Re-review triggers").
+RELIABILITY_HOUSE_DISCLOSURE = 0.0
 
 # Asset-type codes we keep: stock and options (both are tradeable equity exposure). Anything
 # else (e.g. bonds, mutual funds) is ignored.
@@ -239,7 +250,7 @@ def _build_signal(
         politician_id=politician.id,
         sentiment=txn.sentiment,
         politician_weight=base_weight * _amount_weight(txn.amount_low, txn.amount_high),
-        source_reliability=RELIABILITY_DISCLOSED_TRADE,
+        source_reliability=RELIABILITY_HOUSE_DISCLOSURE,
         raw_payload=raw_payload,
         provenance=provenance,
     )

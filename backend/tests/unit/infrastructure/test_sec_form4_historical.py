@@ -24,7 +24,11 @@ import pytest
 from tests.conftest import FixedClock
 from trading.application.ports.data_source import FilterableHistoricalSource
 from trading.domain.provenance import Provenance
-from trading.infrastructure.data_sources.sec_form4 import SecForm4Source
+from trading.infrastructure.data_sources.sec_form4 import (
+    RELIABILITY_INSIDER_PURCHASE,
+    RELIABILITY_INSIDER_SALE,
+    SecForm4Source,
+)
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -116,6 +120,19 @@ async def test_source_uid_scheme_is_accession_plus_per_signal_suffix(clock: Fixe
     for signal in signals:
         assert signal.raw_payload["accession"] in {"0000320193-24-000005", "0000789019-24-000010"}
     assert len(uids) == len(signals)  # no collisions
+
+
+async def test_side_aware_reliability_on_historical_path(clock: FixedClock) -> None:
+    """Task 10 (docs/RESEARCH-PLAN.md; Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a,
+    2026-07-07): the historical path stamps the same side-aware reliability as the live path —
+    purchase rows get the reduced (not flat 0.75) purchase prior, sale rows contribute zero."""
+    async with _client(_make_handler()) as client:
+        source = _source(client, clock)
+        signals = await source.fetch_historical(_WINDOW_START, _WINDOW_END)
+
+    by_code = {s.raw_payload["transaction_code"]: s for s in signals}
+    assert by_code["P"].source_reliability == RELIABILITY_INSIDER_PURCHASE
+    assert by_code["S"].source_reliability == RELIABILITY_INSIDER_SALE
 
 
 async def test_created_at_is_acceptance_datetime_converted_from_eastern(

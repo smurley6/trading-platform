@@ -358,7 +358,11 @@ def test_prior_vs_measured_matches_known_priors() -> None:
     signal_source = {"s1": "sec_form4", "s2": "sec_form4"}
     rows = {r.source: r for r in prior_vs_measured(labels, signal_source)}
     sec_form4 = rows["sec_form4"]
-    assert sec_form4.prior_reliability == 0.75
+    # Task 10 (docs/RESEARCH-PLAN.md; Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a,
+    # 2026-07-07) refuted the flat 0.75 prior asserted here before Task 10 and made sec_form4
+    # side-aware at the adapter; this section prints the purchase-side prior (see
+    # `RELIABILITY_PRIORS`'s blend-rule comment in `application/diagnostic.py`).
+    assert sec_form4.prior_reliability == 0.60
     assert sec_form4.n == 2
     assert sec_form4.measured_hit_rate is not None and math.isclose(
         sec_form4.measured_hit_rate, 0.5, abs_tol=1e-9

@@ -71,15 +71,35 @@ def source_key_for_signal_id(signal_id: str) -> str:
 # `Signal.source_reliability` — duplicated here (not imported) because they live in per-source
 # modules with import-time side effects/heavy deps (httpx clients, pdfplumber) that a read-only
 # report has no business pulling in; each value is annotated with its origin for auditability.
+#
+# Task 10 (docs/RESEARCH-PLAN.md; Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 68,242 ok
+# labels, 2026-07-07) refuted the flat sec_form4 (0.75) and house_disclosures (0.70) priors and
+# made sec_form4 SIDE-AWARE at the adapter (purchase 0.60, sale 0.0 — see
+# infrastructure/data_sources/sec_form4.py::_RELIABILITY_BY_CODE). This section groups `ok` labels
+# by SOURCE KEY only (`OutcomeLabel`/`signal_source` carry no buy/sell side), so it cannot split
+# sec_form4's row by side without a broader schema change (out of scope here) — the row below is
+# therefore a BLEND, documented rather than side-split per the task brief:
+#   sec_form4 blend rule: a per-signal reliability-weighted blend would need the actual
+#   purchase/sale mix in the labeled set, which this section does not carry; we instead print the
+#   PURCHASE-side prior (0.60) since purchases are the only verified directional edge (ex-LUV
+#   60.9% aligned / +1.01% mean, n=724, monotone by horizon) and sales contribute zero conviction
+#   by construction, making the purchase prior the operative "does the measured number back the
+#   number we actually trade on" comparison. The measured hit-rate/mean columns are UNCHANGED
+#   (still pooled over both sides — a labeling/measurement fact, not a conviction weight) so this
+#   remains a comparison of "prior we act on" vs "what actually happened to every disclosed trade".
 RELIABILITY_PRIORS: Mapping[str, float] = {
-    # infrastructure/data_sources/sec_form4.py::RELIABILITY_INSIDER_TRADE
-    "sec_form4": 0.75,
-    # infrastructure/data_sources/__init__.py::RELIABILITY_DISCLOSED_TRADE (house_disclosures.py
-    # imports this shared constant, it has no reliability constant of its own)
-    "house_disclosures": 0.7,
-    # infrastructure/data_sources/__init__.py::RELIABILITY_CONTRACT (usaspending.py imports this)
+    # infrastructure/data_sources/sec_form4.py::RELIABILITY_INSIDER_PURCHASE (side-split; see the
+    # blend-rule comment above — sale side is 0.0 and not represented by this single scalar)
+    "sec_form4": 0.60,
+    # infrastructure/data_sources/house_disclosures.py::RELIABILITY_HOUSE_DISCLOSURE — benched to
+    # 0.0 (Phase 6: measured 0.504 direction-aligned vs the refuted 0.70 prior; see the re-review
+    # trigger in docs/RESEARCH-PLAN.md, "Re-review triggers")
+    "house_disclosures": 0.0,
+    # infrastructure/data_sources/__init__.py::RELIABILITY_CONTRACT (usaspending.py imports this).
+    # Untouched by Task 10 — still flagged untested (deferred Task 06 FMP spot-check).
     "usaspending": 0.9,
-    # infrastructure/data_sources/__init__.py::RELIABILITY_STATEMENT (news.py imports this)
+    # infrastructure/data_sources/__init__.py::RELIABILITY_STATEMENT (news.py imports this).
+    # Untouched by Task 10 — still flagged untested.
     "news": 0.6,
 }
 

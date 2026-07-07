@@ -16,7 +16,8 @@ from tests.conftest import FixedClock
 from trading.domain.provenance import Provenance
 from trading.domain.signals import SignalSource
 from trading.infrastructure.data_sources.sec_form4 import (
-    RELIABILITY_INSIDER_TRADE,
+    RELIABILITY_INSIDER_PURCHASE,
+    RELIABILITY_INSIDER_SALE,
     SecForm4Source,
     _value_weight,
 )
@@ -85,14 +86,42 @@ async def test_emits_purchase_and_sale_signals(clock: FixedClock) -> None:
     assert aapl.source_type is SignalSource.DISCLOSED_TRADE
     assert aapl.politician_id is None
     assert aapl.sentiment == pytest.approx(0.5)  # open-market purchase -> bullish
-    assert aapl.source_reliability == RELIABILITY_INSIDER_TRADE
+    # Side-aware reliability (Task 10, docs/RESEARCH-PLAN.md; Phase 6 label run
+    # a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 2026-07-07): purchases keep a reduced-from-flat
+    # reliability (was RELIABILITY_INSIDER_TRADE == 0.75 for both sides before Task 10).
+    assert aapl.source_reliability == RELIABILITY_INSIDER_PURCHASE
     assert aapl.provenance is Provenance.REAL
     assert aapl.raw_payload["transaction_code"] == "P"
 
     msft = by_ticker["MSFT"]
     assert msft.sentiment == pytest.approx(-0.5)  # open-market sale -> bearish
+    # Sales are anti-predictive (Phase 6) -> zero conviction contribution, though the signal is
+    # still emitted (ingested/recorded/labeled) exactly as before.
+    assert msft.source_reliability == RELIABILITY_INSIDER_SALE
     assert msft.provenance is Provenance.REAL
     assert msft.raw_payload["transaction_code"] == "S"
+
+
+async def test_sale_signal_ingestion_unchanged_apart_from_reliability(clock: FixedClock) -> None:
+    """Regression (Task 10): a sale signal's id, ticker, sentiment, politician_weight,
+    provenance, and raw_payload are identical to pre-Task-10 behavior — only
+    ``source_reliability`` differs (0.75 flat -> 0.0). Benching a signal's conviction weight must
+    never change what gets ingested/recorded/labeled."""
+    async with _client(_make_handler([])) as client:
+        source = _source(client, clock)
+        signals = await source.fetch_signals(clock.now().replace(month=1, day=1))
+
+    msft = next(s for s in signals if s.ticker == "MSFT")
+    assert msft.id == "sec-form4-0000789019-2026-06-11-S"
+    assert msft.source_type is SignalSource.DISCLOSED_TRADE
+    assert msft.politician_id is None
+    assert msft.sentiment == pytest.approx(-0.5)
+    assert msft.politician_weight >= 1.0
+    assert msft.provenance is Provenance.REAL
+    assert msft.raw_payload["transaction_code"] == "S"
+    assert msft.raw_payload["ticker"] == "MSFT"
+    # Only the reliability term changed; everything else about the emitted signal is unchanged.
+    assert msft.source_reliability == 0.0
 
 
 async def test_skips_award_grant_rows(clock: FixedClock) -> None:
