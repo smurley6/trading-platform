@@ -30,6 +30,7 @@ onto every caller. Callers still see the FULL requested window in the returned `
 (simply fewer/no bars past the clamp) — this is transparent shrinkage, not a rejected request.
 """
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -52,6 +53,13 @@ _RECENT_DATA_BUFFER = timedelta(minutes=16)
 # Truncate an error response body to this many characters before it goes into the raised
 # message/log — enough to see the actual Alpaca error payload without unbounded log spam.
 _ERROR_BODY_TRUNCATE = 500
+
+# Bounded retry policy for 429 rate-limit responses. Alpaca's data API enforces a per-minute
+# request quota; a long paginated bars walk (the labeler's whole-corpus fetch) will hit it in
+# normal operation, so 429 is retried with exponential backoff — honoring a `Retry-After`
+# header when present — rather than failing the whole job. Any other status is never retried.
+_RATE_LIMIT_MAX_RETRIES = 6
+_RATE_LIMIT_MAX_DELAY_SECONDS = 60.0
 
 
 class AlpacaHistoricalDataError(Exception):
@@ -161,11 +169,22 @@ class AlpacaHistoricalData:
         return PriceSeries(series=series)
 
     async def _fetch(self, params: dict[str, str]) -> dict[str, Any]:
-        response = await self._client.get(
-            f"{self._base_url}/v2/stocks/bars",
-            headers=self._headers,
-            params=params,
-        )
+        for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+            response = await self._client.get(
+                f"{self._base_url}/v2/stocks/bars",
+                headers=self._headers,
+                params=params,
+            )
+            if response.status_code != 429 or attempt == _RATE_LIMIT_MAX_RETRIES:
+                break
+            delay = _retry_delay(response, attempt)
+            logger.warning(
+                "historical data rate-limited (429): retry %d/%d in %.0fs",
+                attempt + 1,
+                _RATE_LIMIT_MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
         if response.status_code == 401:
             # 401 is a genuine credential problem (missing/invalid key pair) — "check
             # credentials" is accurate guidance here and is kept.
@@ -186,6 +205,18 @@ class AlpacaHistoricalData:
             raise AlpacaHistoricalDataError(response.status_code, body)
         payload: dict[str, Any] = response.json()
         return payload
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a 429: the server's `Retry-After` when present and
+    parseable, else exponential backoff (2, 4, 8, ... s), both capped at the max delay."""
+    header = response.headers.get("Retry-After")
+    if header is not None:
+        try:
+            return min(max(float(header), 0.0), _RATE_LIMIT_MAX_DELAY_SECONDS)
+        except ValueError:
+            pass
+    return min(2.0 ** (attempt + 1), _RATE_LIMIT_MAX_DELAY_SECONDS)
 
 
 def _iso(value: datetime) -> str:

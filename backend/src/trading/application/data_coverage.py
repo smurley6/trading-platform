@@ -74,9 +74,7 @@ def coverage_report(signals: Sequence[Signal]) -> CoverageReport:
     real_counts: dict[SignalSource, int] = dict.fromkeys(SignalSource, 0)
     backfilled_counts: dict[SignalSource, int] = dict.fromkeys(SignalSource, 0)
     synthetic_counts: dict[SignalSource, int] = dict.fromkeys(SignalSource, 0)
-    # Dict literal (not dict.fromkeys) so the value type widens to `datetime | None`; the
-    # comprehension form keeps mypy's invariant assignment check happy.
-    last_real: dict[SignalSource, datetime | None] = {s: None for s in SignalSource}
+    last_real: dict[SignalSource, datetime | None] = dict.fromkeys(SignalSource)
 
     for signal in signals:
         source = signal.source_type

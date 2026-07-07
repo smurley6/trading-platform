@@ -361,3 +361,93 @@ async def test_feed_setting_passed_through_as_query_param() -> None:
     )
     await provider.price_series(["AAPL"], _START, _END)
     assert captured["feed"] == "iex"
+
+
+# --- 429 rate-limit retry ---------------------------------------------------------------
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the module's asyncio.sleep with a recorder; returns the recorded delays."""
+    from types import SimpleNamespace
+
+    from trading.infrastructure.market_data import alpaca_history
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(alpaca_history, "asyncio", SimpleNamespace(sleep=fake_sleep))
+    return delays
+
+
+async def test_429_retries_with_exponential_backoff_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, json={"message": "too many requests."})
+        return httpx.Response(200, json=_BARS)
+
+    series = await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert calls["n"] == 3
+    assert delays == [2.0, 4.0]
+    assert series.price_at("AAPL", datetime(2026, 1, 1, 12, tzinfo=UTC)) == Decimal("100.5")
+
+
+async def test_429_honors_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                429, json={"message": "too many requests."}, headers={"Retry-After": "7"}
+            )
+        return httpx.Response(200, json=_BARS)
+
+    await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert delays == [7.0]
+
+
+async def test_429_exhausted_retries_raises_with_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={"message": "too many requests."})
+
+    with pytest.raises(AlpacaHistoricalDataError) as excinfo:
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert excinfo.value.status_code == 429
+    # 6 retries -> 7 total requests; the final 429 is raised, not slept on.
+    assert calls["n"] == 7
+    assert len(delays) == 6
+    # Exponential and capped at 60s.
+    assert delays == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+
+async def test_non_429_errors_are_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, text="boom")
+
+    with pytest.raises(AlpacaHistoricalDataError):
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert calls["n"] == 1
+    assert delays == []
