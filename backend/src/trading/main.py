@@ -25,6 +25,7 @@ from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort, HistoricalDataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
+from trading.application.ports.lock import CrossProcessLockPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.outcome_labels import OutcomeLabelsPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
@@ -71,6 +72,10 @@ from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
 from trading.infrastructure.nlp.sentiment import LexiconSentiment
 from trading.infrastructure.observability.counting_event_store import CountingEventStore
 from trading.infrastructure.observability.metrics import MetricsRegistry
+from trading.infrastructure.persistence.advisory_lock import (
+    NoOpAdvisoryLock,
+    PostgresAdvisoryLock,
+)
 from trading.infrastructure.persistence.broadcasting import BroadcastingEventStore
 from trading.infrastructure.persistence.health import DatabaseReadiness
 from trading.infrastructure.persistence.memory import InMemoryEventStore
@@ -165,6 +170,14 @@ def build_dependencies(settings: Settings) -> AppDeps:
     event_bus = BroadcastingEventStore(inner_store)
     # ...then count appends for observability (events_appended_total / orders_placed_total).
     event_store: EventStorePort = CountingEventStore(event_bus, metrics)
+
+    # Cross-process serialization of the evaluate->place path (review F6). With Postgres wired, a
+    # session-level advisory lock arbitrates the cron-vs-web race a per-process asyncio.Lock cannot
+    # see; the in-memory default is single-process, so a no-op suffices. Handed to every sleeve's
+    # EvaluateSignals below (each also holds its own in-process asyncio.Lock).
+    cross_process_lock: CrossProcessLockPort = (
+        PostgresAdvisoryLock(db_engine) if db_engine is not None else NoOpAdvisoryLock()
+    )
 
     # Rehydrate process-local safety state from the durable log before anything can trade, so a
     # fresh process (the daily cron, or any web redeploy/restart) inherits the operator's last
@@ -384,6 +397,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
             # Seed the drawdown breaker's high-water mark from the durable log (review F3) so a
             # one-shot cron / redeploy compares current equity against the REAL peak, not zero.
             initial_peak_equity=safety_state.peak_equity,
+            # Serialize the evaluate->place path across processes (review F6). The per-sleeve
+            # in-process asyncio.Lock lives inside EvaluateSignals itself.
+            cross_process_lock=cross_process_lock,
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
