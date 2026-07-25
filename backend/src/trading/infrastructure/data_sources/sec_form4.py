@@ -136,6 +136,17 @@ class _ParsedTransaction:
     ticker: str
     issuer_cik: str
     owner: str
+    # reportingOwnerRelationship + aff10b5One, parsed once per ownership document and copied onto
+    # every transaction it yields (they are document-level facts about the filer, not per-row).
+    # Data-plumbing ONLY (Task 12): threaded into raw_payload so role and 10b5-1 plan splits become
+    # computable after a future re-backfill; NO conviction/weight/filter depends on them. Each is
+    # nullable so "absent in source XML" stays distinguishable from a genuine False — the 10b5-1
+    # flag in particular is never False-by-default.
+    is_officer: bool | None
+    is_director: bool | None
+    is_ten_percent_owner: bool | None
+    officer_title: str | None
+    is_10b5_1: bool | None
     transaction_index: int  # position within the filing's kept (P/S) rows, for source_uid
     code: str
     sentiment: float
@@ -163,6 +174,17 @@ def _classify_transactions(document: str) -> list[_ParsedTransaction]:
     owner = _text(root, "reportingOwner/reportingOwnerId/rptOwnerName")
     issuer_cik = _text(root, "issuer/issuerCik")
 
+    # Document-level filer attributes (Task 12, data-plumbing only). Parsed once and copied onto
+    # every kept row. A missing/malformed relationship block leaves the three role flags and the
+    # title None (never False) — backward compatible: absence is not evidence of False. The
+    # aff10b5One flag lives at the ownershipDocument root, not under reportingOwner.
+    relationship = root.find("reportingOwner/reportingOwnerRelationship")
+    is_officer = _bool_flag(relationship, "isOfficer")
+    is_director = _bool_flag(relationship, "isDirector")
+    is_ten_percent_owner = _bool_flag(relationship, "isTenPercentOwner")
+    officer_title = _optional_text(relationship, "officerTitle")
+    is_10b5_1 = _bool_flag(root, "aff10b5One")
+
     parsed: list[_ParsedTransaction] = []
     for txn in root.findall("nonDerivativeTable/nonDerivativeTransaction"):
         code = _text(txn, "transactionCoding/transactionCode")
@@ -183,6 +205,11 @@ def _classify_transactions(document: str) -> list[_ParsedTransaction]:
                 ticker=ticker,
                 issuer_cik=issuer_cik,
                 owner=owner,
+                is_officer=is_officer,
+                is_director=is_director,
+                is_ten_percent_owner=is_ten_percent_owner,
+                officer_title=officer_title,
+                is_10b5_1=is_10b5_1,
                 transaction_index=len(parsed),
                 code=code,
                 sentiment=sentiment,
@@ -445,6 +472,12 @@ def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
         "transaction_value": txn.value,
         "transaction_date": txn.txn_date.date().isoformat(),
         "source_url": source_url,
+        # Task 12 filer attributes (data-plumbing only; nullable when absent in source XML).
+        "is_officer": txn.is_officer,
+        "is_director": txn.is_director,
+        "is_ten_percent_owner": txn.is_ten_percent_owner,
+        "officer_title": txn.officer_title,
+        "is_10b5_1": txn.is_10b5_1,
     }
     return Signal(
         id=f"sec-form4-{txn.issuer_cik or txn.ticker}-{txn.txn_date.date().isoformat()}-{txn.code}",
@@ -483,6 +516,12 @@ def _historical_signal(
         "source_url": source_url,
         "accession": accession,
         "source_uid": source_uid,
+        # Task 12 filer attributes (data-plumbing only; nullable when absent in source XML).
+        "is_officer": txn.is_officer,
+        "is_director": txn.is_director,
+        "is_ten_percent_owner": txn.is_ten_percent_owner,
+        "officer_title": txn.officer_title,
+        "is_10b5_1": txn.is_10b5_1,
     }
     return Signal(
         id=f"sec-form4-hist-{source_uid}",
@@ -713,3 +752,34 @@ def _text(element: ET.Element, path: str) -> str:
     if found is None or found.text is None:
         return ""
     return found.text.strip()
+
+
+def _optional_text(element: ET.Element | None, path: str) -> str | None:
+    """Verbatim (whitespace-trimmed) text of ``path``, or None when the parent block, the child,
+    or its text is absent/empty. Used for ``officerTitle`` (Task 12): None means "not stated in the
+    source XML", distinct from an empty title."""
+    if element is None:
+        return None
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    stripped = found.text.strip()
+    return stripped or None
+
+
+def _bool_flag(element: ET.Element | None, path: str) -> bool | None:
+    """Tri-state parse of an EDGAR ownership boolean (``1``/``true`` -> True, ``0``/``false`` ->
+    False, absent/unrecognized -> None). None is deliberate (Task 12): a missing flag must never be
+    coerced to False, so a future backfill can tell "filer was not a 10b5-1 plan / not an officer"
+    apart from "the source XML never carried the field"."""
+    if element is None:
+        return None
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    text = found.text.strip().lower()
+    if text in ("1", "true"):
+        return True
+    if text in ("0", "false"):
+        return False
+    return None
