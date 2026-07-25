@@ -196,8 +196,10 @@ def create_app(deps: AppDeps) -> FastAPI:
     # Structured JSON access logging + request/latency metrics + a propagated request id.
     app.add_middleware(ObservabilityMiddleware, metrics=deps.metrics)
 
-    # API-key guard for mutating/sensitive endpoints. Unset => open (dev default; auth logs a
-    # single startup warning). Set => protected routes require the key. GET reads stay open.
+    # API-key guard for mutating endpoints AND sensitive reads (review F24). Unset => open (dev
+    # default; auth logs a single startup warning). Set => protected routes require the key;
+    # genuinely public reads (/sleeves, /conviction, health) stay open. The WebSocket routes reuse
+    # `auth.is_authorized` directly since a rejected socket is closed, not answered with a 401.
     auth = ApiKeyAuth(deps.api_key)
     protected = [Depends(auth)]
 
@@ -239,7 +241,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
-    @app.get("/events", response_model=list[EventOut])
+    @app.get("/events", response_model=list[EventOut], dependencies=protected)
     async def list_events(
         stream_id: Annotated[str | None, Query()] = None,
         correlation_id: Annotated[str | None, Query()] = None,
@@ -353,7 +355,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         symbols = sorted({p.symbol for p in held})
         return TrackedSymbolsOut(symbols=symbols or list(deps.default_watchlist))
 
-    @app.get("/positions/live", response_model=LivePositionsOut)
+    @app.get("/positions/live", response_model=LivePositionsOut, dependencies=protected)
     async def live_positions() -> LivePositionsOut:
         held = await deps.read_model.held_positions()
         feed = deps.quote_feed
@@ -369,7 +371,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             positions=[LivePositionOut.from_marked(m) for m in marked],
         )
 
-    @app.get("/capital", response_model=CapitalOut)
+    @app.get("/capital", response_model=CapitalOut, dependencies=protected)
     async def capital() -> CapitalOut:
         # The single shared capital pool both algos draw from = the live Alpaca account. Reports
         # buying power / cash / equity for that one book, plus each algo's slice of it (market value
@@ -477,12 +479,30 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/cycle/mode", response_model=CycleModeOut, dependencies=protected)
     async def set_cycle_mode(body: CycleModeIn) -> CycleModeOut:
         # Live arm/disarm of autonomous trading for the scheduled political cycle. Updates the
-        # reporting copy AND the running PoliticalCycle so the next scheduled tick honours it
-        # with no redeploy. NOT persisted: reverts to the CYCLE_TRADE_MODE env default on
-        # restart, so a restart never silently resumes 'auto'.
+        # reporting copy AND the running PoliticalCycle so the next in-process tick honours it with
+        # no redeploy, AND appends a durable CYCLE_MODE_CHANGED event (plus a USER_ACTION audit
+        # event, mirroring the kill-switch idiom) so the choice survives a restart and reaches the
+        # daily cron: build_dependencies replays the latest one at startup (review F16). Without
+        # the event, a 'manual' disarm was process-local — the cron re-read the env default and a
+        # web redeploy silently resumed 'auto'.
+        correlation_id = str(uuid4())
         deps.cycle_trade_mode = body.mode
         if deps.political_cycle is not None:
             deps.political_cycle.trade_mode = body.mode
+        await _append(
+            deps,
+            _USER_ACTION_STREAM,
+            EventType.USER_ACTION,
+            {"action": "cycle_mode", "mode": body.mode},
+            correlation_id,
+        )
+        await _append(
+            deps,
+            "cycle",
+            EventType.CYCLE_MODE_CHANGED,
+            {"mode": body.mode},
+            correlation_id,
+        )
         return CycleModeOut(mode=body.mode)
 
     @app.get("/kill-switch", response_model=KillSwitchOut)
@@ -540,6 +560,14 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.websocket("/ws/events")
     async def stream_events(websocket: WebSocket) -> None:
+        # The event firehose exposes every signal, order, fill, and decision — a sensitive read
+        # (review F24). When a key is configured, require it (via Authorization: Bearer / X-API-Key)
+        # before accepting; a rejected socket is closed with 1008 (policy violation), not accepted.
+        if not auth.is_authorized(
+            websocket.headers.get("authorization"), websocket.headers.get("x-api-key")
+        ):
+            await websocket.close(code=1008)
+            return
         if deps.event_bus is None:
             await websocket.close(code=1011)
             return

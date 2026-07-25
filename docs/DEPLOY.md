@@ -139,6 +139,33 @@ money is not.
 | `WATCH_THRESHOLD` | `40` | Optional (default `40`) |
 | `CORROBORATION_WINDOW_DAYS` | `21` | Optional (default `21`) |
 
+### Authentication (REQUIRED once a real broker is wired and the URL is reachable)
+
+The mutating endpoints (`POST /proposals/execute`, `/kill-switch`, `/cycle/mode`,
+`/sleeves/{id}/mode`, `/signals`, `/ingest`, `/reconcile`, `/orders/*`) and the sensitive reads
+(`/capital`, `/events`, `/positions/live`, `/ws/events`) are guarded by `API_KEY`.
+
+| Secret | Example | Required? |
+| --- | --- | --- |
+| `API_KEY` | a long random string | **Yes** once a real Alpaca account is wired and the app is internet-reachable |
+| `ALLOW_UNAUTHENTICATED` | `true` | Optional (default `false`) — escape hatch only |
+
+- **Unset (the default):** those endpoints are **OPEN**. Fine for the local in-memory dev app,
+  but on a public URL it exposes the kill switch, the cycle-mode arm/disarm, and manual order
+  execution to anyone. To fail closed, **the app REFUSES TO START when a real Alpaca broker
+  (paper or live) is wired and `API_KEY` is unset** — set `API_KEY`, or (only for a deployment
+  reachable solely on a private network) set `ALLOW_UNAUTHENTICATED=true` to accept the risk
+  deliberately.
+- **Set:** callers must present it via `Authorization: Bearer <key>` **or** the `X-API-Key`
+  header; a mismatch is `401`. Genuinely public reads (`/sleeves`, `/conviction`, `/signals/feed`,
+  `/proposals`, health) stay open. **Rotate** the key by generating a new value and updating the
+  secret (the OWNER's action; the app picks it up on the next deploy).
+- Store it **only** as a secret. Never commit a real key.
+
+> **`MODE_DEFAULT` cannot be `live`.** Boot is always paper — setting `MODE_DEFAULT=live` fails
+> config validation at startup (it would bypass the readiness gate). Enable live per sleeve via
+> `POST /sleeves/{id}/mode` after `ALLOW_LIVE` and the readiness preflight pass.
+
 > Any of the "optional, literal default" flags above (`ENABLE_ALPACA_PAPER`, `USASPENDING_ENABLED`,
 > `ENABLE_CONGRESS_ROSTER`, etc.) can be left as the workflow's literal default **or** overridden
 > by adding a same-named secret. The workflow reads `${{ secrets.NAME || 'default' }}`.

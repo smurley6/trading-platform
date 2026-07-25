@@ -89,6 +89,16 @@ def _kill_switch(*, engaged: bool) -> DomainEvent:
     )
 
 
+def _cycle_mode(mode: str) -> DomainEvent:
+    return DomainEvent(
+        stream_id=f"cycle-{uuid4()}",
+        event_type=EventType.CYCLE_MODE_CHANGED,
+        payload={"mode": mode},
+        occurred_at=datetime.now(tz=UTC),
+        correlation_id=str(uuid4()),
+    )
+
+
 def _snapshot(equity: str) -> DomainEvent:
     return DomainEvent(
         stream_id=f"sleeve-{uuid4()}",
@@ -187,6 +197,20 @@ async def test_peak_equity_from_the_log_trips_the_drawdown_breaker(
         ]
         assert rejections, "a proposal reached the risk gate"
         assert all("drawdown" in str(r) for r in rejections)
+
+
+async def test_cycle_mode_manual_survives_a_fresh_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clean_env(monkeypatch)
+    # The env default arms 'auto', but the operator durably disarmed to 'manual' via POST
+    # /cycle/mode (a CYCLE_MODE_CHANGED event). A fresh process (cron / redeploy) must inherit
+    # the LATEST persisted choice, not silently re-arm 'auto' from the env (review F16).
+    monkeypatch.setenv("CYCLE_TRADE_MODE", "auto")
+    await _append(_cycle_mode("auto"), _cycle_mode("manual"))
+
+    async with _built_deps() as deps:
+        assert deps.cycle_trade_mode == "manual"
 
 
 def _lmt_signal(created_at: datetime, source_type: SignalSource, *, sentiment: float) -> Signal:

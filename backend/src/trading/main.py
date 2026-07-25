@@ -116,7 +116,7 @@ _DEV_PRICES = {
 }
 
 
-def build_dependencies(settings: Settings) -> AppDeps:
+def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppDeps:
     clock = SystemClock()
 
     # Observability registry: backs /metrics and is bumped on each append (events/orders).
@@ -184,6 +184,10 @@ def build_dependencies(settings: Settings) -> AppDeps:
     # kill-switch state (F2) and the true equity high-water mark for the drawdown breaker (F3)
     # instead of booting empty. Reads only existing event types; appends nothing.
     safety_state = _rehydrate_safety_state(settings)
+    # Scheduled-cycle trade mode: the operator's last durable arm/disarm (review F16) wins over the
+    # CYCLE_TRADE_MODE env default, so a UI switch to 'manual' reaches the cron and survives a
+    # redeploy instead of silently re-arming 'auto'. None (never changed) => the env default.
+    effective_cycle_mode = safety_state.cycle_trade_mode or settings.cycle_trade_mode
 
     # Decision/fill price seam: static dev prices by default, swapped to the live feed below
     # when it is enabled so the strategy decides and the paper broker fills at real prices.
@@ -360,6 +364,31 @@ def build_dependencies(settings: Settings) -> AppDeps:
             "enable the live feed, or disable the real broker / REQUIRE_REAL_DATA."
         )
 
+    # --- Fail-closed auth (review F12) --------------------------------------------------------
+    # A real Alpaca account (paper or live) served on a public URL with NO API key leaves the
+    # order-placing and risk-control endpoints (POST /proposals/execute, /kill-switch, /cycle/mode,
+    # /sleeves/{id}/mode) open to anyone who finds it — and a dropped API_KEY env var during a
+    # migration would re-open them silently. Refuse to start the SERVED app in that case, mirroring
+    # the market-data guard above, unless the operator explicitly opts out with
+    # ALLOW_UNAUTHENTICATED=true (a private-network deployment). Scoped to `serves_http`: the
+    # headless cron (`trading.jobs.cycle`) exposes no endpoints, so it is unaffected. A
+    # blank/whitespace API_KEY counts as unset (matches ApiKeyAuth).
+    real_broker_wired = live_broker is not None or alpaca_paper_broker is not None
+    api_key_configured = bool(settings.api_key and settings.api_key.strip())
+    if (
+        serves_http
+        and real_broker_wired
+        and not api_key_configured
+        and not settings.allow_unauthenticated
+    ):
+        raise RuntimeError(
+            "Auth: a real Alpaca broker is wired but API_KEY is unset, leaving the order-placing "
+            "and risk-control endpoints (POST /proposals/execute, /kill-switch, /cycle/mode, "
+            "/sleeves/{id}/mode) open to anyone with the URL. Set API_KEY to require "
+            "authentication, or set ALLOW_UNAUTHENTICATED=true to deliberately accept an "
+            "unauthenticated real-broker deployment (e.g. behind a private network)."
+        )
+
     # ONE shared execution book = the single capital pool. When the real Alpaca paper account is
     # wired it backs EVERY sleeve, so both algos trade one book and are attributed by the sleeve_id
     # already stamped on every order/fill event. Without it, one in-process simulator stands in
@@ -517,7 +546,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
             event_store=event_store,
             clock=clock,
             window_days=settings.corroboration_window_days,
-            trade_mode=settings.cycle_trade_mode,
+            trade_mode=effective_cycle_mode,
         )
 
     # Backtesting (FR-BT): replay the recorded signals through the political strategy and the
@@ -601,7 +630,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         background_tasks=background_tasks,
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
-        cycle_trade_mode=settings.cycle_trade_mode,
+        cycle_trade_mode=effective_cycle_mode,
         cors_allow_origins=[
             o.strip() for o in (settings.cors_allow_origins or "").split(",") if o.strip()
         ],
@@ -965,7 +994,9 @@ def _build_historical_sources(
 def create_application() -> FastAPI:
     settings = Settings()
     configure_logging(settings.log_level)
-    return create_app(build_dependencies(settings))
+    # serves_http=True arms the fail-closed auth guard (review F12): the served app refuses to
+    # start when a real broker is wired with no API_KEY. The headless cron never takes this path.
+    return create_app(build_dependencies(settings, serves_http=True))
 
 
 def main() -> None:

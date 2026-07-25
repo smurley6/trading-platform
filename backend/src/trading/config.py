@@ -39,6 +39,23 @@ class Settings(BaseSettings):
 
     mode_default: TradingMode = TradingMode.PAPER
 
+    @field_validator("mode_default")
+    @classmethod
+    def _reject_live_mode_default(cls, v: TradingMode) -> TradingMode:
+        # Boot is ALWAYS paper (review F10). MODE_DEFAULT=live would route every sleeve straight
+        # to the live account from the first cycle, bypassing the entire readiness gate (no
+        # caps-vs-live-ceilings check, no reconciliation, no confirm, no SLEEVE_MODE_CHANGED /
+        # USER_ACTION audit event). Live is reachable ONLY through the gated AssessLiveReadiness /
+        # POST /sleeves/{id}/mode path, which performs those checks and records the audit events.
+        if v is TradingMode.LIVE:
+            raise ValueError(
+                "MODE_DEFAULT=live is not allowed: boot is always paper. Going live bypasses the "
+                "readiness gate (caps-vs-live-ceilings, reconciliation, confirm) and records no "
+                "audit event. Enable live per sleeve via POST /sleeves/{id}/mode after ALLOW_LIVE "
+                "and the readiness preflight pass. Leave MODE_DEFAULT unset (paper)."
+            )
+        return v
+
     # Event store: in-memory when unset (dev), Postgres when set.
     database_url: str | None = None
 
@@ -280,8 +297,17 @@ class Settings(BaseSettings):
     # /sleeves/{id}/readiness). UNSET (the default) => those endpoints stay OPEN, and the app
     # logs a single startup warning so an unprotected deployment is never silent. SET => callers
     # must present it via `Authorization: Bearer <key>` or the `X-API-Key` header; a mismatch is
-    # 401. GET read endpoints stay open regardless. Env-only, NEVER commit a real key.
+    # 401. Sensitive reads (/capital, /events, /positions/live, /ws/events) join the writes under
+    # the guard (review F24); genuinely public reads (/sleeves, /conviction, health) stay open.
+    # Env-only, NEVER commit a real key.
     api_key: str | None = None
+    # Fail-closed auth escape hatch (review F12). When a REAL Alpaca broker is wired (paper or
+    # live) but `api_key` is unset, the composition root REFUSES to start — an internet-exposed
+    # Render URL would otherwise leave the order-placing / risk-control endpoints open to anyone.
+    # Set this true ONLY to deliberately accept an unauthenticated real-broker deployment (e.g.
+    # one reachable solely on a private network); the default keeps a dropped API_KEY from
+    # silently exposing the write surface.
+    allow_unauthenticated: bool = False
 
     # --- Hardening: observability (interface/composition agent) -----------------------------
     # Structured JSON request logging + Prometheus-text /metrics are always on (dependency-light,

@@ -24,6 +24,11 @@ class EventType:
     USER_ACTION = "user.action"
     LIVE_READINESS_ASSESSED = "live.readiness_assessed"
     SLEEVE_MODE_CHANGED = "sleeve.mode_changed"
+    # Scheduled-cycle trade mode (auto/manual) arm/disarm, appended by POST /cycle/mode so the
+    # operator's choice is DURABLE: a fresh process (the daily cron, any web redeploy/restart)
+    # replays the latest one at startup instead of re-arming the CYCLE_TRADE_MODE env default
+    # (review F16). Paired with a USER_ACTION event, mirroring the kill-switch idiom.
+    CYCLE_MODE_CHANGED = "cycle.mode_changed"
     # Per-source ingest cursor watermark, appended after a successful ingest so a fresh
     # process (the daily cron) resumes where the last run left off instead of re-scanning the
     # whole lookback window (review F1). Replayed at ingest time to rehydrate the cursor.

@@ -4,8 +4,10 @@
 """
 
 import pytest
+from pydantic import ValidationError
 
 from trading.config import Settings
+from trading.domain.sleeves import TradingMode
 
 _RISK = {
     "MAX_TRADE_PCT_OF_SLEEVE": "10",
@@ -56,8 +58,23 @@ def test_paper_keys_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_hardening_defaults_are_off(monkeypatch: pytest.MonkeyPatch) -> None:
     s = _settings(monkeypatch)
     assert s.api_key is None  # open by default (dev)
+    assert s.allow_unauthenticated is False  # fail-closed by default (review F12)
     assert s.enable_trade_updates_stream is False  # no socket by default
     assert s.enable_metrics is True
+
+
+def test_mode_default_is_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _settings(monkeypatch).mode_default is TradingMode.PAPER
+
+
+def test_mode_default_paper_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _settings(monkeypatch, MODE_DEFAULT="paper").mode_default is TradingMode.PAPER
+
+
+def test_mode_default_live_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Boot is always paper (review F10): MODE_DEFAULT=live would bypass the readiness gate.
+    with pytest.raises(ValidationError, match="MODE_DEFAULT=live is not allowed"):
+        _settings(monkeypatch, MODE_DEFAULT="live")
 
 
 def test_trade_updates_stream_url_derived_from_paper_base(

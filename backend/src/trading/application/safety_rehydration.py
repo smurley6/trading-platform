@@ -26,17 +26,25 @@ class SafetyState:
 
     kill_switch_engaged: bool
     peak_equity: Decimal
+    # Latest operator-chosen scheduled-cycle trade mode ('auto' | 'manual'), or None if the
+    # operator never changed it — in which case the composition root falls back to the
+    # CYCLE_TRADE_MODE env default (review F16). Disarming to 'manual' in the UI must reach the
+    # cron that trades and survive a redeploy, not silently re-arm 'auto'.
+    cycle_trade_mode: str | None = None
 
 
 async def rehydrate_safety_state(event_store: EventStorePort) -> SafetyState:
-    """Replay the log for the latest kill-switch state and the high-water equity mark.
+    """Replay the log for the latest kill-switch state, the high-water equity mark, and the
+    latest scheduled-cycle trade mode.
 
-    ``read_all`` yields events in recording order, so the last ``KILL_SWITCH_CHANGED`` wins
-    (the operator's most recent decision). Peak equity is the running maximum across every
-    ``PORTFOLIO_SNAPSHOT``, matching the in-process ``max(peak, current)`` update it seeds.
+    ``read_all`` yields events in recording order, so the last ``KILL_SWITCH_CHANGED`` and the
+    last ``CYCLE_MODE_CHANGED`` win (the operator's most recent decision). Peak equity is the
+    running maximum across every ``PORTFOLIO_SNAPSHOT``, matching the in-process
+    ``max(peak, current)`` update it seeds.
     """
     engaged = False
     peak_equity = Decimal("0")
+    cycle_trade_mode: str | None = None
     for stored in await event_store.read_all():
         event_type = stored.event.event_type
         if event_type == EventType.KILL_SWITCH_CHANGED:
@@ -45,4 +53,10 @@ async def rehydrate_safety_state(event_store: EventStorePort) -> SafetyState:
             equity = Decimal(str(stored.event.payload["equity"]))
             if equity > peak_equity:
                 peak_equity = equity
-    return SafetyState(kill_switch_engaged=engaged, peak_equity=peak_equity)
+        elif event_type == EventType.CYCLE_MODE_CHANGED:
+            cycle_trade_mode = str(stored.event.payload["mode"])
+    return SafetyState(
+        kill_switch_engaged=engaged,
+        peak_equity=peak_equity,
+        cycle_trade_mode=cycle_trade_mode,
+    )

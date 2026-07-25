@@ -79,3 +79,29 @@ async def test_both_are_recovered_together(clock: FixedClock, event_store) -> No
     state = await rehydrate_safety_state(event_store)
     assert state.kill_switch_engaged is True
     assert state.peak_equity == Decimal("10000")
+
+
+def _cycle_mode(clock: FixedClock, *, mode: str) -> DomainEvent:
+    return DomainEvent(
+        stream_id="cycle",
+        event_type=EventType.CYCLE_MODE_CHANGED,
+        payload={"mode": mode},
+        occurred_at=clock.now(),
+        correlation_id="corr",
+    )
+
+
+async def test_no_cycle_mode_event_yields_none(event_store) -> None:  # type: ignore[no-untyped-def]
+    # No persisted change => None, so the composition root falls back to the env default (F16).
+    state = await rehydrate_safety_state(event_store)
+    assert state.cycle_trade_mode is None
+
+
+async def test_latest_cycle_mode_event_wins(clock: FixedClock, event_store) -> None:  # type: ignore[no-untyped-def]
+    # Arm auto, then disarm to manual: the operator's MOST RECENT choice must be the one restored,
+    # so a UI disarm survives a restart instead of silently re-arming auto.
+    await event_store.append(_cycle_mode(clock, mode="auto"))
+    await event_store.append(_cycle_mode(clock, mode="manual"))
+
+    state = await rehydrate_safety_state(event_store)
+    assert state.cycle_trade_mode == "manual"

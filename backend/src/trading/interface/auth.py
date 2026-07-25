@@ -5,9 +5,11 @@ default) and the app logs a single startup warning so an unprotected deployment 
 silent. When an `api_key` IS configured, every protected endpoint requires it via either the
 `Authorization: Bearer <key>` or the `X-API-Key` header; a missing or mismatched key is 401.
 
-GET read endpoints stay open regardless — only writes/sensitive actions are guarded. The
-guard is a FastAPI dependency so wiring it onto a route is one `Depends(...)` and nothing in
-the application or domain layers learns about HTTP auth.
+Writes and SENSITIVE reads (account financials, the full event log, the event firehose) are
+guarded when a key is configured (review F24); genuinely public reads (sleeve list, conviction,
+health) stay open regardless. The guard is a FastAPI dependency so wiring it onto a route is one
+`Depends(...)` and nothing in the application or domain layers learns about HTTP auth; the
+WebSocket routes reuse the same check via `is_authorized`.
 """
 
 import hmac
@@ -43,15 +45,24 @@ class ApiKeyAuth:
     def enabled(self) -> bool:
         return self._api_key is not None
 
+    def is_authorized(self, authorization: str | None, x_api_key: str | None) -> bool:
+        """Return whether the presented headers satisfy the guard, WITHOUT raising.
+
+        Open mode (no configured key) authorizes everything. Otherwise the presented key must
+        constant-time match. Used by the WebSocket routes, which cannot lean on the
+        ``Depends``/``HTTPException`` flow the HTTP routes use (a rejected socket is closed, not
+        answered with a 401 body)."""
+        if self._api_key is None:
+            return True  # open mode
+        presented = _extract_key(authorization, x_api_key)
+        return presented is not None and hmac.compare_digest(presented, self._api_key)
+
     async def __call__(
         self,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     ) -> None:
-        if self._api_key is None:
-            return  # open mode
-        presented = _extract_key(authorization, x_api_key)
-        if presented is None or not hmac.compare_digest(presented, self._api_key):
+        if not self.is_authorized(authorization, x_api_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid or missing API key",
