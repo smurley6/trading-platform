@@ -1,5 +1,6 @@
 // REST client. All calls go through the Vite proxy at /api -> backend (see vite.config.ts).
 
+import { authHeaders } from "./apiKey";
 import type {
   BacktestResult,
   CapitalResult,
@@ -43,10 +44,15 @@ class ApiError extends Error {
   }
 }
 
+// The API key rides on EVERY request, not just the ones the backend currently guards. Uniform is
+// the only shape that can't drift: the guarded set has already grown once (review F24 added the
+// sensitive reads `GET /events`, `/capital`, `/positions/live` to the writes), and an unexpected
+// header is ignored by the routes that stay open. With no key configured, `authHeaders()` is empty
+// and the request is byte-for-byte what it is today.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, {
-    headers: { "content-type": "application/json" },
     ...init,
+    headers: { "content-type": "application/json", ...authHeaders() },
   });
   if (!response.ok) {
     const body = await response.text();

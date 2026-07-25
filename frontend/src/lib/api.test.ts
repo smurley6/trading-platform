@@ -31,8 +31,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
+
+/** The headers of the Nth fetch call, narrowed to the plain record `request()` always builds. */
+function headersOfCall(index: number): Record<string, string> {
+  return fetchMock.mock.calls[index]![1]?.headers as Record<string, string>;
+}
 
 describe("api request building", () => {
   it("GETs the right /api path and parses the JSON body", async () => {
@@ -135,6 +141,72 @@ describe("api request building", () => {
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe("/api/signals?sleeve_id=sleeve-x");
     expect(init?.method).toBe("POST");
+  });
+});
+
+// The backend guards writes AND the sensitive reads (GET /events, /capital, /positions/live) with
+// `X-API-Key` once API_KEY is configured; it stays default-open when it is not. See lib/apiKey.ts.
+describe("api key", () => {
+  it("omits the auth header entirely when no key is configured", async () => {
+    vi.stubEnv("VITE_API_KEY", undefined);
+    fetchMock.mockResolvedValue(okResponse([]));
+
+    await api.events();
+
+    const headers = headersOfCall(0);
+    expect(headers).toEqual({ "content-type": "application/json" });
+    expect("X-API-Key" in headers).toBe(false);
+  });
+
+  it("treats a blank key as unset rather than sending an empty header", async () => {
+    vi.stubEnv("VITE_API_KEY", "   ");
+    fetchMock.mockResolvedValue(okResponse([]));
+
+    await api.events();
+
+    expect(headersOfCall(0)).toEqual({ "content-type": "application/json" });
+  });
+
+  it("sends X-API-Key on the reads the backend guards (events, capital, live positions)", async () => {
+    vi.stubEnv("VITE_API_KEY", "s3cret");
+    fetchMock.mockResolvedValue(okResponse([]));
+
+    await api.events();
+    await api.eventsByCorrelation("corr-1");
+    await api.capital();
+    await api.livePositions();
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (let call = 0; call < 4; call += 1) {
+      expect(headersOfCall(call)).toMatchObject({ "X-API-Key": "s3cret" });
+    }
+  });
+
+  it("sends X-API-Key on writes and on the open reads too (uniform, and trimmed)", async () => {
+    vi.stubEnv("VITE_API_KEY", " s3cret\n");
+    fetchMock.mockResolvedValue(okResponse({}));
+
+    await api.setKillSwitch(true);
+    await api.listSleeves();
+
+    expect(headersOfCall(0)).toMatchObject({
+      "content-type": "application/json",
+      "X-API-Key": "s3cret",
+    });
+    expect(headersOfCall(1)).toMatchObject({ "X-API-Key": "s3cret" });
+  });
+
+  it("keeps the method and body intact alongside the auth header", async () => {
+    vi.stubEnv("VITE_API_KEY", "s3cret");
+    fetchMock.mockResolvedValue(okResponse({ symbols: [] }));
+
+    await api.executeProposals(["LMT"]);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/proposals/execute");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(JSON.stringify({ symbols: ["LMT"] }));
+    expect(headersOfCall(0)).toMatchObject({ "X-API-Key": "s3cret" });
   });
 });
 
