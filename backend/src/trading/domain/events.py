@@ -24,6 +24,10 @@ class EventType:
     USER_ACTION = "user.action"
     LIVE_READINESS_ASSESSED = "live.readiness_assessed"
     SLEEVE_MODE_CHANGED = "sleeve.mode_changed"
+    # Per-source ingest cursor watermark, appended after a successful ingest so a fresh
+    # process (the daily cron) resumes where the last run left off instead of re-scanning the
+    # whole lookback window (review F1). Replayed at ingest time to rehydrate the cursor.
+    INGEST_CURSOR_ADVANCED = "ingest.cursor_advanced"
 
 
 @dataclass(frozen=True, slots=True)

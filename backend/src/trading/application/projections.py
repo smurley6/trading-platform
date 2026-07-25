@@ -45,15 +45,29 @@ def signals_from_events(
 
     When `now` and `window_days` are given, only signals created within the rolling
     corroboration window are returned (FR-POL-4).
+
+    De-duplicates by `signal_id`, keeping the FIRST occurrence in recording order. The
+    daily cron re-fetches its whole lookback and re-appends deterministic-id signals
+    (`house-…`, `sec-form4-…`), so the append-only log can hold up to ~21 copies of one
+    observation (review F1). Because `read_all` yields events in recording order, the first
+    occurrence is the EARLIEST recorded copy — point-in-time correct (never a later append),
+    deterministic, and payload-identical to every other copy. Collapsing here makes the
+    reconstructed window — and therefore conviction/score/contributions — identical whether
+    the log holds 1 copy or 21, healing the already-corrupted log for every replay consumer
+    (trade path, live-trading path, backtest) without mutating the log itself.
     """
     cutoff = None if now is None or window_days is None else now - timedelta(days=window_days)
     signals: list[Signal] = []
+    seen_ids: set[str] = set()
     for stored in events:
         if stored.event.event_type != EventType.SIGNAL_RECEIVED:
             continue
         signal = _signal_from_payload(stored.event.payload)
+        if signal.id in seen_ids:
+            continue
         if cutoff is not None and signal.created_at < cutoff:
             continue
+        seen_ids.add(signal.id)
         signals.append(signal)
     return signals
 
