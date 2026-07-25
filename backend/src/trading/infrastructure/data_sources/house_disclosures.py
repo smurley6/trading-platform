@@ -612,9 +612,43 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str | None:
 # How many lines before/after the asset-type-bracket line to include in the AMOUNT window (Task
 # 07, Scope B). Ticker/sentiment/date parsing keep using the narrower 2-line `block` (unchanged,
 # still correct for those fields); only the amount-bracket search widens, since wide/wrapped PDF
-# layouts can push the low or high figure a line further away than the immediate predecessor.
+# layouts can push the low or high figure a line further away than the immediate predecessor. The
+# window is CONSTRAINED so it can never cross into a NEIGHBORING transaction's rows (review F26);
+# see `_amount_window`.
 _AMOUNT_WINDOW_BEFORE = 2
 _AMOUNT_WINDOW_AFTER = 1
+
+
+def _amount_window(lines: list[str], index: int) -> str:
+    """The current transaction's OWN line span for amount-bracket parsing (review F26).
+
+    ``index`` is the transaction's asset-type (``[ST]``/``[OP]``) line. The window extends up to
+    ``_AMOUNT_WINDOW_BEFORE`` lines back and ``_AMOUNT_WINDOW_AFTER`` lines forward, but STOPS
+    before any line that belongs to a neighbouring transaction:
+
+      * backward — a line carrying ANOTHER asset-type bracket (a neighbour's ``[ST]``/``[OP]``);
+      * forward  — a line carrying another asset-type bracket OR a transaction date (a neighbour's
+        main row always starts with a date; this row's own high-figure continuation line — e.g.
+        ``[ST] $50,000`` — never does).
+
+    Without this guard the old fixed ``[index-2 : index+2]`` window spanned transaction boundaries,
+    so a row two lines from a smaller-bracket neighbour could inherit the neighbour's bracket.
+    """
+    start = index
+    for offset in range(1, _AMOUNT_WINDOW_BEFORE + 1):
+        candidate = index - offset
+        if candidate < 0 or _ASSET_TYPE_RE.search(lines[candidate]):
+            break
+        start = candidate
+    end = index
+    for offset in range(1, _AMOUNT_WINDOW_AFTER + 1):
+        candidate = index + offset
+        if candidate >= len(lines):
+            break
+        if _ASSET_TYPE_RE.search(lines[candidate]) or _DATE_RE.search(lines[candidate]):
+            break
+        end = candidate
+    return "\n".join(lines[start : end + 1])
 
 
 def _parse_transactions(text: str, *, doc_id: str = "") -> list[_Transaction]:
@@ -640,9 +674,7 @@ def _parse_transactions(text: str, *, doc_id: str = "") -> list[_Transaction]:
         if asset_type not in _KEPT_ASSET_TYPES:
             continue
         block = f"{lines[index - 1]} {line}" if index > 0 else line
-        amount_window = "\n".join(
-            lines[max(0, index - _AMOUNT_WINDOW_BEFORE) : index + _AMOUNT_WINDOW_AFTER + 1]
-        )
+        amount_window = _amount_window(lines, index)
         txn = _parse_transaction_block(
             block, asset_type, amount_window=amount_window, doc_id=doc_id
         )
@@ -678,16 +710,50 @@ def _parse_transaction_block(
 
 
 def _transaction_sentiment(block: str) -> float:
-    """Map the standalone single-letter transaction code to a sentiment (E=exchange -> skip)."""
-    match = _TXN_TYPE_RE.search(block)
-    if match is None:
-        return 0.0
-    code = match.group(1)
+    """Map the row's transaction code to a sentiment, reading the code POSITIONALLY (review F11).
+
+    The transaction code is a standalone ``P``/``S``/``E`` that occupies its OWN column: it sits
+    AFTER the asset name + ticker parenthetical and IMMEDIATELY BEFORE the first transaction date.
+    The old first-standalone-``[PSE]``-anywhere search matched inside asset names instead — an
+    ``S&P …`` purchase parsed as a SALE (the standalone ``S`` in "S&P" won), a ``J.P. Morgan…``
+    sale as a PURCHASE (the ``P`` in "J.P."), a ``(S)`` ticker inverted the side, and a stray
+    standalone ``E`` (e.g. "Series E") silently dropped a real P/S row as an exchange. We therefore
+    search ONLY the span between the ticker parenthetical (or the row start when the ticker sits
+    after the date, or is absent) and the first date, and take the code nearest the date.
+    ``E`` = exchange has no clean directional read, so it maps to 0.0 (skip) — but only when it is
+    the genuine code column, never because it appeared inside an asset name. ``None`` (no code in
+    the column) also maps to 0.0.
+    """
+    code = _transaction_code(block)
     if code == "P":
         return _BUY_SENTIMENT
     if code == "S":
         return _SELL_SENTIMENT
     return 0.0
+
+
+def _transaction_code(block: str) -> str | None:
+    """The row's standalone transaction code (``P``/``S``/``E``), read positionally (review F11).
+
+    Window = ``[end of the last ticker parenthetical that closes before the first date, first
+    date)``; when no ticker parenthetical closes before the date (the ticker can render AFTER the
+    date column, or be absent) the window starts at the row's beginning. Within that window we take
+    the standalone code NEAREST the date (the last match) — the code column always abuts the date,
+    so no other standalone ``[PSE]`` can sit between them. Returns ``None`` when the block has no
+    date to anchor on or no standalone code in the window.
+    """
+    date_match = _DATE_RE.search(block)
+    if date_match is None:
+        return None
+    window_end = date_match.start()
+    window_start = 0
+    for ticker_match in _TICKER_RE.finditer(block):
+        if ticker_match.end() <= window_end:
+            window_start = ticker_match.end()
+        else:
+            break
+    codes = _TXN_TYPE_RE.findall(block[window_start:window_end])
+    return codes[-1] if codes else None
 
 
 def _first_date(block: str) -> datetime | None:
@@ -702,23 +768,57 @@ def _first_date(block: str) -> datetime | None:
 
 
 def _parse_amount_range(block: str, *, doc_id: str = "") -> tuple[float, float]:
-    """Extract the Clerk's amount bracket from ``block`` (Task 07, Scope B).
+    """Extract the Clerk's amount bracket from ``block`` (Task 07 Scope B; review F26).
 
-    Tries each closed bracket's tolerant pattern (see ``_BRACKET_PATTERNS``) against the FULL
-    ``block`` text, then the open-top bracket. ``(0.0, 0.0)`` is kept STRICTLY as the parse-miss
-    sentinel — no closed or open-top bracket matched — and is logged with ``doc_id`` (when the
-    caller has one) so misses are visible per run, never silent.
+    Collects every closed-bracket (see ``_BRACKET_PATTERNS``) and open-top match in ``block``,
+    then PREFERS THE MATCH NEAREST THE TRANSACTION LINE — the row's own asset-type (``[ST]``/
+    ``[OP]``) bracket — over the smallest bracket that happens to match. The old code returned the
+    first (smallest) bracket in ascending order, so when a widened window still held a smaller
+    NEIGHBOURING bracket it silently attributed that neighbour's amount to this row. The window is
+    now also constrained (see ``_amount_window``) so a neighbour's figures rarely reach this
+    search at all; the nearest-preference is the second line of defence and the tiebreak.
+
+    When more than one DISTINCT bracket matches, that ambiguity is LOGGED (a visible parse event,
+    never silently absorbed). ``(0.0, 0.0)`` remains STRICTLY the parse-miss sentinel — nothing
+    matched — logged with ``doc_id`` so misses stay visible per run.
     """
+    anchor = _amount_anchor(block)
+    # (distance from the transaction line, low, high) for every bracket match anywhere in block.
+    candidates: list[tuple[int, float, float]] = []
     for pattern, low, high in _BRACKET_PATTERNS:
-        if pattern.search(block):
-            return (low, high)
-    if _OPEN_TOP_RE.search(block):
-        return (_OPEN_TOP_LOW, _OPEN_TOP_HIGH)
-    logger.info(
-        "house_disclosures: amount-bracket parse miss (doc_id=%s)",
-        doc_id or "unknown",
-    )
-    return (0.0, 0.0)
+        for match in pattern.finditer(block):
+            candidates.append((abs(match.start() - anchor), low, high))
+    for match in _OPEN_TOP_RE.finditer(block):
+        candidates.append((abs(match.start() - anchor), _OPEN_TOP_LOW, _OPEN_TOP_HIGH))
+
+    if not candidates:
+        logger.info(
+            "house_disclosures: amount-bracket parse miss (doc_id=%s)",
+            doc_id or "unknown",
+        )
+        return (0.0, 0.0)
+
+    distinct = {(low, high) for _distance, low, high in candidates}
+    if len(distinct) > 1:
+        logger.warning(
+            "house_disclosures: ambiguous amount bracket, choosing the one nearest the "
+            "transaction line (doc_id=%s, candidates=%s)",
+            doc_id or "unknown",
+            sorted(distinct),
+        )
+    # Nearest the transaction line wins; the smaller bracket is only a stable tiebreak.
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+    _distance, low, high = candidates[0]
+    return (low, high)
+
+
+def _amount_anchor(block: str) -> int:
+    """Where the transaction line sits in ``block`` for nearest-bracket scoring (review F26): the
+    position of the row's own asset-type (``[ST]``/``[OP]``) bracket, which always abuts the
+    amount cell. Falls back to the block start when no asset-type bracket is present (e.g. a
+    direct ``_parse_amount_range`` call on a bare row string)."""
+    asset_match = _ASSET_TYPE_RE.search(block)
+    return asset_match.start() if asset_match else 0
 
 
 def _amount_weight(amount_low: float, amount_high: float) -> float:

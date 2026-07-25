@@ -18,6 +18,41 @@ from trading.infrastructure.data_sources.house_disclosures import (
     _parse_transactions,
 )
 
+# --- review F26: a transaction's amount bracket must be its OWN, never a neighbour's --------------
+
+
+def test_bracket_not_inherited_from_a_neighboring_transaction() -> None:
+    """A $250k-$500k trade two single-line rows away from a smaller-bracket neighbour must get its
+    OWN bracket, not the neighbour's $1,001-$15,000 (review F26). The old fixed 4-line amount
+    window spanned transaction boundaries and, trying brackets smallest-first, absorbed the
+    neighbour's bracket."""
+    text = (
+        "Name: Hon. Test Member\n"
+        "SP Small Position Corp (SMLC) P 05/16/2025 06/09/2025 $1,001 - $15,000 [ST]\n"
+        "Filing Status: New\n"
+        "SP Big Position Corp (BIGC) P 05/16/2025 06/09/2025 $250,001 - $500,000 [ST]\n"
+    )
+    by_ticker = {txn.ticker: txn for txn in _parse_transactions(text, doc_id="20033333")}
+    assert (by_ticker["SMLC"].amount_low, by_ticker["SMLC"].amount_high) == (1_001.0, 15_000.0)
+    assert (by_ticker["BIGC"].amount_low, by_ticker["BIGC"].amount_high) == (250_001.0, 500_000.0)
+
+
+def test_ambiguous_window_prefers_bracket_nearest_transaction_line_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When two distinct brackets are both visible, the one NEAREST the transaction line (the row's
+    own ``[ST]``) wins over the smaller one, and the ambiguity is logged as a visible parse event
+    (never silently absorbed — review F26)."""
+    block = "$1,001 - $15,000\nSP Big Corp (BIGC) P 05/16/2025 06/09/2025 $250,001 - $500,000 [ST]"
+    with caplog.at_level(logging.WARNING):
+        result = _parse_amount_range(block, doc_id="20034444")
+    assert result == (250_001.0, 500_000.0)
+    assert any(
+        "ambiguous amount bracket" in record.message and "20034444" in record.message
+        for record in caplog.records
+    )
+
+
 # --- Direct _parse_amount_range fixtures: every closed bracket + open-top, wrapped layouts -----
 
 

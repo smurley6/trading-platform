@@ -31,6 +31,7 @@ Purchase ``+0.5`` / Sale ``-0.5`` sentiment (Exchange skipped), ``politician_wei
 No commercial use of this free government data (spec section 2.2 non-goals).
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
@@ -46,6 +47,8 @@ from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
 from trading.infrastructure.data_sources import RELIABILITY_DISCLOSED_TRADE
 from trading.infrastructure.data_sources.weighting import politician_weight_for
+
+logger = logging.getLogger(__name__)
 
 # Portal roots. The handshake and search endpoints are all under this host.
 _BASE_URL = "https://efdsearch.senate.gov"
@@ -117,6 +120,8 @@ class SenateEfdSource:
         rows = await self._search_ptr_rows(token)
 
         signals: list[Signal] = []
+        dropped_stale = 0  # disclosed on/before the cursor (already seen) — the F13 concern
+        dropped_other = 0  # no ticker / no directional read (exchange)
         for row in rows[: self._max_filings]:
             filing = _parse_search_row(row)
             # Paper (scanned PDF) PTRs have no machine-readable transactions table -> skip; only
@@ -127,10 +132,24 @@ class SenateEfdSource:
             if politician is None:
                 continue
             detail_html = await self._fetch_detail(filing.detail_url, token)
-            for txn in _parse_transactions(detail_html):
-                signal = self._to_signal(txn, filing, politician, since)
+            for txn_index, txn in enumerate(_parse_transactions(detail_html)):
+                signal, reason = self._to_signal(txn, filing, politician, since, txn_index)
                 if signal is not None:
                     signals.append(signal)
+                elif reason == "stale":
+                    dropped_stale += 1
+                else:
+                    dropped_other += 1
+        if dropped_stale or dropped_other:
+            # A dropped-row counter so late/stale disclosures never vanish silently (review F13).
+            logger.info(
+                "senate_efd: %d signal(s), %d transaction(s) dropped "
+                "(%d disclosed on/before cursor, %d no ticker/direction)",
+                len(signals),
+                dropped_stale + dropped_other,
+                dropped_stale,
+                dropped_other,
+            )
         return signals
 
     async def _handshake(self) -> str:
@@ -189,16 +208,27 @@ class SenateEfdSource:
         filing: "_Filing",
         politician: Politician,
         since: datetime,
-    ) -> Signal | None:
+        txn_index: int,
+    ) -> tuple[Signal | None, str]:
+        """Build one Signal, or ``(None, reason)`` when the row is dropped.
+
+        ``created_at`` is the FILING (disclosure) timestamp — ``filing.received`` — NOT the
+        transaction date (review F13): a STOCK Act filing can disclose a trade up to 45 days after
+        it happened, so ageing/windowing by the trade date silently dropped trades disclosed >21
+        days late and mis-aged the rest. This matches the House adapter's PIT rule (created_at =
+        filing date). The transaction date stays in ``raw_payload`` for decay/analysis. Falls back
+        to ``clock.now()`` (ingestion time, never the transaction date) only if the filing carried
+        no parseable received date.
+        """
         ticker = txn.ticker.upper()
         if not ticker:
-            return None
+            return None, "no_ticker"
         sentiment = _direction_sentiment(txn.transaction_type)
         if sentiment == 0.0:
-            return None
-        created_at = txn.transaction_date or filing.received or self._clock.now()
+            return None, "no_direction"
+        created_at = filing.received or self._clock.now()
         if created_at <= since:
-            return None
+            return None, "stale"
         weight = politician_weight_for(politician, ticker, self._sector_map)
         payload: dict[str, Any] = {
             "filer": filing.filer_name,
@@ -209,8 +239,14 @@ class SenateEfdSource:
             "transaction_date": txn.transaction_date_raw,
             "amount": txn.amount_raw,
         }
-        return Signal(
-            id=f"senate-efd-{politician.id}-{ticker}-{int(created_at.timestamp())}",
+        # id includes the side + the transaction's index within the filing (review F25): the old
+        # day-granular id (filer + ticker + disclosure-day) collapsed a same-day buy+sell into one
+        # row (page order decided the surviving side) and dropped a second same-side same-ticker
+        # row on the same day.
+        side = "buy" if sentiment > 0 else "sell"
+        signal = Signal(
+            id=f"senate-efd-{politician.id}-{ticker}-{side}-{txn_index}-"
+            f"{int(created_at.timestamp())}",
             created_at=created_at,
             source_type=SignalSource.DISCLOSED_TRADE,
             ticker=ticker,
@@ -226,6 +262,7 @@ class SenateEfdSource:
                 else Provenance.SYNTHETIC
             ),
         )
+        return signal, "ok"
 
 
 class _Filing:

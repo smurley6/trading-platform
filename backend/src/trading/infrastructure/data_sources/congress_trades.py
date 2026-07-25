@@ -8,6 +8,7 @@ shape is normalized defensively so a provider swap is a parsing change, not a co
 No commercial use of the free tier (spec section 2.2 non-goals).
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from typing import Any
@@ -23,9 +24,16 @@ from trading.domain.signals import Signal, SignalSource
 from trading.infrastructure.data_sources import RELIABILITY_DISCLOSED_TRADE
 from trading.infrastructure.data_sources.weighting import politician_weight_for
 
+logger = logging.getLogger(__name__)
+
 # Purchases read bullish, sales bearish; magnitude is modest since the leg is lagged.
 _BUY_SENTIMENT = 0.5
 _SELL_SENTIMENT = -0.5
+
+# FMP disclosure/filing-date field names, most-preferred first. The endpoint stamps the day the
+# trade became PUBLIC under one of these (``dateRecieved`` is FMP's own long-standing misspelling
+# on some senate/house endpoints). This is the PIT-correct timestamp — never the transaction date.
+_DISCLOSURE_DATE_FIELDS = ("disclosureDate", "dateRecieved", "dateReceived", "filingDate")
 
 
 class CongressTradesSource:
@@ -56,23 +64,41 @@ class CongressTradesSource:
         rows: list[dict[str, Any]] = response.json()
 
         signals: list[Signal] = []
+        dropped_stale = 0  # disclosed on/before the cursor (already seen) — the F13 concern
+        dropped_other = 0  # no ticker / no directional read
         for row in rows:
             ticker = str(row.get("symbol", "")).upper()
             if not ticker:
+                dropped_other += 1
                 continue
-            traded = _parse_date(str(row.get("transactionDate", ""))) or self._clock.now()
-            if traded <= since:
+            # created_at = the DISCLOSURE date (when the trade became public), NOT the transaction
+            # date (review F13): a STOCK Act filing can lag the trade up to 45 days, so windowing/
+            # ageing by the trade date silently dropped late-disclosed trades and mis-aged the rest.
+            # This matches the House/Senate PIT rule. The transaction date stays in raw_payload.
+            traded = _parse_date(str(row.get("transactionDate", "")))
+            # created_at/windowing must NEVER be the transaction date (PIT lookahead — review F13),
+            # so when the row carries no disclosure field we fall back to ingestion time
+            # (clock.now()), never to `traded`. This mirrors the Senate adapter's
+            # `filing.received or clock.now()` chain. `traded` is used only for the id key below.
+            disclosed = _disclosure_date(row) or self._clock.now()
+            if disclosed <= since:
+                dropped_stale += 1
                 continue
             politician = self._resolve_politician(row)
             if politician is None:
+                dropped_other += 1
                 continue
             sentiment = _direction_sentiment(str(row.get("type", "")))
             if sentiment == 0.0:
+                dropped_other += 1
                 continue
+            # Keep the id keyed on the transaction instant so two trades a filer discloses together
+            # (same disclosure date) stay distinct; created_at carries the PIT disclosure time.
+            uid_ts = int((traded or disclosed).timestamp())
             signals.append(
                 Signal(
-                    id=f"trade-{politician.id}-{ticker}-{int(traded.timestamp())}",
-                    created_at=traded,
+                    id=f"trade-{politician.id}-{ticker}-{uid_ts}",
+                    created_at=disclosed,
                     source_type=SignalSource.DISCLOSED_TRADE,
                     ticker=ticker,
                     politician_id=politician.id,
@@ -87,6 +113,16 @@ class CongressTradesSource:
                         else Provenance.SYNTHETIC
                     ),
                 )
+            )
+        if dropped_stale or dropped_other:
+            # A dropped-row counter so late/stale disclosures never vanish silently (review F13).
+            logger.info(
+                "congress_trades: %d signal(s), %d row(s) dropped "
+                "(%d disclosed on/before cursor, %d no ticker/politician/direction)",
+                len(signals),
+                dropped_stale + dropped_other,
+                dropped_stale,
+                dropped_other,
             )
         return signals
 
@@ -104,6 +140,15 @@ def _direction_sentiment(transaction_type: str) -> float:
     if "sale" in lowered or "sell" in lowered:
         return _SELL_SENTIMENT
     return 0.0
+
+
+def _disclosure_date(row: dict[str, Any]) -> datetime | None:
+    """The filing/disclosure date from whichever FMP field the endpoint used (review F13)."""
+    for field in _DISCLOSURE_DATE_FIELDS:
+        parsed = _parse_date(str(row.get(field, "")))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _parse_date(value: str) -> datetime | None:

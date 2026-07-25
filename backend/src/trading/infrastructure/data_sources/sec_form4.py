@@ -462,6 +462,26 @@ class SecForm4Source:
 
 
 def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
+    # id granularity brought up to the historical accession:index scheme (review F25). The old
+    # live id (issuer + transaction DATE + code) collapsed a same-day cluster of three officers
+    # buying the same issuer — the single most informative Form 4 pattern — into ONE rm_signals
+    # row (rm_signals is keyed on signal_id), silently dropping two of the three. The accession
+    # (parsed from the EDGAR archive URL) is per-filing, so three officers = three accessions =
+    # three ids; ``:transaction_index`` further separates multiple kept rows in one filing.
+    # created_at is UNCHANGED here (still the transaction date): the live created_at question is a
+    # SEPARATE defect, out of scope for this id fix (task-19 / review F25 guardrail).
+    accession = _accession_from_archive_url(source_url)
+    if accession is not None:
+        source_uid = f"{accession}:{txn.transaction_index}"
+        signal_id = f"sec-form4-{source_uid}"
+    else:
+        # Defensive fallback when the URL carries no accession directory: owner + date + code +
+        # row index still separate a same-day multi-officer cluster into distinct ids.
+        source_uid = None
+        signal_id = (
+            f"sec-form4-{txn.issuer_cik or txn.ticker}-{_owner_slug(txn.owner)}-"
+            f"{txn.txn_date.date().isoformat()}-{txn.code}-{txn.transaction_index}"
+        )
     payload: dict[str, Any] = {
         "ticker": txn.ticker,
         "issuer_cik": txn.issuer_cik,
@@ -472,6 +492,10 @@ def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
         "transaction_value": txn.value,
         "transaction_date": txn.txn_date.date().isoformat(),
         "source_url": source_url,
+        # Traceability parity with the historical path (accession + per-row source_uid), when the
+        # archive URL exposed the accession. Both None when it did not (additive, JSONB-safe).
+        "accession": accession,
+        "source_uid": source_uid,
         # Task 12 filer attributes (data-plumbing only; nullable when absent in source XML).
         "is_officer": txn.is_officer,
         "is_director": txn.is_director,
@@ -480,7 +504,7 @@ def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
         "is_10b5_1": txn.is_10b5_1,
     }
     return Signal(
-        id=f"sec-form4-{txn.issuer_cik or txn.ticker}-{txn.txn_date.date().isoformat()}-{txn.code}",
+        id=signal_id,
         created_at=txn.txn_date,
         source_type=SignalSource.DISCLOSED_TRADE,
         ticker=txn.ticker,
@@ -682,6 +706,30 @@ def _extract_accession(submission_text: str) -> str | None:
     if the header ever omits it."""
     match = _ACCESSION_RE.search(submission_text)
     return match.group(1) if match else None
+
+
+# The live path's archive URLs embed the accession as a NO-DASHES 18-digit directory, e.g.
+# ".../edgar/data/320193/000032019326000077/form4.xml"; we re-dash it to the canonical
+# "0000320193-26-000077" so a live signal's source_uid matches the historical accession:index
+# scheme exactly (review F25).
+_ARCHIVE_ACCESSION_RE = re.compile(r"/(\d{10})(\d{2})(\d{6})/")
+
+
+def _accession_from_archive_url(url: str) -> str | None:
+    """The canonical dashed accession from a live EDGAR archive URL (review F25), or ``None`` when
+    the URL carries no 18-digit accession directory (the caller then uses the owner+date fallback
+    id)."""
+    match = _ARCHIVE_ACCESSION_RE.search(url)
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _owner_slug(owner: str) -> str:
+    """A compact, id-safe token for a reporting owner name (fallback live id only, review F25):
+    uppercase alphanumerics, other runs collapsed to a single '-'. Empty -> 'unknown'."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", owner).strip("-").upper()
+    return slug or "UNKNOWN"
 
 
 _FILE_NAME_ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})\.txt$")

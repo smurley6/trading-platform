@@ -316,3 +316,42 @@ async def test_congress_trades_sale_is_bearish(
         signals = await source.fetch_signals(clock.now().replace(month=1))
 
     assert signals[0].sentiment < 0
+
+
+async def test_congress_trades_missing_disclosure_date_never_uses_transaction_date(
+    clock: FixedClock, politicians: StaticPoliticianRepository
+) -> None:
+    """PIT (review F13): a row carrying NO disclosure/filing field must fall back to INGESTION time
+    (``clock.now()``), never to the transaction date — stamping the trade date as ``created_at``
+    would reintroduce the exact lookahead F13 exists to eliminate."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "symbol": "NVDA",
+                    "transactionDate": "2026-06-08",  # the ONLY date on the row (no disclosure)
+                    "type": "Purchase",
+                    "firstName": "Frank",
+                    "lastName": "Delgado",
+                }
+            ],
+        )
+
+    async with _client(handler) as client:
+        source = CongressTradesSource(
+            client=client,
+            endpoint="http://provider.test/senate-trading",
+            api_key="test-key",
+            politicians=politicians,
+            sector_map=StaticSectorMap(),
+            clock=clock,
+        )
+        signals = await source.fetch_signals(clock.now().replace(month=1))
+
+    assert len(signals) == 1
+    signal = signals[0]
+    # created_at is ingestion time (PIT-safe), NOT the transaction date.
+    assert signal.created_at == clock.now()
+    assert signal.created_at.date().isoformat() != signal.raw_payload["transactionDate"]

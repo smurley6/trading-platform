@@ -21,7 +21,11 @@ from tests.conftest import FixedClock
 from trading.domain.politicians import DEFAULT_BASE_WEIGHTS, Politician, PoliticianRole
 from trading.domain.provenance import Provenance
 from trading.domain.signals import SignalSource
-from trading.infrastructure.data_sources.senate_efd import SenateEfdSource
+from trading.infrastructure.data_sources.senate_efd import (
+    SenateEfdSource,
+    _Filing,
+    _Transaction,
+)
 from trading.infrastructure.politicians.repository import StaticPoliticianRepository
 from trading.infrastructure.reference.sectors import StaticSectorMap
 
@@ -145,13 +149,31 @@ async def test_exchange_and_tickerless_rows_are_dropped(clock: FixedClock) -> No
     assert all(signal.ticker not in {"", "--"} for signal in signals)
 
 
-async def test_window_filters_transactions_at_or_before_cursor(clock: FixedClock) -> None:
+async def test_window_filters_by_filing_date_not_transaction_date(clock: FixedClock) -> None:
+    # Windowing is by the FILING (received) date now, not the transaction date (review F13). The
+    # fixtures' received dates are Delgado 2026-06-10 and Holt 2026-06-09; a cursor at the latest
+    # received date (2026-06-10) filters BOTH filings (received <= since), so nothing passes —
+    # even though several transactions are dated after 2026-06-09.
     async with _client(_efd_handler()) as client:
-        # Cursor at the latest transaction date (2026-06-09) -> only strictly-later rows survive,
-        # and every fixture transaction is on or before it, so nothing passes.
-        signals = await _source(client, clock).fetch_signals(datetime(2026, 6, 9, tzinfo=UTC))
+        signals = await _source(client, clock).fetch_signals(datetime(2026, 6, 10, tzinfo=UTC))
 
     assert signals == []
+
+
+async def test_created_at_is_filing_date_and_late_disclosure_survives(clock: FixedClock) -> None:
+    # A trade dated well before its filing must still be INGESTED, stamped with the FILING date,
+    # not silently dropped by transaction-date windowing (review F13). Delgado's report was
+    # received 2026-06-10; its NVDA transaction is dated earlier. A cursor of 2026-06-09 (after the
+    # transaction date, before the received date) would have dropped it under the old rule.
+    async with _client(_efd_handler()) as client:
+        signals = await _source(client, clock).fetch_signals(datetime(2026, 6, 9, tzinfo=UTC))
+
+    by_ticker = {signal.ticker: signal for signal in signals}
+    assert "NVDA" in by_ticker  # survived despite an earlier transaction date
+    nvda = by_ticker["NVDA"]
+    assert nvda.created_at == datetime(2026, 6, 10, tzinfo=UTC)  # the FILING (received) date
+    # The transaction date is retained in the payload for decay/analysis, distinct from created_at.
+    assert nvda.raw_payload["transaction_date"] != nvda.created_at.date().isoformat()
 
 
 async def test_real_roster_stamps_real_provenance(clock: FixedClock) -> None:
@@ -238,6 +260,45 @@ async def test_amount_multiplier_scales_with_bracket(amount: str, expected_floor
     from trading.infrastructure.data_sources.senate_efd import _amount_multiplier
 
     assert _amount_multiplier(amount) >= expected_floor
+
+
+def _efd_txn(ticker: str, transaction_type: str) -> _Transaction:
+    return _Transaction(
+        ticker=ticker,
+        asset_name=f"{ticker} Common Stock",
+        transaction_type=transaction_type,
+        transaction_date=datetime(2026, 6, 8, tzinfo=UTC),
+        transaction_date_raw="06/08/2026",
+        amount_raw="$1,001 - $15,000",
+    )
+
+
+async def test_same_day_buy_and_sell_yield_two_distinct_ids(clock: FixedClock) -> None:
+    """A senator who BUYS and SELLS the same ticker on the same day (same filing) must yield TWO
+    distinct rm_signals rows: the old day-granular id (filer+ticker+day) collapsed them into one,
+    with page order deciding the surviving side (review F25). The id now carries side + index."""
+    async with _client(_efd_handler()) as client:
+        source = _source(client, clock, politicians=_real_roster())
+        politician = _real_roster().all()[0]
+        filing = _Filing(
+            filer_name=politician.name,
+            detail_url="https://efdsearch.senate.gov/search/view/ptr/x/",
+            is_electronic=True,
+            received=datetime(2026, 6, 10, tzinfo=UTC),
+        )
+        since = datetime(2026, 1, 1, tzinfo=UTC)
+        buy, buy_reason = source._to_signal(
+            _efd_txn("AAPL", "Purchase"), filing, politician, since, 0
+        )
+        sell, sell_reason = source._to_signal(
+            _efd_txn("AAPL", "Sale (Full)"), filing, politician, since, 1
+        )
+
+    assert (buy_reason, sell_reason) == ("ok", "ok")
+    assert buy is not None and sell is not None
+    assert buy.id != sell.id  # side (+index) distinguishes the same-day same-ticker buy/sell
+    # created_at is the FILING date for both, not the transaction date (review F13).
+    assert buy.created_at == sell.created_at == filing.received
 
 
 async def test_max_filings_caps_detail_fetches(clock: FixedClock) -> None:
