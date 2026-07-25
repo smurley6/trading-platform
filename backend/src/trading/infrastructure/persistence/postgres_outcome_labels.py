@@ -57,3 +57,49 @@ class PostgresOutcomeLabels:
         query = select(func.count()).where(outcome_labels_table.c.label_run_id == label_run_id)
         async with self._engine.connect() as conn:
             return int((await conn.execute(query)).scalar_one())
+
+    async def latest_run_id(self) -> str | None:
+        # The table has no timestamp; `id` is a monotonic identity, so the row with the greatest
+        # id belongs to the most recently written run (a rerun's delete-then-write gets fresh ids).
+        query = (
+            select(outcome_labels_table.c.label_run_id)
+            .order_by(outcome_labels_table.c.id.desc())
+            .limit(1)
+        )
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(query)).first()
+        return None if row is None else str(row[0])
+
+    async def labels_for_signals(
+        self, signal_ids: Sequence[str], *, label_run_id: str
+    ) -> Sequence[OutcomeLabel]:
+        if not signal_ids:
+            return []
+        query = select(
+            outcome_labels_table.c.signal_id,
+            outcome_labels_table.c.ticker,
+            outcome_labels_table.c.horizon_days,
+            outcome_labels_table.c.abnormal_return,
+            outcome_labels_table.c.benchmark,
+            outcome_labels_table.c.status,
+            outcome_labels_table.c.reason,
+            outcome_labels_table.c.label_run_id,
+        ).where(
+            (outcome_labels_table.c.label_run_id == label_run_id)
+            & (outcome_labels_table.c.signal_id.in_(list(dict.fromkeys(signal_ids))))
+        )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(query)).all()
+        return [
+            OutcomeLabel(
+                signal_id=row.signal_id,
+                ticker=row.ticker,
+                horizon_days=row.horizon_days,
+                abnormal_return=row.abnormal_return,
+                benchmark=row.benchmark,
+                status=row.status,
+                reason=row.reason,
+                label_run_id=row.label_run_id,
+            )
+            for row in rows
+        ]

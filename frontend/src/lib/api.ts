@@ -19,9 +19,11 @@ import type {
   RiskPrecheckResult,
   SignalFeedItem,
   SignalInput,
+  SignalLabelsResult,
   Sleeve,
   SleeveModeResult,
   StoredEventDto,
+  SystemStatusResult,
   TrackedSymbols,
   TradingMode,
 } from "./types";
@@ -81,6 +83,26 @@ export const api = {
 
   ingest: () => request<IngestResult>("/ingest", { method: "POST" }),
   reconcile: () => request<ReconcileReport[]>("/reconcile", { method: "POST" }),
+
+  // System screen (UI Phase D §5.5): the read-only operational state — risk caps/ceilings +
+  // kill-switch, scheduler loops, and the data-source config mirror. Resolves to a disabled shape
+  // on any non-200 / network error so the screen renders unconditionally (like the other feeds).
+  systemStatus: (): Promise<SystemStatusResult> =>
+    request<SystemStatusResult>("/system/status").catch(() => ({
+      risk: { enabled: false, kill_switch_engaged: false, caps: [] },
+      jobs: [],
+      data_sources: [],
+    })),
+
+  // Research surface (UI Phase D §5.5): the outcome_labels for the most-recent `limit` signals
+  // (the same window /signals/feed loads), joined by the Signals grid into per-signal 1/5/20-day
+  // forward abnormal returns. Disabled shape (empty) until a labeler run exists / on any error.
+  signalLabels: (limit = 100): Promise<SignalLabelsResult> =>
+    request<SignalLabelsResult>(`/signals/labels?limit=${limit}`).catch(() => ({
+      enabled: false,
+      label_run_id: null,
+      labels: [],
+    })),
 
   // Daily-cycle proposals: the actionable trades the cycle found, the watch-tier candidates it
   // expects to act on next, and the current cycle mode (auto/manual).

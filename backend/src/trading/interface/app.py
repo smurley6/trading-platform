@@ -5,6 +5,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 from uuid import uuid4
@@ -34,7 +35,7 @@ from trading.application.ports.read_model import ReadModelPort
 from trading.application.ports.trade_updates import TradeUpdatesStreamPort
 from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
-from trading.application.risk import KillSwitch
+from trading.application.risk import KillSwitch, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
@@ -56,11 +57,13 @@ from trading.interface.schemas import (
     ConvictionItem,
     CycleModeIn,
     CycleModeOut,
+    DataSourceOut,
     EvaluateOut,
     EventOut,
     ExecuteProposalsIn,
     ExecuteProposalsOut,
     IngestOut,
+    JobStatusOut,
     KillSwitchIn,
     KillSwitchOut,
     LivePositionOut,
@@ -68,20 +71,26 @@ from trading.interface.schemas import (
     LiveReadinessOut,
     OrderOut,
     OrderSyncOut,
+    OutcomeLabelOut,
     PredictedItem,
     ProposalItem,
     ProposalsOut,
     QuoteOut,
     QuotesOut,
     ReconcileOut,
+    RiskCapOut,
     RiskPrecheckOut,
     SignalFeedItem,
     SignalIn,
+    SignalLabelsOut,
     SleeveModeIn,
     SleeveModeOut,
     SleeveOut,
+    SystemRiskOut,
+    SystemStatusOut,
     TrackedSymbolsOut,
 )
+from trading.interface.system_status import DataSourceStatus, ScheduledLoop, SchedulerState
 
 _USER_ACTION_STREAM = "user-actions"
 
@@ -128,6 +137,17 @@ class AppDeps:
     reconcile_interval_seconds: int = 0  # 0 disables the scheduler (tests)
     ingest_interval_seconds: int = 0
     order_sync_interval_seconds: int = 0  # 0 disables the scheduled order-sync job
+    # System screen (UI Phase D §5.5). The mutable scheduler runtime (last/next run per loop),
+    # populated by the app lifespan and read by GET /system/status. Always present (a fresh, empty
+    # state before the scheduler starts is the honest default, e.g. in tests).
+    scheduler_state: SchedulerState = field(default_factory=SchedulerState)
+    # Configured risk caps + their hardened live ceilings, for the Risk pane's configured-vs-ceiling
+    # bars (§5.5). None only if never wired (the endpoint then reports the disabled shape).
+    risk_limits: RiskLimits | None = None
+    live_ceilings: RiskLimits | None = None
+    # Read-only mirror of the ingest-adapter config (enabled state + reliability prior), for the
+    # Data sources pane (§5.5). Built in the composition root where the enable predicates live.
+    data_sources: list[DataSourceStatus] = field(default_factory=list)
     # Observability (spec §15). Always present; the registry backs /metrics and the request
     # middleware. `enable_metrics` toggles the /metrics route's exposure only.
     metrics: MetricsRegistry = field(default_factory=MetricsRegistry)
@@ -163,13 +183,23 @@ def create_app(deps: AppDeps) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         scheduler = None
-        jobs = _scheduled_jobs(deps)
-        if jobs:
+        loops = _loop_definitions(deps)
+        active = [(loop, func) for loop, func in loops if loop.enabled]
+        if active:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
             scheduler = AsyncIOScheduler()
-            for func, seconds in jobs:
-                scheduler.add_job(func, "interval", seconds=seconds)
+            for loop, func in active:
+                job = scheduler.add_job(
+                    _record_run_wrapper(deps, loop.name, func),
+                    "interval",
+                    seconds=loop.interval_seconds,
+                    id=loop.name,
+                )
+                # Bind the live next-run provider so GET /system/status can report it without the
+                # route reaching into APScheduler. A typed factory captures each loop's own job
+                # (a bare default-arg lambda defeats mypy's inference).
+                deps.scheduler_state.bind_next_run(loop.name, _next_run_provider(job))
             scheduler.start()
         # Start any long-running background consumers (e.g. the live quote stream). Empty by
         # default, so a bare run launches nothing and opens no socket.
@@ -290,6 +320,29 @@ def create_app(deps: AppDeps) -> FastAPI:
     ) -> list[SignalFeedItem]:
         records = await deps.read_model.recent_signals(limit=limit)
         return [SignalFeedItem.from_record(r) for r in records]
+
+    @app.get("/signals/labels", response_model=SignalLabelsOut)
+    async def signal_labels(
+        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    ) -> SignalLabelsOut:
+        # Research surface (UI Phase D §5.5): the outcome_labels for the most-recent `limit`
+        # signals (the same window GET /signals/feed loads), joined by the Signals grid to render
+        # per-signal forward abnormal returns at 1/5/20-day horizons. Reads the rebuildable
+        # outcome_labels projection (never the event log); graceful disabled shape until labeled.
+        store = deps.outcome_labels
+        if store is None:
+            return SignalLabelsOut(enabled=False, label_run_id=None, labels=[])
+        run_id = await store.latest_run_id()
+        if run_id is None:
+            return SignalLabelsOut(enabled=False, label_run_id=None, labels=[])
+        records = await deps.read_model.recent_signals(limit=limit)
+        signal_ids = [r.signal.id for r in records]
+        labels = await store.labels_for_signals(signal_ids, label_run_id=run_id)
+        return SignalLabelsOut(
+            enabled=True,
+            label_run_id=run_id,
+            labels=[OutcomeLabelOut.from_label(label) for label in labels],
+        )
 
     @app.get("/conviction", response_model=list[ConvictionItem])
     async def conviction() -> list[ConvictionItem]:
@@ -554,6 +607,26 @@ def create_app(deps: AppDeps) -> FastAPI:
     async def sync_orders() -> list[OrderSyncOut]:
         return [OrderSyncOut.from_report(await s.execute()) for s in deps.order_syncs]
 
+    @app.get("/system/status", response_model=SystemStatusOut)
+    async def system_status() -> SystemStatusOut:
+        # The System screen's single read (§5.5): risk caps/ceilings + kill-switch, the scheduler
+        # loops (last/next/interval), and the data-source config mirror. Read-only; no auth (reads
+        # stay open). Reconciliation state + kill-switch history come from /reconcile and /events.
+        loops = _loop_definitions(deps)
+        jobs = [
+            JobStatusOut.from_loop(
+                loop,
+                last_run=deps.scheduler_state.last_run(loop.name),
+                next_run=deps.scheduler_state.next_run(loop.name),
+            )
+            for loop, _func in loops
+        ]
+        return SystemStatusOut(
+            risk=_system_risk(deps),
+            jobs=jobs,
+            data_sources=[DataSourceOut.from_status(s) for s in deps.data_sources],
+        )
+
     @app.post("/orders/{client_order_id}/cancel", response_model=CancelOut, dependencies=protected)
     async def cancel_order(
         client_order_id: str,
@@ -675,15 +748,102 @@ async def _sync_orders_all(deps: AppDeps) -> None:
         await sync.execute()
 
 
-def _scheduled_jobs(deps: AppDeps) -> list[tuple[Any, int]]:
-    jobs: list[tuple[Any, int]] = []
-    if deps.reconcile_interval_seconds > 0 and deps.reconcilers:
-        jobs.append((lambda: _reconcile_all(deps), deps.reconcile_interval_seconds))
-    if deps.ingest_interval_seconds > 0 and deps.political_cycle is not None:
-        jobs.append((deps.political_cycle.execute, deps.ingest_interval_seconds))
-    if deps.order_sync_interval_seconds > 0 and deps.order_syncs:
-        jobs.append((lambda: _sync_orders_all(deps), deps.order_sync_interval_seconds))
-    return jobs
+def _loop_definitions(
+    deps: AppDeps,
+) -> list[tuple[ScheduledLoop, Callable[[], Awaitable[None]]]]:
+    """The full set of scheduler loops (enabled and disabled) + each loop's coroutine.
+
+    Every loop is returned so ``GET /system/status`` can report its interval even when disabled;
+    the lifespan schedules only the ``enabled`` ones. A loop is enabled when its interval is > 0
+    AND its dependency is wired (mirrors the previous ``_scheduled_jobs`` gate exactly).
+    """
+
+    async def _cycle() -> None:
+        if deps.political_cycle is not None:
+            await deps.political_cycle.execute()
+
+    return [
+        (
+            ScheduledLoop(
+                name="reconcile",
+                description="Reconcile local projections against the broker (pool-level)",
+                interval_seconds=deps.reconcile_interval_seconds,
+                enabled=deps.reconcile_interval_seconds > 0 and bool(deps.reconcilers),
+            ),
+            lambda: _reconcile_all(deps),
+        ),
+        (
+            ScheduledLoop(
+                name="ingest",
+                description="Ingest + classify signals, then evaluate (the political cycle)",
+                interval_seconds=deps.ingest_interval_seconds,
+                enabled=deps.ingest_interval_seconds > 0 and deps.political_cycle is not None,
+            ),
+            _cycle,
+        ),
+        (
+            ScheduledLoop(
+                name="order_sync",
+                description="Pull async broker order state and emit missing lifecycle events",
+                interval_seconds=deps.order_sync_interval_seconds,
+                enabled=deps.order_sync_interval_seconds > 0 and bool(deps.order_syncs),
+            ),
+            lambda: _sync_orders_all(deps),
+        ),
+    ]
+
+
+def _next_run_provider(job: Any) -> Callable[[], datetime | None]:
+    """A no-arg provider returning the APScheduler job's current ``next_run_time`` (or None)."""
+
+    def provider() -> datetime | None:
+        return job.next_run_time  # type: ignore[no-any-return]
+
+    return provider
+
+
+def _record_run_wrapper(
+    deps: AppDeps, name: str, func: Callable[[], Awaitable[None]]
+) -> Callable[[], Awaitable[None]]:
+    """Wrap a scheduled coroutine so each fire records its last-run time on the scheduler state."""
+
+    async def run() -> None:
+        deps.scheduler_state.record_run(name, deps.clock.now())
+        await func()
+
+    return run
+
+
+def _system_risk(deps: AppDeps) -> SystemRiskOut:
+    """Build the Risk pane's configured-vs-ceiling caps + kill-switch state (§5.5)."""
+    limits = deps.risk_limits
+    ceilings = deps.live_ceilings
+    if limits is None or ceilings is None:
+        return SystemRiskOut(enabled=False, kill_switch_engaged=deps.kill_switch.engaged, caps=[])
+    caps = [
+        RiskCapOut(
+            name="trade_size",
+            label="Per-trade size",
+            configured=limits.max_trade_pct_of_sleeve,
+            ceiling=ceilings.max_trade_pct_of_sleeve,
+            unit="%",
+        ),
+        RiskCapOut(
+            name="concentration",
+            label="Position concentration",
+            configured=limits.max_position_concentration_pct,
+            ceiling=ceilings.max_position_concentration_pct,
+            unit="%",
+        ),
+        RiskCapOut(
+            name="drawdown",
+            label="Max drawdown",
+            configured=limits.max_drawdown_pct,
+            ceiling=ceilings.max_drawdown_pct,
+            unit="%",
+        ),
+    ]
+    return SystemRiskOut(enabled=True, kill_switch_engaged=deps.kill_switch.engaged, caps=caps)
 
 
 async def _append(

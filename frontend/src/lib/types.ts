@@ -309,3 +309,70 @@ export interface RiskPrecheckResult {
   reason: string;
   checks: RiskCheckDto[];
 }
+
+// --- System screen (GET /system/status, UI Phase D §5.5) --------------------------------------
+// Mirrors SystemStatusOut / SystemRiskOut / RiskCapOut / JobStatusOut / DataSourceOut in
+// interface/schemas.py EXACTLY. Decimal fields (configured/ceiling) arrive as strings, like
+// CapitalOut — parse with Number(...). `enabled: false` on the risk block = caps were never wired.
+
+export interface RiskCap {
+  /** Stable key: trade_size | concentration | drawdown */
+  name: string;
+  label: string;
+  configured: string;
+  ceiling: string;
+  unit: string;
+}
+
+export interface SystemRisk {
+  enabled: boolean;
+  kill_switch_engaged: boolean;
+  caps: RiskCap[];
+}
+
+export interface JobStatus {
+  /** Stable key: reconcile | ingest | order_sync */
+  name: string;
+  description: string;
+  interval_seconds: number;
+  enabled: boolean;
+  /** ISO timestamps; null until the loop has run / been scheduled. */
+  last_run: string | null;
+  next_run: string | null;
+}
+
+export interface DataSourceStatus {
+  source_id: string;
+  label: string;
+  enabled: boolean;
+  reliability_prior: number;
+}
+
+export interface SystemStatusResult {
+  risk: SystemRisk;
+  jobs: JobStatus[];
+  data_sources: DataSourceStatus[];
+}
+
+// --- Research surfaces on Signals (GET /signals/labels, UI Phase D §5.5) -----------------------
+// Mirrors SignalLabelsOut / OutcomeLabelOut in interface/schemas.py. `enabled: false` (empty
+// labels) = no labeler run exists yet; the Signals grid then renders "—" columns. `benchmark` is
+// "sector:<ETF>" or "market" — the sector-vs-market split is derived by splitting on the prefix.
+export type LabelStatus = "ok" | "unresolvable";
+
+export interface OutcomeLabelItem {
+  signal_id: string;
+  ticker: string;
+  horizon_days: number;
+  /** Forward abnormal return as a fraction (0.05 = +5%); null when unresolvable. */
+  abnormal_return: number | null;
+  benchmark: string;
+  status: LabelStatus;
+  reason: string | null;
+}
+
+export interface SignalLabelsResult {
+  enabled: boolean;
+  label_run_id: string | null;
+  labels: OutcomeLabelItem[];
+}

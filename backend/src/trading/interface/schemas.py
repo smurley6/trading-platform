@@ -12,6 +12,7 @@ from trading.application.cancel_order import CancelResult
 from trading.application.live_trading import LiveReadinessReport
 from trading.application.ports.broker import BrokerOrder
 from trading.application.ports.market_data import Quote
+from trading.application.ports.outcome_labels import OutcomeLabel
 from trading.application.ports.read_model import SignalRecord
 from trading.application.proposals import PredictedCandidate, ProposalCandidate
 from trading.application.reconcile import ReconciliationReport
@@ -22,6 +23,7 @@ from trading.domain.events import StoredEvent
 from trading.domain.positions import MarkedPosition
 from trading.domain.signals import Signal, SignalSource
 from trading.domain.sleeves import Sleeve, TradingMode
+from trading.interface.system_status import DataSourceStatus, ScheduledLoop
 
 
 class SignalIn(BaseModel):
@@ -561,3 +563,118 @@ class OrderSyncOut(BaseModel):
             status_changes_emitted=report.status_changes_emitted,
             checked_orders=report.checked_orders,
         )
+
+
+# --- System screen (UI Phase D, docs/UI-DESIGN.md §5.5) -----------------------------------------
+
+
+class RiskCapOut(BaseModel):
+    # One risk cap rendered as a configured-vs-ceiling bar (§5.5 Risk pane): the configured value
+    # must sit at or under the hardened live ceiling before a sleeve may go live. Decimals
+    # serialize as strings (like CapitalOut); the frontend parses with Number(...).
+    name: str  # stable key: trade_size | concentration | drawdown
+    label: str  # human label: "Per-trade size", "Position concentration", "Max drawdown"
+    configured: Decimal
+    ceiling: Decimal
+    unit: str  # "%" — all three caps are percentages
+
+
+class SystemRiskOut(BaseModel):
+    # The Risk pane's backing data (§5.5): the configured caps + their live ceilings and the global
+    # kill-switch state. Kill-switch HISTORY and the current drawdown gauge are derived on the
+    # frontend from the event log / pool equity curve (no backend change), so only the ceilings and
+    # the live engaged flag come from here. `enabled` is False only if risk limits were never wired.
+    enabled: bool
+    kill_switch_engaged: bool
+    caps: list[RiskCapOut]
+
+
+class JobStatusOut(BaseModel):
+    # One scheduler loop's status (§5.5 Jobs pane): interval + last/next run. `enabled` is False for
+    # a loop whose interval is 0 or whose dependency is unwired — still listed so the operator sees
+    # the full set of loops. last_run/next_run are null until the loop has run / been scheduled.
+    name: str
+    description: str
+    interval_seconds: int
+    enabled: bool
+    last_run: datetime | None
+    next_run: datetime | None
+
+    @classmethod
+    def from_loop(
+        cls, loop: ScheduledLoop, *, last_run: datetime | None, next_run: datetime | None
+    ) -> "JobStatusOut":
+        return cls(
+            name=loop.name,
+            description=loop.description,
+            interval_seconds=loop.interval_seconds,
+            enabled=loop.enabled,
+            last_run=last_run,
+            next_run=next_run,
+        )
+
+
+class DataSourceOut(BaseModel):
+    # One ingest adapter, as a read-only mirror of config (§5.5 Data sources pane): enabled state +
+    # reliability prior. No toggle — this reflects env truth, it does not mutate it.
+    source_id: str
+    label: str
+    enabled: bool
+    reliability_prior: float
+
+    @classmethod
+    def from_status(cls, status: DataSourceStatus) -> "DataSourceOut":
+        return cls(
+            source_id=status.source_id,
+            label=status.label,
+            enabled=status.enabled,
+            reliability_prior=status.reliability_prior,
+        )
+
+
+class SystemStatusOut(BaseModel):
+    # The System screen's single read (§5.5): the read-only operational state of the platform —
+    # risk caps/ceilings + kill-switch, the scheduler loops, and the data-source config mirror.
+    # Reconciliation (last run / drift) and kill-switch history use the existing /reconcile and
+    # /events surfaces, so they are not duplicated here.
+    risk: SystemRiskOut
+    jobs: list[JobStatusOut]
+    data_sources: list[DataSourceOut]
+
+
+# --- Research surfaces on Signals (UI Phase D §5.5 / §8) -----------------------------------------
+
+
+class OutcomeLabelOut(BaseModel):
+    # One (signal, horizon) outcome-study row from the rebuildable outcome_labels projection. The
+    # Signals research surface joins these by signal_id to render 1/5/20-day forward abnormal
+    # returns. `benchmark` is "sector:<ETF>" or "market"; the frontend splits on the prefix for the
+    # sector-vs-market column (§5.5). `abnormal_return` is null for an unresolvable label.
+    signal_id: str
+    ticker: str
+    horizon_days: int
+    abnormal_return: float | None
+    benchmark: str
+    status: str  # ok | unresolvable
+    reason: str | None
+
+    @classmethod
+    def from_label(cls, label: OutcomeLabel) -> "OutcomeLabelOut":
+        return cls(
+            signal_id=label.signal_id,
+            ticker=label.ticker,
+            horizon_days=label.horizon_days,
+            abnormal_return=label.abnormal_return,
+            benchmark=label.benchmark,
+            status=label.status,
+            reason=label.reason,
+        )
+
+
+class SignalLabelsOut(BaseModel):
+    # The outcome labels for the currently-loaded signal window (GET /signals/labels). `enabled` is
+    # False (empty labels) when no labeler run exists yet, so the SPA renders unconditionally and
+    # shows "—" columns — mirroring the other graceful disabled-feed shapes.
+    enabled: bool
+    label_run_id: str | None
+    labels: list[OutcomeLabelOut]

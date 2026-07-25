@@ -47,16 +47,42 @@ from trading.infrastructure.brokers.paper import PaperBroker
 from trading.infrastructure.brokers.routing import ModeRoutingBroker
 from trading.infrastructure.brokers.trade_updates_stream import AlpacaTradeUpdatesStream
 from trading.infrastructure.clock import SystemClock
-from trading.infrastructure.data_sources.clinical_trials import ClinicalTrialsSource
-from trading.infrastructure.data_sources.congress_bills import CongressBillsSource
+from trading.infrastructure.data_sources import (
+    RELIABILITY_CONTRACT,
+    RELIABILITY_DISCLOSED_TRADE,
+    RELIABILITY_STATEMENT,
+)
+from trading.infrastructure.data_sources.clinical_trials import (
+    RELIABILITY_CLINICAL,
+    ClinicalTrialsSource,
+)
+from trading.infrastructure.data_sources.congress_bills import (
+    RELIABILITY_BILL_ACTIONS,
+    CongressBillsSource,
+)
 from trading.infrastructure.data_sources.congress_trades import CongressTradesSource
+from trading.infrastructure.data_sources.fda_approvals import (
+    RELIABILITY_REGULATORY as RELIABILITY_FDA_REGULATORY,
+)
 from trading.infrastructure.data_sources.fda_approvals import FdaApprovalsSource
+from trading.infrastructure.data_sources.federal_register import (
+    RELIABILITY_REGULATORY as RELIABILITY_FEDREG_REGULATORY,
+)
 from trading.infrastructure.data_sources.federal_register import FederalRegisterSource
 from trading.infrastructure.data_sources.house_disclosures import HouseDisclosuresSource
-from trading.infrastructure.data_sources.lobbying import LobbyingSource
+from trading.infrastructure.data_sources.lobbying import RELIABILITY_LOBBYING, LobbyingSource
 from trading.infrastructure.data_sources.news import NewsSource
+from trading.infrastructure.data_sources.regulations_gov import (
+    RELIABILITY_REGULATORY as RELIABILITY_REGGOV_REGULATORY,
+)
 from trading.infrastructure.data_sources.regulations_gov import RegulationsGovSource
+from trading.infrastructure.data_sources.sec_edgar_atom import (
+    RELIABILITY_INSIDER_TRADE as RELIABILITY_ATOM_INSIDER,
+)
 from trading.infrastructure.data_sources.sec_edgar_atom import SecEdgarAtomSource
+from trading.infrastructure.data_sources.sec_form4 import (
+    RELIABILITY_INSIDER_TRADE as RELIABILITY_FORM4_INSIDER,
+)
 from trading.infrastructure.data_sources.sec_form4 import SecForm4Source
 from trading.infrastructure.data_sources.senate_efd import SenateEfdSource
 from trading.infrastructure.data_sources.usaspending import UsaSpendingSource
@@ -87,6 +113,7 @@ from trading.infrastructure.politicians.repository import StaticPoliticianReposi
 from trading.infrastructure.reference import COMPANY_DIRECTORY
 from trading.infrastructure.reference.sectors import StaticSectorMap
 from trading.interface.app import AppDeps, create_app
+from trading.interface.system_status import DataSourceStatus, SchedulerState
 from trading.observability import configure_logging
 from trading.strategies import registry as strategy_registry
 from trading.strategies.base import Strategy, StrategyConfig
@@ -585,6 +612,13 @@ def build_dependencies(settings: Settings) -> AppDeps:
         reconcile_interval_seconds=settings.reconcile_interval_seconds,
         ingest_interval_seconds=settings.ingest_interval_seconds,
         order_sync_interval_seconds=settings.order_sync_interval_seconds,
+        # System screen (§5.5): the scheduler runtime (populated by the app lifespan), the risk
+        # caps + their live ceilings for the configured-vs-ceiling bars, and the read-only
+        # data-source config mirror.
+        scheduler_state=SchedulerState(),
+        risk_limits=risk_limits,
+        live_ceilings=live_ceilings,
+        data_sources=_data_source_statuses(settings),
         metrics=metrics,
         enable_metrics=settings.enable_metrics,
         db_readiness=db_readiness,
@@ -635,30 +669,88 @@ def _load_roster_blocking(settings: Settings) -> CongressLegislatorsRepository:
         return pool.submit(lambda: asyncio.run(_load_congress_roster(settings))).result()
 
 
+def _source_enabled_flags(settings: Settings) -> dict[str, bool]:
+    """The enable predicate per ingest adapter, keyed by adapter id.
+
+    The SINGLE source of truth for "is this source on": both ``_build_sources`` (which constructs
+    the enabled adapters) and ``_data_source_statuses`` (the read-only §5.5 config mirror) read
+    from here, so the System screen's Data sources pane never drifts from what actually runs.
+    """
+    return {
+        "news": bool(settings.news_feed_urls),
+        "usaspending": settings.usaspending_enabled,
+        "congress_trades": bool(
+            settings.disclosed_trade_leg_enabled
+            and settings.congress_trades_endpoint
+            and settings.fmp_api_key
+        ),
+        "house_disclosures": settings.house_disclosures_enabled,
+        "senate_efd": settings.senate_efd_enabled,
+        "sec_form4": bool(settings.sec_form4_enabled and settings.sec_form4_user_agent),
+        "lobbying": settings.lobbying_enabled,
+        "fda_approvals": settings.fda_approvals_enabled,
+        "clinical_trials": settings.clinical_trials_enabled,
+        "federal_register": settings.federal_register_enabled,
+        "congress_bills": bool(settings.congress_bills_enabled and settings.congress_bills_api_key),
+        "regulations_gov": bool(
+            settings.regulations_gov_enabled and settings.regulations_gov_api_key
+        ),
+        "sec_edgar_atom": bool(settings.sec_edgar_atom_enabled and settings.sec_form4_user_agent),
+    }
+
+
+# The 13 ingest adapters, each a (source_id, human label, reliability prior) triple. The reliability
+# priors are imported from the adapter modules themselves (single source of truth), so this stays a
+# faithful mirror of the conviction-scoring source_reliability term, not a hand-copied duplicate.
+_DATA_SOURCE_SPECS: tuple[tuple[str, str, float], ...] = (
+    ("news", "News / statements", RELIABILITY_STATEMENT),
+    ("usaspending", "USAspending contracts", RELIABILITY_CONTRACT),
+    ("congress_trades", "Congress trades (FMP)", RELIABILITY_DISCLOSED_TRADE),
+    ("house_disclosures", "House disclosures (PTR)", RELIABILITY_DISCLOSED_TRADE),
+    ("senate_efd", "Senate eFD (PTR)", RELIABILITY_DISCLOSED_TRADE),
+    ("sec_form4", "SEC Form 4 (insider)", RELIABILITY_FORM4_INSIDER),
+    ("lobbying", "LDA lobbying", RELIABILITY_LOBBYING),
+    ("fda_approvals", "openFDA approvals", RELIABILITY_FDA_REGULATORY),
+    ("clinical_trials", "ClinicalTrials.gov", RELIABILITY_CLINICAL),
+    ("federal_register", "Federal Register", RELIABILITY_FEDREG_REGULATORY),
+    ("congress_bills", "Congress.gov bill actions", RELIABILITY_BILL_ACTIONS),
+    ("regulations_gov", "Regulations.gov dockets", RELIABILITY_REGGOV_REGULATORY),
+    ("sec_edgar_atom", "SEC EDGAR Atom (fast Form 4)", RELIABILITY_ATOM_INSIDER),
+)
+
+
+def _data_source_statuses(settings: Settings) -> list[DataSourceStatus]:
+    """The read-only Data sources config mirror for the System screen (§5.5): all 13 adapters with
+    their enabled state (from ``_source_enabled_flags``) and reliability prior."""
+    flags = _source_enabled_flags(settings)
+    return [
+        DataSourceStatus(
+            source_id=source_id,
+            label=label,
+            enabled=flags[source_id],
+            reliability_prior=reliability,
+        )
+        for source_id, label, reliability in _DATA_SOURCE_SPECS
+    ]
+
+
 def _build_sources(
     settings: Settings, clock: SystemClock
 ) -> tuple[list[DataSourcePort], list[Callable[[], Awaitable[None]]]]:
     """Construct only the enabled data sources, sharing one HTTP client (FR-ING-2/4)."""
-    news_enabled = bool(settings.news_feed_urls)
-    trades_enabled = bool(
-        settings.disclosed_trade_leg_enabled
-        and settings.congress_trades_endpoint
-        and settings.fmp_api_key
-    )
-    house_enabled = settings.house_disclosures_enabled
-    senate_enabled = settings.senate_efd_enabled
-    sec_enabled = bool(settings.sec_form4_enabled and settings.sec_form4_user_agent)
-    lobbying_enabled = settings.lobbying_enabled
-    fda_enabled = settings.fda_approvals_enabled
-    clinical_trials_enabled = settings.clinical_trials_enabled
-    federal_register_enabled = settings.federal_register_enabled
-    congress_bills_enabled = bool(
-        settings.congress_bills_enabled and settings.congress_bills_api_key
-    )
-    regulations_gov_enabled = bool(
-        settings.regulations_gov_enabled and settings.regulations_gov_api_key
-    )
-    sec_edgar_atom_enabled = bool(settings.sec_edgar_atom_enabled and settings.sec_form4_user_agent)
+    flags = _source_enabled_flags(settings)
+    news_enabled = flags["news"]
+    trades_enabled = flags["congress_trades"]
+    house_enabled = flags["house_disclosures"]
+    senate_enabled = flags["senate_efd"]
+    sec_enabled = flags["sec_form4"]
+    lobbying_enabled = flags["lobbying"]
+    fda_enabled = flags["fda_approvals"]
+    clinical_trials_enabled = flags["clinical_trials"]
+    federal_register_enabled = flags["federal_register"]
+    congress_bills_enabled = flags["congress_bills"]
+    regulations_gov_enabled = flags["regulations_gov"]
+    sec_edgar_atom_enabled = flags["sec_edgar_atom"]
     # House/Senate PTRs attach to the roster, so they count as politician-using sources too.
     politician_source_enabled = news_enabled or trades_enabled or house_enabled or senate_enabled
     if not (

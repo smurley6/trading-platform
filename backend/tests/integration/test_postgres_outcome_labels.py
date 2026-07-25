@@ -110,3 +110,48 @@ async def test_replace_run_with_empty_clears() -> None:
     finally:
         await store.delete_run(run_id)
         await engine.dispose()
+
+
+async def test_latest_run_id_returns_most_recently_written() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    # UI Phase D read method: the run holding the highest surrogate id (the last batch written).
+    # Runs serially and cleans up, so run_b holds the max id at assertion time.
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresOutcomeLabels(engine)
+    run_a = f"run-a-{uuid4()}"
+    run_b = f"run-b-{uuid4()}"
+    try:
+        await store.replace_run(run_a, [_label(run_a, signal_id="s1", horizon=1)])
+        await store.replace_run(run_b, [_label(run_b, signal_id="s2", horizon=1)])
+        assert await store.latest_run_id() == run_b
+    finally:
+        await store.delete_run(run_a)
+        await store.delete_run(run_b)
+        await engine.dispose()
+
+
+async def test_labels_for_signals_scopes_to_run_and_ids() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresOutcomeLabels(engine)
+    run_id = f"run-{uuid4()}"
+    other = f"run-other-{uuid4()}"
+    try:
+        await store.replace_run(
+            run_id,
+            [
+                _label(run_id, signal_id="s1", horizon=1),
+                _label(run_id, signal_id="s1", horizon=5),
+                _label(run_id, signal_id="s2", horizon=1),
+            ],
+        )
+        await store.replace_run(other, [_label(other, signal_id="s1", horizon=1)])
+        got = await store.labels_for_signals(["s1"], label_run_id=run_id)
+        assert {(label.signal_id, label.horizon_days) for label in got} == {("s1", 1), ("s1", 5)}
+        assert await store.labels_for_signals([], label_run_id=run_id) == []
+    finally:
+        await store.delete_run(run_id)
+        await store.delete_run(other)
+        await engine.dispose()

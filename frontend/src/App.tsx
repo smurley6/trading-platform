@@ -16,8 +16,8 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Blotter } from "./features/blotter/Blotter";
 import { Overview } from "./features/overview/Overview";
 import { Review } from "./features/review/Review";
-import { RiskDashboard } from "./features/risk/RiskDashboard";
 import { Signals } from "./features/signals/Signals";
+import { System } from "./features/system/System";
 import { api } from "./lib/api";
 import type { Sleeve, StoredEventDto } from "./lib/types";
 import { type ConnectionStatus, useEventStream } from "./lib/useEventStream";
@@ -165,6 +165,8 @@ function Screen({
     case "blotter":
       return <Blotter active={active} refreshKey={refreshKey} />;
     case "risk":
-      return <RiskDashboard refreshKey={refreshKey} sleeves={sleeves} />;
+      // System `/system` (§5.5, Phase D rebuild) — the "risk" screen id is retained (route
+      // /system) as MEMORY.md documents; the component is the new four-pane System screen.
+      return <System refreshKey={refreshKey} sleeves={sleeves} />;
   }
 }

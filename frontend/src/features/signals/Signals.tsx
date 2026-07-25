@@ -42,6 +42,17 @@ import {
   type SignalFilters,
   type SignalRow,
 } from "./signalFilters";
+import {
+  LABEL_HORIZONS,
+  labelAtHorizon,
+  labelsBySignal,
+  type SignalLabelSummary,
+} from "./signalLabels";
+
+// A grid row enriched with its outcome-label summary (UI Phase D research surface, §5.5). The
+// summary is joined by signal_id from GET /signals/labels; undefined for an unlabeled signal (the
+// label columns then render a muted "—"). Extends SignalRow so all existing columns/handlers apply.
+type SignalRowWithLabels = SignalRow & { labelSummary?: SignalLabelSummary };
 
 interface SignalsProps {
   active: boolean;
@@ -70,6 +81,8 @@ export function Signals({ active, refreshKey }: SignalsProps) {
   const [windowLimit, setWindowLimit] = useState<number>(WINDOW_STEPS[0]);
   const signals = useLoader(() => api.signalFeed(windowLimit), [refreshKey, windowLimit]);
   const events = useLoader(() => api.events(1000), [refreshKey]);
+  // Research surface (§5.5): outcome labels for the same window, joined by signal_id below.
+  const labels = useLoader(() => api.signalLabels(windowLimit), [refreshKey, windowLimit]);
 
   // ---- Filter state. provenance + source round-trip through the URL (§7); the rest is local.
   const [provenanceParam, setProvenanceParam] = useScreenQueryParam("provenance", active, "replace");
@@ -106,7 +119,14 @@ export function Signals({ active, refreshKey }: SignalsProps) {
     const rows = buildSignalRows(signals.data ?? [], meta);
     return rows.sort((a, b) => b.occurred_at.localeCompare(a.occurred_at));
   }, [signals.data, meta]);
-  const rows = useMemo(() => applySignalFilters(allRows, filters), [allRows, filters]);
+  const filteredRows = useMemo(() => applySignalFilters(allRows, filters), [allRows, filters]);
+  // Join each row to its outcome-label summary (undefined when unlabeled → muted columns).
+  const labelMap = useMemo(() => labelsBySignal(labels.data?.labels ?? []), [labels.data]);
+  const rows = useMemo<SignalRowWithLabels[]>(
+    () => filteredRows.map((r) => ({ ...r, labelSummary: labelMap.get(r.signal_id) })),
+    [filteredRows, labelMap],
+  );
+  const labeledCount = useMemo(() => rows.filter((r) => r.labelSummary).length, [rows]);
 
   // ---- Focused row + overlays (shared model): click/c → Chain Inspector, t → Ticker Pane.
   const focusedRowRef = useRef<SignalRow | null>(null);
@@ -128,13 +148,13 @@ export function Signals({ active, refreshKey }: SignalsProps) {
     [overlays, toast],
   );
 
-  const onCellFocused = useCallback((e: CellFocusedEvent<SignalRow>) => {
+  const onCellFocused = useCallback((e: CellFocusedEvent<SignalRowWithLabels>) => {
     if (e.rowIndex == null) return;
     const node = e.api.getDisplayedRowAtIndex(e.rowIndex);
     focusedRowRef.current = node?.data ?? null;
   }, []);
 
-  const columns = useMemo<ColDef<SignalRow>[]>(() => SIGNAL_COLUMNS, []);
+  const columns = useMemo<ColDef<SignalRowWithLabels>[]>(() => SIGNAL_COLUMNS, []);
 
   const initialLoading = signals.loading && !signals.data;
   const canLoadMore = windowLimit < WINDOW_STEPS[WINDOW_STEPS.length - 1]!;
@@ -236,6 +256,16 @@ export function Signals({ active, refreshKey }: SignalsProps) {
           >
             {rows.length} of latest {signals.data?.length ?? 0}
           </span>
+          {/* Research surface coverage (§5.5): how many visible signals carry outcome labels. */}
+          {labels.data?.enabled && (
+            <span
+              className="tp-numeric"
+              title={`Outcome-label run ${labels.data.label_run_id ?? ""}`}
+              style={{ color: colors.textMuted, fontSize: typeTokens.scale.meta }}
+            >
+              · {labeledCount} labeled
+            </span>
+          )}
           {canLoadMore && (
             <FilterChip
               label={`Load more (${WINDOW_STEPS.find((s) => s > windowLimit) ?? windowLimit})`}
@@ -271,7 +301,7 @@ export function Signals({ active, refreshKey }: SignalsProps) {
             />
           ) : (
             <div className="ag-theme-tp" style={{ height: "100%", width: "100%" }}>
-              <AgGridReact<SignalRow>
+              <AgGridReact<SignalRowWithLabels>
                 rowData={rows}
                 columnDefs={columns}
                 defaultColDef={{ sortable: true, resizable: true, flex: 1 }}
@@ -305,7 +335,7 @@ export function Signals({ active, refreshKey }: SignalsProps) {
 
 const RIGHT_ALIGNED = "ag-right-aligned-cell";
 
-function TimestampCell(params: ICellRendererParams<SignalRow, string>) {
+function TimestampCell(params: ICellRendererParams<SignalRowWithLabels, string>) {
   const v = params.value;
   if (!v) return null;
   return (
@@ -315,7 +345,7 @@ function TimestampCell(params: ICellRendererParams<SignalRow, string>) {
   );
 }
 
-function SourceCell(params: ICellRendererParams<SignalRow, SignalSourceType>) {
+function SourceCell(params: ICellRendererParams<SignalRowWithLabels, SignalSourceType>) {
   const v = params.value;
   if (!v) return null;
   return (
@@ -340,7 +370,7 @@ function SourceCell(params: ICellRendererParams<SignalRow, SignalSourceType>) {
 // §3.1 provenance badges: REAL = unmarked (blank cell — the default state), BACKFILLED = --chain
 // violet OUTLINE badge, SYNTHETIC = --synthetic magenta FILLED badge, unknown (outside the
 // events-window join) = muted em-dash.
-function ProvenanceCell(params: ICellRendererParams<SignalRow>) {
+function ProvenanceCell(params: ICellRendererParams<SignalRowWithLabels>) {
   const provenance = params.data?.resolvedProvenance ?? null;
   if (provenance === "REAL") return null;
   if (provenance === null) {
@@ -371,7 +401,7 @@ function ProvenanceCell(params: ICellRendererParams<SignalRow>) {
   );
 }
 
-function TickerCell(params: ICellRendererParams<SignalRow, string | null>) {
+function TickerCell(params: ICellRendererParams<SignalRowWithLabels, string | null>) {
   const v = params.value;
   if (v == null || v === "") {
     return (
@@ -385,7 +415,7 @@ function TickerCell(params: ICellRendererParams<SignalRow, string | null>) {
 
 // Direction: the signal's bullish/bearish read as a signed, fixed-decimal figure — the one
 // place §3.1's side/direction semantics sanction --gain/--loss on this grid.
-function DirectionCell(params: ICellRendererParams<SignalRow, number>) {
+function DirectionCell(params: ICellRendererParams<SignalRowWithLabels, number>) {
   const v = params.value;
   if (v == null || Number.isNaN(v)) return <span style={{ color: colors.textMuted }}>—</span>;
   const tone = v > 0 ? colors.gain : v < 0 ? colors.loss : colors.textSecondary;
@@ -397,7 +427,86 @@ function DirectionCell(params: ICellRendererParams<SignalRow, number>) {
   );
 }
 
-const SIGNAL_COLUMNS: ColDef<SignalRow>[] = [
+// Research surface (§5.5): one forward-abnormal-return column per horizon. The label is a forward
+// RETURN (a signed directional figure), so §3.1's --gain/--loss direction semantics are sanctioned
+// here, exactly as on the Direction column. Unlabeled or unresolvable → muted "—" with the reason
+// on hover (the per-cell diagnostic). Value formatted as a signed percentage (0.05 → +5.00%).
+function abnormalReturnColumn(horizon: number): ColDef<SignalRowWithLabels> {
+  return {
+    headerName: `${horizon}d α`,
+    colId: `alpha_${horizon}`,
+    cellClass: RIGHT_ALIGNED,
+    headerClass: RIGHT_ALIGNED,
+    maxWidth: 96,
+    // Sortable/filterable by the numeric abnormal return; null sorts as empty.
+    valueGetter: (p) => labelAtHorizon(p.data?.labelSummary, horizon)?.abnormal_return ?? null,
+    cellRenderer: (p: ICellRendererParams<SignalRowWithLabels, number | null>) => {
+      const label = labelAtHorizon(p.data?.labelSummary, horizon);
+      if (label === undefined) {
+        return <span style={{ color: colors.textMuted }}>—</span>;
+      }
+      if (label.status === "unresolvable" || label.abnormal_return == null) {
+        return (
+          <span
+            title={`Unresolvable${label.reason ? `: ${label.reason}` : ""} (benchmark ${label.benchmark})`}
+            style={{ color: colors.textMuted }}
+          >
+            —
+          </span>
+        );
+      }
+      const pct = label.abnormal_return * 100;
+      const tone = pct > 0 ? colors.gain : pct < 0 ? colors.loss : colors.textSecondary;
+      return (
+        <span
+          className="tp-numeric"
+          title={`${horizon}-day forward abnormal return vs ${label.benchmark}`}
+          style={{ color: tone, fontWeight: 600 }}
+        >
+          {pct > 0 ? "+" : ""}
+          {formatNumber(pct, 2)}%
+        </span>
+      );
+    },
+  };
+}
+
+// Benchmark the abnormal returns were measured against — the sector-vs-market split (§5.5): the
+// sector ETF proxy (e.g. XLK) or SPY for the market fallback. The kind tag makes the split legible
+// at a glance; full benchmark string + any unresolvable diagnostic on hover.
+function BenchmarkCell(params: ICellRendererParams<SignalRowWithLabels>) {
+  const summary = params.data?.labelSummary;
+  if (summary === undefined) return <span style={{ color: colors.textMuted }}>—</span>;
+  const isSector = summary.benchmarkKind === "sector";
+  return (
+    <span
+      title={
+        summary.hasUnresolved
+          ? `Benchmark ${summary.benchmark} — some horizons unresolvable`
+          : `Benchmark ${summary.benchmark}`
+      }
+      style={{ display: "inline-flex", alignItems: "center", gap: layout.x1 }}
+    >
+      <span className="tp-numeric" style={{ color: colors.textPrimary, fontWeight: 600 }}>
+        {summary.benchmarkSymbol}
+      </span>
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: typeTokens.scale.meta,
+          fontWeight: 600,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+          color: isSector ? colors.textSecondary : colors.textMuted,
+        }}
+      >
+        {isSector ? "sector" : "mkt"}
+      </span>
+    </span>
+  );
+}
+
+const SIGNAL_COLUMNS: ColDef<SignalRowWithLabels>[] = [
   {
     headerName: "Disclosed",
     field: "occurred_at",
@@ -436,6 +545,9 @@ const SIGNAL_COLUMNS: ColDef<SignalRow>[] = [
     headerClass: RIGHT_ALIGNED,
     maxWidth: 100,
   },
+  // Research surface (§5.5): forward abnormal returns at 1/5/20-day horizons + the benchmark split.
+  ...LABEL_HORIZONS.map(abnormalReturnColumn),
+  { headerName: "Bench", colId: "benchmark", cellRenderer: BenchmarkCell, maxWidth: 110 },
 ];
 
 // ---- Filter-bar chrome ----------------------------------------------------------------------------

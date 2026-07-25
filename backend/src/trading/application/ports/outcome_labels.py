@@ -63,3 +63,25 @@ class OutcomeLabelsPort(Protocol):
     async def count_for_run(self, label_run_id: str) -> int:
         """The number of label rows currently stored for ``label_run_id``."""
         ...
+
+    async def latest_run_id(self) -> str | None:
+        """The ``label_run_id`` of the most recently written run, or None when the store is empty.
+
+        "Most recent" is the run holding the highest surrogate id (the last batch inserted) — the
+        table has no timestamp column, but ``id`` is a monotonically increasing identity, so a
+        rerun (delete-then-write) of a run reorders it to newest. Read-only; used by the Signals
+        research surface (UI Phase D) to show the current label run without the caller having to
+        know its id.
+        """
+        ...
+
+    async def labels_for_signals(
+        self, signal_ids: Sequence[str], *, label_run_id: str
+    ) -> Sequence[OutcomeLabel]:
+        """The label rows for the given signals within one run (read-only).
+
+        Scoped to a single ``label_run_id`` so overlapping runs never double-count a
+        (signal, horizon). Signals with no rows in the run are simply absent from the result (the
+        caller renders them unlabeled). Order is unspecified; the caller groups by signal id.
+        """
+        ...
