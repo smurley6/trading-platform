@@ -51,6 +51,7 @@ class EvaluateSignals:
         event_store: EventStorePort,
         clock: ClockPort,
         require_real_data: bool = False,
+        initial_peak_equity: Decimal = Decimal("0"),
     ) -> None:
         self._strategy = strategy
         self._sleeve = sleeve
@@ -62,7 +63,12 @@ class EvaluateSignals:
         self._clock = clock
         # When True (a real broker is in play), refuse to evaluate on any non-REAL signal.
         self._require_real_data = require_real_data
-        self._peak_equity = Decimal("0")
+        # Peak-equity high-water mark for the drawdown circuit breaker. Seeded at startup from
+        # the durable log (max PORTFOLIO_SNAPSHOT equity; review F3) so a one-shot cron / redeploy
+        # compares current equity against the REAL peak instead of a fresh zero — otherwise peak
+        # == current every run and the max_drawdown_pct breaker can never trip. Updated in-process
+        # below on each cycle.
+        self._peak_equity = initial_peak_equity
 
     async def execute(
         self,

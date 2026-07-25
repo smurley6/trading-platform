@@ -33,6 +33,7 @@ from trading.application.ports.trade_updates import TradeUpdate, TradeUpdatesStr
 from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
+from trading.application.safety_rehydration import SafetyState, rehydrate_safety_state
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
 from trading.application.sync_orders import SyncOrders
 from trading.config import Settings
@@ -165,10 +166,20 @@ def build_dependencies(settings: Settings) -> AppDeps:
     # ...then count appends for observability (events_appended_total / orders_placed_total).
     event_store: EventStorePort = CountingEventStore(event_bus, metrics)
 
+    # Rehydrate process-local safety state from the durable log before anything can trade, so a
+    # fresh process (the daily cron, or any web redeploy/restart) inherits the operator's last
+    # kill-switch state (F2) and the true equity high-water mark for the drawdown breaker (F3)
+    # instead of booting empty. Reads only existing event types; appends nothing.
+    safety_state = _rehydrate_safety_state(settings)
+
     # Decision/fill price seam: static dev prices by default, swapped to the live feed below
     # when it is enabled so the strategy decides and the paper broker fills at real prices.
     market_data: MarketDataPort = StaticMarketData(_DEV_PRICES, clock)
     kill_switch = KillSwitch()  # global: shared across all sleeves (FR-RISK-3)
+    if safety_state.kill_switch_engaged:
+        # An engaged emergency stop must survive a redeploy/restart and reach the cron that
+        # trades; RiskGate.evaluate rejects every order while engaged (review F2).
+        kill_switch.engage()
     risk_limits = RiskLimits(
         max_trade_pct_of_sleeve=settings.max_trade_pct_of_sleeve,
         max_position_concentration_pct=settings.max_position_concentration_pct,
@@ -359,6 +370,9 @@ def build_dependencies(settings: Settings) -> AppDeps:
             event_store=event_store,
             clock=clock,
             require_real_data=require_real_data,
+            # Seed the drawdown breaker's high-water mark from the durable log (review F3) so a
+            # one-shot cron / redeploy compares current equity against the REAL peak, not zero.
+            initial_peak_equity=safety_state.peak_equity,
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
@@ -592,6 +606,44 @@ def build_dependencies(settings: Settings) -> AppDeps:
     if db_engine is not None:
         deps.aclosers.append(db_engine.dispose)
     return deps
+
+
+def _rehydrate_safety_state(settings: Settings) -> SafetyState:
+    """Recover kill-switch + peak-equity from the durable log for a fresh process (review F2/F3).
+
+    With no ``DATABASE_URL`` the store is in-memory and stateless — a fresh process shares nothing
+    with prior runs, so there is nothing to rehydrate and the defaults (disengaged, peak 0) are
+    correct. With Postgres the append-only log persists across processes, so the daily cron and
+    any web redeploy inherit the operator's last kill-switch state and the true equity high-water
+    mark.
+
+    The read runs against a SELF-CONTAINED throwaway engine, disposed before returning a plain
+    ``SafetyState`` — the same discipline as ``_load_roster_blocking`` — so the shared engine the
+    app/cron then uses on its own loop is never handed a connection bound to a throwaway loop.
+    Like ``_load_roster_blocking`` it runs in any context: ``asyncio.run`` when no loop is running,
+    a dedicated worker-thread loop when one is (the cron builds deps inside ``asyncio.run``).
+    """
+    database_url = settings.database_url
+    if not database_url:
+        return SafetyState(kill_switch_engaged=False, peak_equity=Decimal("0"))
+
+    async def _read() -> SafetyState:
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from trading.infrastructure.persistence.postgres import PostgresEventStore
+
+        engine = create_async_engine(database_url)
+        try:
+            return await rehydrate_safety_state(PostgresEventStore(engine))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_read())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_read())).result()
 
 
 async def _load_congress_roster(settings: Settings) -> CongressLegislatorsRepository:
