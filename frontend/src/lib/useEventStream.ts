@@ -3,11 +3,26 @@
 // the socket.
 
 import { useEffect, useRef } from "react";
+import { apiKey } from "./apiKey";
 import type { StoredEventDto } from "./types";
 import { wsBase } from "./wsBase";
 
 function wsUrl(): string {
   return `${wsBase()}/ws/events`;
+}
+
+// The backend guards /ws/events with the API key, but a browser cannot set request headers on a
+// WebSocket — so the key rides in the handshake's `Sec-WebSocket-Protocol` list as exactly
+// [sentinel, key] (backend `interface/auth.py::authorize_websocket`). The server selects and
+// echoes back only the sentinel, so the key never appears in the response header, the URL, or any
+// access log. With no key configured we pass no subprotocol at all and the socket opens as today.
+// NOTE: the key must be an HTTP token (hex is safe; base64 `+/=` is not) or the browser rejects
+// the handshake — the backend warns about this at startup.
+const WS_API_KEY_SUBPROTOCOL = "api-key";
+
+function wsProtocols(): string[] | undefined {
+  const key = apiKey();
+  return key === null ? undefined : [WS_API_KEY_SUBPROTOCOL, key];
 }
 
 /** Tri-state connection status for the status bar's WS dot (§4: green ok / amber
@@ -40,7 +55,8 @@ export function useEventStream(
     statusDetailRef.current?.("down");
 
     const connect = (): void => {
-      socket = new WebSocket(wsUrl());
+      const protocols = wsProtocols();
+      socket = protocols === undefined ? new WebSocket(wsUrl()) : new WebSocket(wsUrl(), protocols);
       socket.onopen = () => {
         backoffMs = 500;
         everConnected = true;
