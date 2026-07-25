@@ -4,6 +4,7 @@ Diffs local event-log projections against the broker's orders and positions; any
 emitted as reconciliation events and returned for the UI.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -13,9 +14,30 @@ from trading.application.ports.broker import BrokerPort
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.projections import order_statuses_from_events, positions_from_events
-from trading.domain.events import DomainEvent, EventType
+from trading.domain.events import DomainEvent, EventType, StoredEvent
 
 _STREAM_ID = "reconciliation"
+
+
+def _latest_recorded_drifts(
+    events: Sequence[StoredEvent], sleeve_id: str | None
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """The most recently recorded (local, broker) values per (kind, key) drift, this sleeve only.
+
+    Lets `Reconcile` suppress re-appending a drift identical to the one already on the log
+    (review F14) while still reporting the current drift set.
+    """
+    latest: dict[tuple[str, str], tuple[str, str]] = {}
+    for stored in events:
+        event = stored.event
+        if event.event_type != EventType.RECONCILIATION_DRIFT:
+            continue
+        payload = event.payload
+        if payload.get("sleeve_id") != sleeve_id:
+            continue
+        key = (str(payload.get("kind")), str(payload.get("key")))
+        latest[key] = (str(payload.get("local")), str(payload.get("broker")))
+    return latest
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +101,14 @@ class Reconcile:
             if local_status != broker_status:
                 drifts.append(Drift("order", client_order_id, local_status, broker_status))
 
+        # Dedupe repeated identical drift: without fill ingestion the same drift recurred every
+        # run, appending an identical event each time and burying real changes (review F14). Only
+        # append a drift that is NEW or CHANGED vs the last one recorded for this (kind, key); the
+        # returned report still reflects the CURRENT drift, so readiness/`clean` is unaffected.
+        last_recorded = _latest_recorded_drifts(events, self._sleeve_id)
         for drift in drifts:
+            if last_recorded.get((drift.kind, drift.key)) == (drift.local, drift.broker):
+                continue
             await self._append(
                 EventType.RECONCILIATION_DRIFT,
                 {

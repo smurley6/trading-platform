@@ -9,6 +9,7 @@ threads each appended event through it and stores the resulting current state.
 """
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -19,6 +20,8 @@ from trading.domain.events import EventType, StoredEvent
 from trading.domain.orders import Fill, OrderSide
 from trading.domain.positions import HeldPosition, Portfolio
 from trading.domain.signals import Signal
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryReadModel:
@@ -68,7 +71,17 @@ class InMemoryReadModel:
                 filled_at=datetime.fromisoformat(str(payload["filled_at"])),
             )
             portfolio = self._portfolios.get(sleeve_id, Portfolio(cash=Decimal("0")))
-            self._portfolios[sleeve_id] = portfolio.apply_fill(fill)
+            # Tolerant of an out-of-order/oversell SELL (record + clamp, never raise inside the
+            # append — review F7): this is a rebuildable projection, not the trading engine.
+            self._portfolios[sleeve_id], clamped = portfolio.apply_fill_tolerant(fill)
+            if clamped:
+                logger.warning(
+                    "clamped oversell in projection: sleeve=%s symbol=%s sold_qty=%s "
+                    "(SELL exceeded held; recorded fill, position floored to flat)",
+                    sleeve_id,
+                    fill.symbol,
+                    fill.quantity,
+                )
         elif event_type == EventType.PORTFOLIO_SNAPSHOT:
             sleeve_id = str(payload["sleeve_id"])
             self._snapshots[sleeve_id] = PortfolioSnapshotRecord(

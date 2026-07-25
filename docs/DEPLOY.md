@@ -176,6 +176,16 @@ Each cycle (`python -m trading.jobs.cycle`) performs one pass, then exits:
    `TRADE_THRESHOLD` / `WATCH_THRESHOLD`.
 3. **Place paper orders** — for anything clearing the trade threshold, submits orders to your
    Alpaca **paper** account (when `ENABLE_ALPACA_PAPER` is on).
+4. **Sync fills + reconcile** — the real Alpaca venue fills **asynchronously** after submission
+   (an order placed pre-open fills at the open, after this run has already exited), so the cron
+   now runs `SyncOrders` + a pool `Reconcile` at the **end of every cycle** (review F14). Each run
+   records the **prior** run's fills into the event log (cumulative-increment model, so partials
+   that later complete are captured) and reconciles the projection against the one broker book;
+   identical drift is recorded once, not re-appended every run. This is best-effort — a broker
+   hiccup here is logged and never fails the ingest/evaluate cycle that already committed. No new
+   secret is required. For the always-on **web service** the equivalent is the 30s poller
+   (`ORDER_SYNC_INTERVAL_SECONDS>0`) and/or the real-time stream (`ENABLE_TRADE_UPDATES_STREAM`);
+   the poller and stream are mutually safe — a fill is recorded exactly once (compare-and-set).
 
 All state — the append-only event log and the read-model projections (positions, order statuses,
 portfolio snapshots) — **persists in Postgres**, so each run builds on the last. The in-memory

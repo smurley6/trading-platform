@@ -20,8 +20,10 @@ class ProjectingEventStore:
         self._inner = inner
         self._read_model = read_model
 
-    async def append(self, event: DomainEvent) -> StoredEvent:
-        stored = await self._inner.append(event)
+    async def append(
+        self, event: DomainEvent, *, expected_version: int | None = None
+    ) -> StoredEvent:
+        stored = await self._inner.append(event, expected_version=expected_version)
         await self._read_model.apply(stored)
         return stored
 

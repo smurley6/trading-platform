@@ -9,6 +9,7 @@ whole log to repopulate the tables from scratch (spec section 9 — projections 
 positions agree with the live engine and the in-memory projection.
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -31,6 +32,8 @@ from trading.infrastructure.persistence.tables import (
     rm_positions_table,
     rm_signals_table,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresReadModel:
@@ -101,7 +104,21 @@ class PostgresReadModel:
                 avg_entry_price=Decimal(str(existing.avg_price)),
             )
         # Reuse the domain cost-basis math; cash is irrelevant to the held-position view.
-        updated = Portfolio(cash=Decimal("0"), positions=positions).apply_fill(fill)
+        # Tolerant of an out-of-order/oversell SELL: clamp to flat and flag, never raise INSIDE
+        # this append transaction — a raise here aborts the whole append and permanently wedges
+        # order sync for the sleeve (review F7). The live trading engine still uses strict
+        # `apply_fill`; this is the rebuildable system-of-record projection.
+        updated, clamped = Portfolio(cash=Decimal("0"), positions=positions).apply_fill_tolerant(
+            fill
+        )
+        if clamped:
+            logger.warning(
+                "clamped oversell in projection: sleeve=%s symbol=%s sold_qty=%s "
+                "(SELL exceeded held; recorded fill, position floored to flat)",
+                sleeve_id,
+                symbol,
+                fill.quantity,
+            )
         position = updated.positions.get(symbol)
         if position is None:
             await conn.execute(

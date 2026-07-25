@@ -21,8 +21,10 @@ class BroadcastingEventStore:
         self._inner = inner
         self._subscribers: set[asyncio.Queue[StoredEvent]] = set()
 
-    async def append(self, event: DomainEvent) -> StoredEvent:
-        stored = await self._inner.append(event)
+    async def append(
+        self, event: DomainEvent, *, expected_version: int | None = None
+    ) -> StoredEvent:
+        stored = await self._inner.append(event, expected_version=expected_version)
         self._publish(stored)
         return stored
 

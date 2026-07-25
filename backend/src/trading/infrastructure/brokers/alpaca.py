@@ -175,6 +175,7 @@ def _to_order(data: dict[str, Any]) -> BrokerOrder:
                 filled_at=_parse_time(data.get("filled_at") or data.get("updated_at")),
             ),
         )
+    submitted_raw = data.get("submitted_at") or data.get("created_at")
     return BrokerOrder(
         client_order_id=str(data["client_order_id"]),
         broker_order_id=str(data["id"]),
@@ -184,6 +185,7 @@ def _to_order(data: dict[str, Any]) -> BrokerOrder:
         order_type=OrderType(str(data.get("type", "market"))),
         status=status,
         fills=fills,
+        submitted_at=_parse_time(submitted_raw) if submitted_raw else None,
     )
 
 
