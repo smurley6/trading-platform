@@ -129,7 +129,9 @@ class ConvictionResult:
         decayed_weighted_sum: Weighted sum *with* time decay applied. Equals
             ``raw_weighted_sum`` when decay is disabled.
         corroboration_factor: The corroboration multiplier actually applied.
-        distinct_source_types: Distinct source types observed among contributing signals.
+        distinct_source_types: Distinct source types observed among contributing signals
+            with positive ``source_reliability`` — benched (zero-reliability) sources
+            corroborate nothing.
         contributions: Per-signal decayed weighted contribution
             (``decay_weight · sentiment · politician_weight · source_reliability``),
             keyed by signal id, in input order. Sums to ``decayed_weighted_sum``.
@@ -262,7 +264,11 @@ def compute_conviction(
         decayed_weighted_sum += contribution
         contributions[s.id] = contribution
 
-    distinct_sources = {s.source_type for s in relevant}
+    # Benched sources (source_reliability == 0, Task 10) are fully inert: they already
+    # contribute nothing to the weighted sums, and they must not corroborate either —
+    # otherwise a zero-weight signal sharing the ticker would still lift the multiplier
+    # applied to the *other* sources' scores.
+    distinct_sources = {s.source_type for s in relevant if s.source_reliability > 0.0}
     corroboration = _corroboration_factor(len(distinct_sources), params)
     score = min(100.0, max(0.0, decayed_weighted_sum * corroboration * params.scale))
 

@@ -110,6 +110,47 @@ async def test_none_ticker_signal_excluded_from_scan(
     assert None not in seen
 
 
+async def test_predicted_candidate_excludes_benched_source_types(
+    clock: FixedClock, make_signal: SignalFactory
+) -> None:
+    """The predicted-candidate path reports only source types with positive reliability. A
+    benched (0.0-reliability) signal of a DIFFERENT source type sharing the ticker must neither
+    appear in ``distinct_source_types`` nor lift the WATCH-tier score (task-10 close-out).
+
+    Both the score used for tiering and the reported source types flow from
+    ``compute_conviction``, so the domain's benched-source exclusion governs this path."""
+    from trading.domain.signals import SignalSource
+
+    # An active WATCH-tier signal (1.0 * 2.0 * 1.0 * scale(25) = 50 -> WATCH) plus a benched
+    # signal of a different source type on the same ticker.
+    signals = [
+        make_signal(
+            ticker="NOC",
+            sentiment=1.0,
+            politician_weight=2.0,
+            source_type=SignalSource.DISCLOSED_TRADE,
+        ),
+        make_signal(
+            ticker="NOC",
+            sentiment=1.0,
+            politician_weight=2.0,
+            source_reliability=0.0,
+            source_type=SignalSource.STATEMENT,
+        ),
+    ]
+    active_only = [signals[0]]
+
+    scan = await _scanner(_FakeReadModel(signals), clock).execute()
+    baseline = await _scanner(_FakeReadModel(active_only), clock).execute()
+
+    assert [p.symbol for p in scan.predicted] == ["NOC"]
+    predicted = scan.predicted[0]
+    # Benched STATEMENT must not appear; only the active DISCLOSED_TRADE type is reported.
+    assert predicted.distinct_source_types == ("disclosed_trade",)
+    # Score is unchanged vs. the active signal alone — no corroboration lift from the benched one.
+    assert predicted.conviction_score == pytest.approx(baseline.predicted[0].conviction_score)
+
+
 async def test_held_target_is_not_re_proposed(
     clock: FixedClock, make_signal: SignalFactory
 ) -> None:

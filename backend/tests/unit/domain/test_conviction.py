@@ -189,6 +189,84 @@ def test_mixed_buy_sale_house_scores_the_same_as_buy_alone(make_signal: SignalFa
     assert mixed.corroboration_factor == pytest.approx(buy_alone.corroboration_factor)
 
 
+def test_benched_source_type_does_not_corroborate(make_signal: SignalFactory) -> None:
+    """A benched (reliability 0.0) signal of a DIFFERENT source type is fully inert: it must
+    not lift the corroboration multiplier applied to the active source's score — same score,
+    same factor, same distinct source types as the active signal alone (task-10 close-out)."""
+    active = make_signal(
+        sentiment=0.5,
+        politician_weight=2.0,
+        source_reliability=0.6,
+        source_type=SignalSource.DISCLOSED_TRADE,
+    )
+    benched = make_signal(
+        sentiment=0.5,
+        politician_weight=1.0,
+        source_reliability=0.0,
+        source_type=SignalSource.STATEMENT,
+    )
+
+    alone = compute_conviction("AAPL", [active], window_days=21, thresholds=THRESHOLDS)
+    mixed = compute_conviction("AAPL", [active, benched], window_days=21, thresholds=THRESHOLDS)
+
+    assert mixed.score == pytest.approx(alone.score)
+    assert mixed.corroboration_factor == pytest.approx(alone.corroboration_factor)
+    assert mixed.distinct_source_types == alone.distinct_source_types
+    assert mixed.distinct_source_types == (SignalSource.DISCLOSED_TRADE,)
+    # The benched signal still feeds the audit trail (id + zero contribution) — only its
+    # corroboration influence is removed.
+    assert len(mixed.contributing_signal_ids) == 2
+    assert mixed.contributions[benched.id] == 0.0
+
+
+def test_all_benched_signals_yield_no_source_types(make_signal: SignalFactory) -> None:
+    result = compute_conviction(
+        "AAPL",
+        [make_signal(sentiment=0.9, politician_weight=2.0, source_reliability=0.0)],
+        window_days=21,
+        thresholds=THRESHOLDS,
+    )
+    assert result.distinct_source_types == ()
+    assert result.corroboration_factor == 1.0
+    assert result.score == 0.0
+
+
+def test_active_multi_source_still_corroborates_alongside_a_benched_source(
+    make_signal: SignalFactory,
+) -> None:
+    """No over-exclusion: two ACTIVE signals of different source types keep their corroboration
+    lift, and adding a benched (0.0) third source type neither adds to nor removes from it — the
+    factor and score match the two-active pair alone and still exceed a single active source."""
+    active_a = make_signal(sentiment=0.5, politician_weight=1.0, source_type=SignalSource.STATEMENT)
+    active_b = make_signal(sentiment=0.5, politician_weight=1.0, source_type=SignalSource.CONTRACT)
+    benched = make_signal(
+        sentiment=0.5,
+        politician_weight=1.0,
+        source_reliability=0.0,
+        source_type=SignalSource.DISCLOSED_TRADE,
+    )
+
+    single = compute_conviction("AAPL", [active_a], window_days=21, thresholds=THRESHOLDS)
+    two_active = compute_conviction(
+        "AAPL", [active_a, active_b], window_days=21, thresholds=THRESHOLDS
+    )
+    with_benched = compute_conviction(
+        "AAPL", [active_a, active_b, benched], window_days=21, thresholds=THRESHOLDS
+    )
+
+    # Two active source types lift above one (corroboration is real when reliability is positive).
+    assert two_active.corroboration_factor > single.corroboration_factor
+    assert two_active.score > single.score
+    # The benched third source is inert: it neither adds nor removes corroboration.
+    assert with_benched.corroboration_factor == pytest.approx(two_active.corroboration_factor)
+    assert with_benched.score == pytest.approx(two_active.score)
+    assert with_benched.distinct_source_types == two_active.distinct_source_types
+    assert set(with_benched.distinct_source_types) == {
+        SignalSource.STATEMENT,
+        SignalSource.CONTRACT,
+    }
+
+
 def test_politician_influence_weight_is_a_product() -> None:
     politician = Politician(
         id="pol-1",
