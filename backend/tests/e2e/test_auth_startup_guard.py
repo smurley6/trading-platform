@@ -81,3 +81,30 @@ async def test_cron_path_is_unaffected_without_api_key(monkeypatch: pytest.Monke
     deps = build_dependencies(_settings(monkeypatch))
     async for d in _closed(deps):
         assert d.pool_broker is not None  # the real paper broker IS wired
+
+
+async def test_non_token_safe_api_key_warns_about_the_browser_websocket_path(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A base64-style key authenticates over HTTP but is unrepresentable as a
+    `Sec-WebSocket-Protocol` token, so the browser event stream would fail silently (task-22).
+    The startup warning is the only signal an operator gets."""
+    caplog.set_level("WARNING", logger="trading.main")
+    deps = build_dependencies(_settings(monkeypatch, API_KEY="aB3+xY/z9Q=="), serves_http=True)
+    async for _ in _closed(deps):
+        pass
+
+    assert "Sec-WebSocket-Protocol" in caplog.text or "WebSocket" in caplog.text
+    # The key itself must never be echoed into the log line.
+    assert "aB3+xY/z9Q==" not in caplog.text
+
+
+async def test_token_safe_api_key_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("WARNING", logger="trading.main")
+    deps = build_dependencies(_settings(monkeypatch, API_KEY="a" * 64), serves_http=True)
+    async for _ in _closed(deps):
+        pass
+
+    assert "WebSocket" not in caplog.text

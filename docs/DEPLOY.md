@@ -147,7 +147,7 @@ The mutating endpoints (`POST /proposals/execute`, `/kill-switch`, `/cycle/mode`
 
 | Secret | Example | Required? |
 | --- | --- | --- |
-| `API_KEY` | a long random string | **Yes** once a real Alpaca account is wired and the app is internet-reachable |
+| `API_KEY` | `openssl rand -hex 32` (token-safe chars only — see below) | **Yes** once a real Alpaca account is wired and the app is internet-reachable |
 | `ALLOW_UNAUTHENTICATED` | `true` | Optional (default `false`) — escape hatch only |
 
 - **Unset (the default):** those endpoints are **OPEN**. Fine for the local in-memory dev app,
@@ -160,6 +160,12 @@ The mutating endpoints (`POST /proposals/execute`, `/kill-switch`, `/cycle/mode`
   header; a mismatch is `401`. Genuinely public reads (`/sleeves`, `/conviction`, `/signals/feed`,
   `/proposals`, health) stay open. **Rotate** the key by generating a new value and updating the
   secret (the OWNER's action; the app picks it up on the next deploy).
+- **Character set — matters.** Browsers cannot set headers on a WebSocket, so `/ws/events` takes
+  the key as a `Sec-WebSocket-Protocol` token (`new WebSocket(url, ["api-key", key])`). That value
+  must be an HTTP token: letters, digits, and `!#$%&'*+-.^_`|~` only. A key containing `+`, `/`,
+  `=`, a comma, or whitespace (i.e. standard base64) is rejected by the server's header parser
+  before the app runs — HTTP auth keeps working while the browser event stream silently fails.
+  `openssl rand -hex 32` is safe; the app logs a startup WARNING if the configured key is not.
 - Store it **only** as a secret. Never commit a real key.
 
 > **`MODE_DEFAULT` cannot be `live`.** Boot is always paper — setting `MODE_DEFAULT=live` fails

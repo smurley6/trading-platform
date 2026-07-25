@@ -1,6 +1,8 @@
 """Composition root: the only place where concrete adapters are wired to ports."""
 
 import asyncio
+import logging
+import re
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -95,6 +97,12 @@ from trading.interface.app import AppDeps, create_app
 from trading.observability import configure_logging
 from trading.strategies import registry as strategy_registry
 from trading.strategies.base import Strategy, StrategyConfig
+
+logger = logging.getLogger(__name__)
+
+# An HTTP token (RFC 7230 §3.2.6): the character set a `Sec-WebSocket-Protocol` value may use,
+# and therefore the constraint on API_KEY for the browser WebSocket auth path (task-22).
+_WS_TOKEN_SAFE_RE = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
 
 # Development quotes; a real MarketDataPort adapter replaces this in a later milestone.
 # Every ticker the entity resolver can produce needs a quote so the paper broker can fill.
@@ -387,6 +395,18 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
             "/sleeves/{id}/mode) open to anyone with the URL. Set API_KEY to require "
             "authentication, or set ALLOW_UNAUTHENTICATED=true to deliberately accept an "
             "unauthenticated real-broker deployment (e.g. behind a private network)."
+        )
+    # The browser WebSocket path (task-22) carries the key as a `Sec-WebSocket-Protocol` token,
+    # so a key containing characters outside the RFC 7230 token set (e.g. base64 `+`, `/`, `=`)
+    # is rejected by the server's own header parser BEFORE the app runs — the HTTP header path
+    # keeps working while /ws/events silently fails in browsers only. Warn loudly at startup
+    # rather than let that be discovered as a mystery reconnect loop.
+    if api_key_configured and not _WS_TOKEN_SAFE_RE.fullmatch(settings.api_key or ""):
+        logger.warning(
+            "API_KEY contains characters outside the HTTP token set; the browser WebSocket "
+            "path (/ws/events, which sends the key as a Sec-WebSocket-Protocol token) will "
+            "fail while HTTP auth keeps working. Use a token-safe key (e.g. hex or url-safe "
+            "base64 without padding: `openssl rand -hex 32`)."
         )
 
     # ONE shared execution book = the single capital pool. When the real Alpaca paper account is
