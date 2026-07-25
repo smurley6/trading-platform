@@ -169,6 +169,53 @@ async def test_held_target_is_not_re_proposed(
     assert "LMT" not in {p.symbol for p in scan.predicted}
 
 
+def _form4_buy(
+    sid: str, *, clock: FixedClock, ticker: str = "LUV", owner: str = "OWNER A", accession: str
+) -> Signal:
+    """A Form 4 purchase strong enough to clear TRADE alone: 0.5 * 10 * 0.6 * 25 = 75."""
+    from trading.domain.provenance import Provenance
+    from trading.domain.signals import SignalSource
+
+    return Signal(
+        id=sid,
+        created_at=clock.now(),
+        source_type=SignalSource.DISCLOSED_TRADE,
+        ticker=ticker,
+        politician_id=None,
+        sentiment=0.5,
+        politician_weight=10.0,
+        source_reliability=0.6,
+        raw_payload={"owner": owner, "accession": accession},
+        provenance=Provenance.REAL,
+    )
+
+
+async def test_scan_caps_solo_form4_one_off_to_predicted(clock: FixedClock) -> None:
+    # A lone insider buy scores TRADE-tier on the formula (75) but has no second same-ticker filer
+    # in the trailing 7d, so the one-off gate demotes it: no proposal, a WATCH-tier predicted at 69.
+    solo = _form4_buy("f1", clock=clock, accession="acc-1")
+    scan = await _scanner(_FakeReadModel([solo]), clock).execute()
+
+    assert "LUV" not in {p.symbol for p in scan.proposals}
+    predicted = {p.symbol: p for p in scan.predicted}
+    assert "LUV" in predicted
+    assert predicted["LUV"].action == "watch"
+    assert predicted["LUV"].conviction_score == pytest.approx(69.0)
+
+
+async def test_scan_two_owner_form4_buys_lift_the_cap_to_a_proposal(clock: FixedClock) -> None:
+    # A second, independent filer on the same ticker in the trailing 7d lifts the one-off cap, so
+    # the ticker proposes a trade again.
+    signals = [
+        _form4_buy("f1", clock=clock, owner="ALPHA", accession="acc-1"),
+        _form4_buy("f2", clock=clock, owner="BETA", accession="acc-2"),
+    ]
+    scan = await _scanner(_FakeReadModel(signals), clock).execute()
+
+    assert "LUV" in {p.symbol for p in scan.proposals}
+    assert "LUV" not in {p.symbol for p in scan.predicted}
+
+
 class _RecordingEvaluator:
     """Captures the execute() call shape so we can assert the filter + place flag."""
 

@@ -33,7 +33,7 @@ and a per-signal contribution list (signal id -> decayed weighted contribution).
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 
 from trading.domain.signals import Signal, SignalSource
@@ -292,3 +292,84 @@ def compute_conviction(
         contributions=contributions,
         reference_time=reference if params.decay_enabled else None,
     )
+
+
+# Default same-owner stream window: repeated Form 4 filings by one filer on one ticker within this
+# many days are the SAME ongoing stream and collapse to a single corroboration vote (task-11).
+_DEFAULT_FORM4_STREAM_WINDOW_DAYS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class Form4Vote:
+    """One Form 4 corroboration vote — a filer's *stream* on a ticker, not a single filing.
+
+    Repeated filings from the same filer stream (same ticker + normalized ``owner`` within a
+    rolling stream window) are not independent evidence: they must count as ONE vote so
+    conviction reflects distinct owners, not filing rows (task-11, Phase-7 buy-edge analysis).
+
+    This is a pure value object; extracting/normalizing ``owner`` from a signal's ``raw_payload``
+    is the application layer's job (the domain never sees payloads). ``created_at`` is the
+    representative filing's acceptance datetime (the point-in-time public moment), and
+    ``signal_id`` lets the application map a surviving vote back to the signal it keeps for
+    scoring.
+
+    Attributes:
+        ticker: Issuer trading symbol (never ``None`` — unresolved filings do not vote).
+        owner: Reporting owner name, already normalized (upper-cased, whitespace-collapsed).
+        created_at: Acceptance datetime of this filing.
+        signal_id: Id of the signal this vote stands for.
+    """
+
+    ticker: str
+    owner: str
+    created_at: datetime
+    signal_id: str
+
+    @property
+    def filing_day(self) -> date:
+        """The (ticker, owner, filing-day) key's day component: the acceptance date."""
+        return self.created_at.date()
+
+
+def dedupe_form4_votes(
+    votes: Sequence[Form4Vote],
+    *,
+    stream_window_days: int = _DEFAULT_FORM4_STREAM_WINDOW_DAYS,
+) -> list[Form4Vote]:
+    """Collapse repeated Form 4 filings from one filer stream into a single vote (pure).
+
+    Grouping is keyed on ``(ticker, normalized owner)``. Within each key the filings are walked
+    in chronological order and partitioned into *streams*: a filing joins the current stream when
+    it lands within ``stream_window_days`` of that stream's most-recent filing — a TRAILING
+    ``(t-W, t]`` window that never looks forward — otherwise it opens a new stream. Each stream
+    yields exactly one vote, represented by its EARLIEST filing, so the result is independent of
+    how many later filings the same owner piles on (adding lots 3..N changes nothing). Distinct
+    owners always yield distinct votes, even on the same day.
+
+    Returns one representative vote per stream, ordered deterministically by
+    ``(ticker, owner, created_at, signal_id)``.
+    """
+    if stream_window_days < 0:
+        raise ValueError("stream_window_days must be non-negative")
+
+    ordered = sorted(votes, key=lambda v: (v.ticker, v.owner, v.created_at, v.signal_id))
+    window = timedelta(days=stream_window_days)
+
+    kept: list[Form4Vote] = []
+    current_key: tuple[str, str] | None = None
+    stream_last: datetime | None = None
+    for vote in ordered:
+        key = (vote.ticker, vote.owner)
+        in_stream = (
+            key == current_key
+            and stream_last is not None
+            and vote.created_at - stream_last <= window
+        )
+        if in_stream:
+            # Same ongoing stream: extend the trailing window; the earliest filing stays the rep.
+            stream_last = vote.created_at
+            continue
+        current_key = key
+        stream_last = vote.created_at
+        kept.append(vote)
+    return kept
