@@ -256,10 +256,13 @@ class PrecheckRisk:
                 )
             )
 
-            # Shared-pool buying-power guard. Disabled (skipped by the gate) when <= 0; report
-            # it as passing with no binding limit in that case, mirroring the gate's skip.
+            # Shared-pool buying-power guard, mirroring the gate's three-state reading of the
+            # reserve exactly (review F17): `None` is an UNKNOWN reserve, which the gate SKIPS —
+            # report it as passing with no binding limit. A KNOWN reserve is enforced even at
+            # exactly 0 (an exhausted account floors the buy to zero → the gate rejects), so 0
+            # must NOT read as "guard disabled" here either.
             bp = context.remaining_buying_power
-            if bp > 0:
+            if bp is not None:
                 bp_ok = requested_notional <= bp
                 bp_reason = (
                     f"order {_money(requested_notional)} within buying power ({_money(bp)})"
@@ -268,13 +271,13 @@ class PrecheckRisk:
                 )
             else:
                 bp_ok = True
-                bp_reason = "buying-power guard not evaluated (unknown/simulator)"
+                bp_reason = "buying-power guard not evaluated (unknown reserve)"
             checks.append(
                 RiskCheckResult(
                     name="buying_power",
                     label="BP",
                     passed=bp_ok,
-                    limit=_money(bp) if bp > 0 else None,
+                    limit=_money(bp) if bp is not None else None,
                     current=None,
                     projected=_money(requested_notional),
                     reason=bp_reason,

@@ -21,8 +21,10 @@ class CountingEventStore:
         self._inner = inner
         self._metrics = metrics
 
-    async def append(self, event: DomainEvent) -> StoredEvent:
-        stored = await self._inner.append(event)
+    async def append(
+        self, event: DomainEvent, *, expected_version: int | None = None
+    ) -> StoredEvent:
+        stored = await self._inner.append(event, expected_version=expected_version)
         self._metrics.increment(EVENTS_APPENDED_TOTAL)
         if event.event_type == EventType.ORDER_SUBMITTED:
             self._metrics.increment(ORDERS_PLACED_TOTAL)

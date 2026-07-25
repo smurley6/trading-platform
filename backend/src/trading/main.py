@@ -1,6 +1,8 @@
 """Composition root: the only place where concrete adapters are wired to ports."""
 
 import asyncio
+import logging
+import re
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -25,6 +27,7 @@ from trading.application.ports.broker import BrokerPort
 from trading.application.ports.data_source import DataSourcePort, HistoricalDataSourcePort
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.historical import HistoricalPricesPort
+from trading.application.ports.lock import CrossProcessLockPort
 from trading.application.ports.market_data import MarketDataPort, QuoteFeedPort, QuoteStreamPort
 from trading.application.ports.outcome_labels import OutcomeLabelsPort
 from trading.application.ports.politician_repository import PoliticianRepositoryPort
@@ -34,12 +37,13 @@ from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
+from trading.application.safety_rehydration import SafetyState, rehydrate_safety_state
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
 from trading.application.sync_orders import SyncOrders
 from trading.config import Settings
 from trading.domain.conviction import ConvictionThresholds
 from trading.domain.sectors import Sector
-from trading.domain.sleeves import Sleeve, SleeveStatus
+from trading.domain.sleeves import Sleeve, SleeveStatus, TradingMode
 from trading.infrastructure.backtest_env import InMemoryBacktestEnvFactory
 from trading.infrastructure.brokers.alpaca import AlpacaBroker
 from trading.infrastructure.brokers.disabled_trade_updates import DisabledTradeUpdatesStream
@@ -69,7 +73,10 @@ from trading.infrastructure.data_sources.federal_register import (
     RELIABILITY_REGULATORY as RELIABILITY_FEDREG_REGULATORY,
 )
 from trading.infrastructure.data_sources.federal_register import FederalRegisterSource
-from trading.infrastructure.data_sources.house_disclosures import HouseDisclosuresSource
+from trading.infrastructure.data_sources.house_disclosures import (
+    RELIABILITY_HOUSE_DISCLOSURE,
+    HouseDisclosuresSource,
+)
 from trading.infrastructure.data_sources.lobbying import RELIABILITY_LOBBYING, LobbyingSource
 from trading.infrastructure.data_sources.news import NewsSource
 from trading.infrastructure.data_sources.regulations_gov import (
@@ -81,7 +88,7 @@ from trading.infrastructure.data_sources.sec_edgar_atom import (
 )
 from trading.infrastructure.data_sources.sec_edgar_atom import SecEdgarAtomSource
 from trading.infrastructure.data_sources.sec_form4 import (
-    RELIABILITY_INSIDER_TRADE as RELIABILITY_FORM4_INSIDER,
+    RELIABILITY_INSIDER_PURCHASE as RELIABILITY_FORM4_PURCHASE,
 )
 from trading.infrastructure.data_sources.sec_form4 import SecForm4Source
 from trading.infrastructure.data_sources.senate_efd import SenateEfdSource
@@ -97,6 +104,10 @@ from trading.infrastructure.nlp.entity_resolution import GazetteerEntityResolver
 from trading.infrastructure.nlp.sentiment import LexiconSentiment
 from trading.infrastructure.observability.counting_event_store import CountingEventStore
 from trading.infrastructure.observability.metrics import MetricsRegistry
+from trading.infrastructure.persistence.advisory_lock import (
+    NoOpAdvisoryLock,
+    PostgresAdvisoryLock,
+)
 from trading.infrastructure.persistence.broadcasting import BroadcastingEventStore
 from trading.infrastructure.persistence.health import DatabaseReadiness
 from trading.infrastructure.persistence.memory import InMemoryEventStore
@@ -118,6 +129,12 @@ from trading.observability import configure_logging
 from trading.strategies import registry as strategy_registry
 from trading.strategies.base import Strategy, StrategyConfig
 
+logger = logging.getLogger(__name__)
+
+# An HTTP token (RFC 7230 §3.2.6): the character set a `Sec-WebSocket-Protocol` value may use,
+# and therefore the constraint on API_KEY for the browser WebSocket auth path (task-22).
+_WS_TOKEN_SAFE_RE = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+
 # Development quotes; a real MarketDataPort adapter replaces this in a later milestone.
 # Every ticker the entity resolver can produce needs a quote so the paper broker can fill.
 _SECTOR_BASE_PRICE = {
@@ -138,7 +155,7 @@ _DEV_PRICES = {
 }
 
 
-def build_dependencies(settings: Settings) -> AppDeps:
+def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppDeps:
     clock = SystemClock()
 
     # Observability registry: backs /metrics and is bumped on each append (events/orders).
@@ -193,10 +210,32 @@ def build_dependencies(settings: Settings) -> AppDeps:
     # ...then count appends for observability (events_appended_total / orders_placed_total).
     event_store: EventStorePort = CountingEventStore(event_bus, metrics)
 
+    # Cross-process serialization of the evaluate->place path (review F6). With Postgres wired, a
+    # session-level advisory lock arbitrates the cron-vs-web race a per-process asyncio.Lock cannot
+    # see; the in-memory default is single-process, so a no-op suffices. Handed to every sleeve's
+    # EvaluateSignals below (each also holds its own in-process asyncio.Lock).
+    cross_process_lock: CrossProcessLockPort = (
+        PostgresAdvisoryLock(db_engine) if db_engine is not None else NoOpAdvisoryLock()
+    )
+
+    # Rehydrate process-local safety state from the durable log before anything can trade, so a
+    # fresh process (the daily cron, or any web redeploy/restart) inherits the operator's last
+    # kill-switch state (F2) and the true equity high-water mark for the drawdown breaker (F3)
+    # instead of booting empty. Reads only existing event types; appends nothing.
+    safety_state = _rehydrate_safety_state(settings)
+    # Scheduled-cycle trade mode: the operator's last durable arm/disarm (review F16) wins over the
+    # CYCLE_TRADE_MODE env default, so a UI switch to 'manual' reaches the cron and survives a
+    # redeploy instead of silently re-arming 'auto'. None (never changed) => the env default.
+    effective_cycle_mode = safety_state.cycle_trade_mode or settings.cycle_trade_mode
+
     # Decision/fill price seam: static dev prices by default, swapped to the live feed below
     # when it is enabled so the strategy decides and the paper broker fills at real prices.
     market_data: MarketDataPort = StaticMarketData(_DEV_PRICES, clock)
     kill_switch = KillSwitch()  # global: shared across all sleeves (FR-RISK-3)
+    if safety_state.kill_switch_engaged:
+        # An engaged emergency stop must survive a redeploy/restart and reach the cron that
+        # trades; RiskGate.evaluate rejects every order while engaged (review F2).
+        kill_switch.engage()
     risk_limits = RiskLimits(
         max_trade_pct_of_sleeve=settings.max_trade_pct_of_sleeve,
         max_position_concentration_pct=settings.max_position_concentration_pct,
@@ -253,6 +292,16 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         live_aclosers.append(paper_client.aclose)
 
+    # Anti-placeholder data-integrity switch (computed here because it also governs the market
+    # -data seam below). Engages whenever a REAL Alpaca account is wired (paper or live) or on an
+    # explicit REQUIRE_REAL_DATA opt-in. Under it, a real account must never trade or mark against
+    # synthetic prices — enforced at BOTH wiring time (the startup guard below) and decision time
+    # (the market-data seam is wired with NO static fallback, so a missing/non-positive live quote
+    # raises NoRealQuoteError and the decision path skips that symbol — review F4).
+    require_real_data = (
+        settings.require_real_data or settings.enable_alpaca_paper or settings.allow_live
+    )
+
     # Live quote feed (live stock tracking + live P&L). OFF by construction: built only when
     # enabled AND data credentials resolve (Alpaca data accepts paper or live keys); else the
     # disabled feed keeps `python -m trading.main` network-silent. Reused for /quotes,
@@ -269,9 +318,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(data_client.aclose)
-        # Route the decision/fill price seam through the live feed (real prices), keeping the
-        # static dev prices as the fallback for symbols the feed cannot price.
-        market_data = FeedBackedMarketData(quote_feed, market_data)
+        # Route the decision/fill price seam through the live feed (real prices). In dev mode the
+        # static dev prices remain the fallback for symbols the feed cannot price; under
+        # require_real_data the fallback is NOT wired (fallback=None), so a symbol with no
+        # live/positive quote raises NoRealQuoteError and is skipped at decision time instead of
+        # being sized against a synthetic price (review F4).
+        market_data = FeedBackedMarketData(quote_feed, None if require_real_data else market_data)
 
     # Real-time quote stream behind /ws/quotes. Same switch as the REST feed: built only when
     # enabled AND data creds resolve; otherwise the disabled stream opens no socket. Seeded with
@@ -303,6 +355,8 @@ def build_dependencies(settings: Settings) -> AppDeps:
             key_id=data_key_id,
             secret_key=data_secret_key,
             base_url=settings.alpaca_data_base_url,
+            clock=clock,
+            feed=settings.alpaca_data_feed,
         )
         live_aclosers.append(history_client.aclose)
         real_historical_prices = True
@@ -333,13 +387,11 @@ def build_dependencies(settings: Settings) -> AppDeps:
     )
 
     # --- Anti-placeholder data-integrity gate (no fake/placeholder data in real trades) -------
-    # Engages automatically whenever a REAL Alpaca account is wired (paper or live), or on an
-    # explicit REQUIRE_REAL_DATA opt-in. When on: synthetic signals are dropped at ingestion,
-    # a real-broker evaluation aborts on any non-REAL signal, and — here — startup is refused if a
-    # real broker would trade/mark against synthetic prices. Default off keeps dev/tests unchanged.
-    require_real_data = (
-        settings.require_real_data or settings.enable_alpaca_paper or settings.allow_live
-    )
+    # `require_real_data` was computed above (it also governs the market-data seam). When on:
+    # synthetic signals are dropped at ingestion, a real-broker evaluation aborts on any non-REAL
+    # signal, the market-data seam refuses to substitute a synthetic price (NoRealQuoteError →
+    # symbol skipped at decision time), and — here — startup is refused if a real broker would have
+    # no live feed at all. Default off keeps dev/tests unchanged.
     real_market_data = bool(
         settings.enable_live_quotes and settings.data_key_id() and settings.data_secret_key()
     )
@@ -349,6 +401,43 @@ def build_dependencies(settings: Settings) -> AppDeps:
             "data is unavailable (need ENABLE_LIVE_QUOTES=true with resolvable Alpaca data "
             "credentials). A real account must never trade or mark against synthetic prices — "
             "enable the live feed, or disable the real broker / REQUIRE_REAL_DATA."
+        )
+
+    # --- Fail-closed auth (review F12) --------------------------------------------------------
+    # A real Alpaca account (paper or live) served on a public URL with NO API key leaves the
+    # order-placing and risk-control endpoints (POST /proposals/execute, /kill-switch, /cycle/mode,
+    # /sleeves/{id}/mode) open to anyone who finds it — and a dropped API_KEY env var during a
+    # migration would re-open them silently. Refuse to start the SERVED app in that case, mirroring
+    # the market-data guard above, unless the operator explicitly opts out with
+    # ALLOW_UNAUTHENTICATED=true (a private-network deployment). Scoped to `serves_http`: the
+    # headless cron (`trading.jobs.cycle`) exposes no endpoints, so it is unaffected. A
+    # blank/whitespace API_KEY counts as unset (matches ApiKeyAuth).
+    real_broker_wired = live_broker is not None or alpaca_paper_broker is not None
+    api_key_configured = bool(settings.api_key and settings.api_key.strip())
+    if (
+        serves_http
+        and real_broker_wired
+        and not api_key_configured
+        and not settings.allow_unauthenticated
+    ):
+        raise RuntimeError(
+            "Auth: a real Alpaca broker is wired but API_KEY is unset, leaving the order-placing "
+            "and risk-control endpoints (POST /proposals/execute, /kill-switch, /cycle/mode, "
+            "/sleeves/{id}/mode) open to anyone with the URL. Set API_KEY to require "
+            "authentication, or set ALLOW_UNAUTHENTICATED=true to deliberately accept an "
+            "unauthenticated real-broker deployment (e.g. behind a private network)."
+        )
+    # The browser WebSocket path (task-22) carries the key as a `Sec-WebSocket-Protocol` token,
+    # so a key containing characters outside the RFC 7230 token set (e.g. base64 `+`, `/`, `=`)
+    # is rejected by the server's own header parser BEFORE the app runs — the HTTP header path
+    # keeps working while /ws/events silently fails in browsers only. Warn loudly at startup
+    # rather than let that be discovered as a mystery reconnect loop.
+    if api_key_configured and not _WS_TOKEN_SAFE_RE.fullmatch(settings.api_key or ""):
+        logger.warning(
+            "API_KEY contains characters outside the HTTP token set; the browser WebSocket "
+            "path (/ws/events, which sends the key as a Sec-WebSocket-Protocol token) will "
+            "fail while HTTP auth keeps working. Use a token-safe key (e.g. hex or url-safe "
+            "base64 without padding: `openssl rand -hex 32`)."
         )
 
     # ONE shared execution book = the single capital pool. When the real Alpaca paper account is
@@ -389,6 +478,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
             event_store=event_store,
             clock=clock,
             require_real_data=require_real_data,
+            # Seed the drawdown breaker's high-water mark from the durable log (review F3) so a
+            # one-shot cron / redeploy compares current equity against the REAL peak, not zero.
+            initial_peak_equity=safety_state.peak_equity,
+            # Serialize the evaluate->place path across processes (review F6). The per-sleeve
+            # in-process asyncio.Lock lives inside EvaluateSignals itself.
+            cross_process_lock=cross_process_lock,
         )
         evaluators[sleeve_id] = evaluator
         brokers_by_id[sleeve_id] = router
@@ -407,18 +502,43 @@ def build_dependencies(settings: Settings) -> AppDeps:
         if sleeve_id == "sleeve-political":
             political_evaluator = evaluator
 
-    # Reconciliation is POOL-LEVEL. The shared book is one account, so the local projection is
-    # summed across ALL sleeves (sleeve_id=None) and diffed against that one book — a per-sleeve
-    # diff would flag every OTHER algo's holdings as spurious drift. One reconciler serves the
-    # /reconcile endpoint + scheduler, and is keyed to every sleeve so the per-sleeve live-readiness
-    # preflight reuses the same authoritative account check.
-    pool_reconcile = Reconcile(
-        broker=shared_paper, event_store=event_store, clock=clock, sleeve_id=None
+    # Reconciliation is PER VENUE, split by sleeve mode (review F15). Each real account in use gets
+    # its own reconciler whose local projection is aggregated over exactly the sleeves currently
+    # routing to it: the PAPER reconciler sums the paper-mode sleeves against the shared paper book,
+    # and (only when a live account is wired) the LIVE reconciler sums the live-mode sleeves against
+    # the live book. Within one venue this stays POOL-LEVEL across its sleeves (a per-sleeve diff on
+    # a shared book would flag other algos' holdings as spurious drift). Before this split, once any
+    # sleeve went live its holdings were diffed against the PAPER book — perpetual false drift — and
+    # the live account was never reconciled. The callables are re-evaluated each run, so a runtime
+    # paper→live switch moves a sleeve to the correct venue with no rewiring.
+    all_sleeve_ids = [sleeve_id for sleeve_id, _s, _st in sleeve_specs]
+
+    def _sleeves_in_mode(target: TradingMode) -> list[str]:
+        return [sid for sid in all_sleeve_ids if registry.mode(sid) is target]
+
+    paper_reconcile = Reconcile(
+        broker=shared_paper,
+        event_store=event_store,
+        clock=clock,
+        sleeve_ids=lambda: _sleeves_in_mode(TradingMode.PAPER),
+        venue=None,  # None => records are byte-identical to the historical pool reconciler
     )
-    reconcilers_by_id: dict[str, Reconcile] = {
-        sleeve_id: pool_reconcile for sleeve_id, _s, _st in sleeve_specs
-    }
-    reconcilers = [pool_reconcile]
+    reconcilers = [paper_reconcile]
+    # Live-readiness reconciles the venue a sleeve would ENTER: the live book when one is wired
+    # (so a drifted live account blocks going live and the live account is genuinely checked),
+    # else the paper reconciler (readiness fails on the live-broker check anyway).
+    readiness_reconcile = paper_reconcile
+    if live_broker is not None:
+        live_reconcile = Reconcile(
+            broker=live_broker,
+            event_store=event_store,
+            clock=clock,
+            sleeve_ids=lambda: _sleeves_in_mode(TradingMode.LIVE),
+            venue="live",
+        )
+        reconcilers.append(live_reconcile)
+        readiness_reconcile = live_reconcile
+    reconcilers_by_id: dict[str, Reconcile] = dict.fromkeys(all_sleeve_ids, readiness_reconcile)
     order_syncs = list(order_syncs_by_id.values())
 
     # Real-time trade-updates stream (FR-REC/FR-EXE): the push complement to the 30s polling
@@ -463,7 +583,6 @@ def build_dependencies(settings: Settings) -> AppDeps:
         brokers=brokers_by_id,
         event_store=event_store,
         clock=clock,
-        default_sleeve_id="sleeve-political",
     )
 
     live_ceilings = RiskLimits(
@@ -513,7 +632,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
             event_store=event_store,
             clock=clock,
             window_days=settings.corroboration_window_days,
-            trade_mode=settings.cycle_trade_mode,
+            trade_mode=effective_cycle_mode,
         )
 
     # Backtesting (FR-BT): replay the recorded signals through the political strategy and the
@@ -597,7 +716,7 @@ def build_dependencies(settings: Settings) -> AppDeps:
         background_tasks=background_tasks,
         default_watchlist=settings.default_watchlist,
         political_cycle=political_cycle,
-        cycle_trade_mode=settings.cycle_trade_mode,
+        cycle_trade_mode=effective_cycle_mode,
         cors_allow_origins=[
             o.strip() for o in (settings.cors_allow_origins or "").split(",") if o.strip()
         ],
@@ -637,6 +756,44 @@ def build_dependencies(settings: Settings) -> AppDeps:
     if db_engine is not None:
         deps.aclosers.append(db_engine.dispose)
     return deps
+
+
+def _rehydrate_safety_state(settings: Settings) -> SafetyState:
+    """Recover kill-switch + peak-equity from the durable log for a fresh process (review F2/F3).
+
+    With no ``DATABASE_URL`` the store is in-memory and stateless — a fresh process shares nothing
+    with prior runs, so there is nothing to rehydrate and the defaults (disengaged, peak 0) are
+    correct. With Postgres the append-only log persists across processes, so the daily cron and
+    any web redeploy inherit the operator's last kill-switch state and the true equity high-water
+    mark.
+
+    The read runs against a SELF-CONTAINED throwaway engine, disposed before returning a plain
+    ``SafetyState`` — the same discipline as ``_load_roster_blocking`` — so the shared engine the
+    app/cron then uses on its own loop is never handed a connection bound to a throwaway loop.
+    Like ``_load_roster_blocking`` it runs in any context: ``asyncio.run`` when no loop is running,
+    a dedicated worker-thread loop when one is (the cron builds deps inside ``asyncio.run``).
+    """
+    database_url = settings.database_url
+    if not database_url:
+        return SafetyState(kill_switch_engaged=False, peak_equity=Decimal("0"))
+
+    async def _read() -> SafetyState:
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        from trading.infrastructure.persistence.postgres import PostgresEventStore
+
+        engine = create_async_engine(database_url)
+        try:
+            return await rehydrate_safety_state(PostgresEventStore(engine))
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_read())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_read())).result()
 
 
 async def _load_congress_roster(settings: Settings) -> CongressLegislatorsRepository:
@@ -702,13 +859,18 @@ def _source_enabled_flags(settings: Settings) -> dict[str, bool]:
 # The 13 ingest adapters, each a (source_id, human label, reliability prior) triple. The reliability
 # priors are imported from the adapter modules themselves (single source of truth), so this stays a
 # faithful mirror of the conviction-scoring source_reliability term, not a hand-copied duplicate.
+# Two sources no longer have a SINGLE prior after the Task-10 recalibration, so the label carries
+# what one float cannot: Form 4 is side-aware (purchases 0.60, sales benched to 0.0 — the shown
+# figure is the purchase prior, the only side that still contributes), and House disclosures are
+# benched outright at 0.0 with their own constant (so the mirror shows the bench, not the shared
+# 0.7 disclosed-trade prior congress_trades/senate_efd keep).
 _DATA_SOURCE_SPECS: tuple[tuple[str, str, float], ...] = (
     ("news", "News / statements", RELIABILITY_STATEMENT),
     ("usaspending", "USAspending contracts", RELIABILITY_CONTRACT),
     ("congress_trades", "Congress trades (FMP)", RELIABILITY_DISCLOSED_TRADE),
-    ("house_disclosures", "House disclosures (PTR)", RELIABILITY_DISCLOSED_TRADE),
+    ("house_disclosures", "House disclosures (PTR, benched)", RELIABILITY_HOUSE_DISCLOSURE),
     ("senate_efd", "Senate eFD (PTR)", RELIABILITY_DISCLOSED_TRADE),
-    ("sec_form4", "SEC Form 4 (insider)", RELIABILITY_FORM4_INSIDER),
+    ("sec_form4", "SEC Form 4 (insider buys; sales benched)", RELIABILITY_FORM4_PURCHASE),
     ("lobbying", "LDA lobbying", RELIABILITY_LOBBYING),
     ("fda_approvals", "openFDA approvals", RELIABILITY_FDA_REGULATORY),
     ("clinical_trials", "ClinicalTrials.gov", RELIABILITY_CLINICAL),
@@ -989,7 +1151,9 @@ def _build_historical_sources(
 def create_application() -> FastAPI:
     settings = Settings()
     configure_logging(settings.log_level)
-    return create_app(build_dependencies(settings))
+    # serves_http=True arms the fail-closed auth guard (review F12): the served app refuses to
+    # start when a real broker is wired with no API_KEY. The headless cron never takes this path.
+    return create_app(build_dependencies(settings, serves_http=True))
 
 
 def main() -> None:

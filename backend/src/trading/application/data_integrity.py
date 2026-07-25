@@ -4,8 +4,22 @@ The platform may act on a real broker ONLY with REAL data. This module centralis
 one :class:`SyntheticDataError` and the helpers the enforcement points share — so the policy
 lives in exactly one place instead of being re-implemented at each gate.
 
-There are two DIFFERENT execution walls for the two non-REAL provenance tiers (see
-``docs/RESEARCH-PLAN.md`` §2-§3), and they are NOT interchangeable:
+There are TWO named, NON-interchangeable predicates over "not REAL", plus one narrower
+SYNTHETIC-only predicate, because "not REAL" means different things to different consumers (see
+``docs/RESEARCH-PLAN.md`` §2-§3 and task-08's call-site audit):
+
+- :func:`execution_barred` — SYNTHETIC and BACKFILLED, i.e. everything that must never drive a
+  real order or gate live-trading readiness (the ORIGINAL not-REAL predicate, renamed; behavior
+  unchanged). BACKFILLED is real, historically reconstructed data, but by definition arrives too
+  late to be a live trade, so it is barred from execution exactly like SYNTHETIC.
+- :func:`purge_eligible` — SYNTHETIC ONLY (missing/unparseable provenance fails closed to
+  SYNTHETIC, per the original directive). BACKFILLED must SURVIVE a purge — it belongs in
+  projections/labeler/learner per RESEARCH-PLAN §2's provenance wall — so purge/coverage
+  reporting must NOT reuse :func:`execution_barred`.
+- :func:`ensure_no_synthetic` (unchanged) — the labeler's SYNTHETIC-only abort guard: it admits
+  REAL and BACKFILLED but refuses SYNTHETIC.
+
+Two DIFFERENT execution walls exist for the two non-REAL provenance tiers:
 
 - SYNTHETIC — fully quarantined. :func:`ensure_real_signals` ABORTS the whole evaluation
   (raises :class:`SyntheticDataError`) if even one SYNTHETIC signal is present, because fake
@@ -18,11 +32,12 @@ There are two DIFFERENT execution walls for the two non-REAL provenance tiers (s
   instead of raising, so REAL signals in the same batch still evaluate normally.
 
 Synthetic data stays permitted in tests and labelled backtests, which never reach a real
-broker. Backfilled data stays permitted in projections and (future) labeler/learner paths — it
-is simply never fed to a strategy. The gates fire only when ``require_real_data`` is set, which
-the composition root turns on automatically whenever a sleeve routes to a real Alpaca account
-(see ``main``). The default is fail-closed: an un-stamped Signal is SYNTHETIC, so forgetting to
-mark a new source REAL blocks it rather than silently trusting it.
+broker. Backfilled data stays permitted in projections, purge/coverage, and the labeler/learner
+paths — it is simply never fed to a strategy or counted as execution-safe. The execution-wall
+gates fire only when ``require_real_data`` is set, which the composition root turns on
+automatically whenever a sleeve routes to a real Alpaca account (see ``main``). The default is
+fail-closed: an un-stamped Signal is SYNTHETIC, so forgetting to mark a new source REAL blocks
+it (execution wall) or purges it (purge/coverage) rather than silently trusting it.
 """
 
 from collections.abc import Iterable, Sequence
@@ -35,9 +50,29 @@ class SyntheticDataError(Exception):
     """Raised when SYNTHETIC (fake / placeholder / seeded) data reaches a real decision path."""
 
 
-def non_real_signals(signals: Iterable[Signal]) -> list[Signal]:
-    """Return the signals that are not REAL (everything the guard would reject)."""
+def execution_barred(signals: Iterable[Signal]) -> list[Signal]:
+    """Return the signals barred from execution/live-readiness: SYNTHETIC and BACKFILLED.
+
+    This is the ORIGINAL "not REAL" predicate (renamed from ``non_real_signals`` in task-08):
+    everything that is not REAL is barred from driving a real order or passing the live-readiness
+    provenance check, because BACKFILLED — while real data — arrives too late to be a live trade.
+    Do NOT use this for purge/coverage reporting: BACKFILLED must survive a purge
+    (:func:`purge_eligible` is the correct predicate there).
+    """
     return [s for s in signals if s.provenance is not Provenance.REAL]
+
+
+def purge_eligible(signals: Iterable[Signal]) -> list[Signal]:
+    """Return the signals eligible for purge: SYNTHETIC ONLY.
+
+    BACKFILLED is real, historically reconstructed data that belongs in projections, the purge
+    job's retained set, and the labeler/learner (RESEARCH-PLAN §2's provenance wall) — it must
+    NEVER be purge-classified alongside SYNTHETIC. Missing or unparseable provenance fails closed
+    to SYNTHETIC (the domain default), so legacy un-stamped signals remain purge-eligible exactly
+    as before. Do NOT use this for the execution wall: BACKFILLED must still be barred from real
+    orders and live-readiness (:func:`execution_barred` is the correct predicate there).
+    """
+    return [s for s in signals if s.provenance is Provenance.SYNTHETIC]
 
 
 def tradeable_signals(signals: Iterable[Signal]) -> list[Signal]:

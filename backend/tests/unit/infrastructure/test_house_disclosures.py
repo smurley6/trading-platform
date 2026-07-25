@@ -164,7 +164,11 @@ async def test_single_transaction_pdf_emits_one_signal(clock_2025: FixedClock) -
     assert signal.ticker == "GSK"
     assert signal.politician_id == "pol-house-1"
     assert signal.sentiment < 0  # the sample is a sale -> bearish
-    assert signal.source_reliability == pytest.approx(0.7)
+    # Benched to 0.0 conviction contribution (Task 10, docs/RESEARCH-PLAN.md; Phase 6 label run
+    # a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 2026-07-07: House measured 0.504 direction-aligned vs
+    # the refuted 0.70 prior asserted here before Task 10). The signal is still fully ingested and
+    # recorded (see the assertions above) — only its conviction weight changed.
+    assert signal.source_reliability == pytest.approx(0.0)
     assert signal.politician_weight >= 0.0
     # FilingDate is the available timestamp.
     assert signal.created_at.tzinfo is not None

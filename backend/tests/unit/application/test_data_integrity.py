@@ -9,7 +9,8 @@ from tests.conftest import FixedClock, SignalFactory
 from trading.application.data_integrity import (
     SyntheticDataError,
     ensure_real_signals,
-    non_real_signals,
+    execution_barred,
+    purge_eligible,
     tradeable_signals,
 )
 from trading.application.ingest_signals import IngestSignals
@@ -47,10 +48,31 @@ def test_ensure_real_signals_raises_on_any_synthetic(make_signal: SignalFactory)
         ensure_real_signals(mixed)
 
 
-def test_non_real_signals_returns_only_fakes(make_signal: SignalFactory) -> None:
+def test_execution_barred_returns_only_fakes(make_signal: SignalFactory) -> None:
     real = make_signal(provenance=Provenance.REAL)
     fake = make_signal(provenance=Provenance.SYNTHETIC)
-    assert non_real_signals([real, fake]) == [fake]
+    assert execution_barred([real, fake]) == [fake]
+
+
+def test_execution_barred_also_bars_backfilled(make_signal: SignalFactory) -> None:
+    # task-08: execution_barred is the renamed "not REAL" predicate (SYNTHETIC + BACKFILLED) —
+    # the execution/live-readiness wall must still bar BACKFILLED, unchanged from before the
+    # rename split this from purge_eligible.
+    real = make_signal(provenance=Provenance.REAL)
+    backfilled = make_signal(provenance=Provenance.BACKFILLED)
+    synthetic = make_signal(provenance=Provenance.SYNTHETIC)
+    assert execution_barred([real, backfilled, synthetic]) == [backfilled, synthetic]
+
+
+def test_purge_eligible_returns_only_synthetic_never_backfilled(
+    make_signal: SignalFactory,
+) -> None:
+    # task-08: purge_eligible is SYNTHETIC-only — BACKFILLED must NEVER be purge-classified,
+    # unlike execution_barred which (correctly, for the execution wall) includes it.
+    real = make_signal(provenance=Provenance.REAL)
+    backfilled = make_signal(provenance=Provenance.BACKFILLED)
+    synthetic = make_signal(provenance=Provenance.SYNTHETIC)
+    assert purge_eligible([real, backfilled, synthetic]) == [synthetic]
 
 
 def test_ensure_real_signals_does_not_raise_on_backfilled(make_signal: SignalFactory) -> None:

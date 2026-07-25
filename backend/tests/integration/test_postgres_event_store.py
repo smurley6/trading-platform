@@ -45,6 +45,32 @@ async def test_append_assigns_gap_free_sequence() -> None:
         await engine.dispose()
 
 
+async def test_cas_append_conflict_and_success() -> None:
+    # Opt-in compare-and-set (review F9): an append at a stale version is rejected instead of
+    # reallocating a fresh seq, while the default path stays gap-free.
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from trading.application.ports.event_store import ExpectedVersionError
+    from trading.infrastructure.persistence.postgres import PostgresEventStore
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresEventStore(engine)
+    stream_id = f"test-{uuid4()}"
+    try:
+        first = await store.append(_event(stream_id))  # seq 1
+        # CAS at the observed version lands at seq 2.
+        second = await store.append(_event(stream_id), expected_version=first.seq)
+        assert (first.seq, second.seq) == (1, 2)
+        # A stale CAS (expecting version 1, but the stream is at 2) is rejected — NOT retried.
+        with pytest.raises(ExpectedVersionError):
+            await store.append(_event(stream_id), expected_version=1)
+        # The default path is unaffected: it still allocates the next seq.
+        third = await store.append(_event(stream_id))
+        assert third.seq == 3
+    finally:
+        await engine.dispose()
+
+
 async def test_update_and_delete_are_forbidden_by_the_database() -> None:
     from sqlalchemy import text
     from sqlalchemy.exc import DBAPIError

@@ -45,17 +45,41 @@ def signals_from_events(
 
     When `now` and `window_days` are given, only signals created within the rolling
     corroboration window are returned (FR-POL-4).
+
+    De-duplicates by `signal_id`, keeping the FIRST occurrence in recording order. The
+    daily cron re-fetches its whole lookback and re-appends deterministic-id signals
+    (`house-…`, `sec-form4-…`), so the append-only log can hold up to ~21 copies of one
+    observation (review F1). Because `read_all` yields events in recording order, the first
+    occurrence is the EARLIEST recorded copy — point-in-time correct (never a later append),
+    deterministic, and payload-identical to every other copy. Collapsing here makes the
+    reconstructed window — and therefore conviction/score/contributions — identical whether
+    the log holds 1 copy or 21, healing the already-corrupted log for every replay consumer
+    (trade path, live-trading path, backtest) without mutating the log itself.
     """
     cutoff = None if now is None or window_days is None else now - timedelta(days=window_days)
     signals: list[Signal] = []
+    seen_ids: set[str] = set()
     for stored in events:
         if stored.event.event_type != EventType.SIGNAL_RECEIVED:
             continue
         signal = _signal_from_payload(stored.event.payload)
+        if signal.id in seen_ids:
+            continue
         if cutoff is not None and signal.created_at < cutoff:
             continue
+        seen_ids.add(signal.id)
         signals.append(signal)
     return signals
+
+
+def stream_version(events: Sequence[StoredEvent], stream_id: str) -> int:
+    """The current version (max `seq`) of one stream, or 0 if it has no events yet.
+
+    The fill writers pass this as the `expected_version` for a compare-and-set append so a
+    concurrent poller/stream write to the same order stream is detected instead of doubling the
+    position (review F9). `seq` is per-stream and gap-free, so the max is the current version.
+    """
+    return max((s.seq for s in events if s.event.stream_id == stream_id), default=0)
 
 
 def _matches_sleeve(payload: dict[str, object], sleeve_id: str | None) -> bool:
@@ -104,7 +128,10 @@ def held_positions_from_events(events: Sequence[StoredEvent]) -> list[HeldPositi
             filled_at=datetime.fromisoformat(str(payload["filled_at"])),
         )
         portfolio = by_sleeve.get(sleeve_id, Portfolio(cash=Decimal("0")))
-        by_sleeve[sleeve_id] = portfolio.apply_fill(fill)
+        # Tolerant: an out-of-order SELL (before its BUY, or a phantom oversell) is clamped to
+        # flat, never raised — this is a rebuildable projection, not the live trading engine
+        # (review F7). The strict guard still protects order placement via `Portfolio.apply_fill`.
+        by_sleeve[sleeve_id], _clamped = portfolio.apply_fill_tolerant(fill)
 
     held: list[HeldPosition] = []
     for sleeve_id, portfolio in by_sleeve.items():

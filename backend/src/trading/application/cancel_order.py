@@ -40,16 +40,25 @@ class CancelOrder:
         brokers: Mapping[str, BrokerPort],
         event_store: EventStorePort,
         clock: ClockPort,
-        default_sleeve_id: str,
     ) -> None:
         self._brokers = brokers
         self._event_store = event_store
         self._clock = clock
-        self._default_sleeve_id = default_sleeve_id
 
     async def execute(self, *, client_order_id: str, sleeve_id: str | None = None) -> CancelResult:
         correlation_id = str(uuid4())
+        # Resolve the owning sleeve from the order's own recorded lifecycle. Do NOT silently
+        # default an unknown order into a sleeve's ledger (review F27): a manual Alpaca-dashboard
+        # order the platform never placed would otherwise be stamped into sleeve-political's log,
+        # after which SyncOrders' "known" scoping admits its fills and attributes a human trade to
+        # the algo (and a foreign partial SELL can wedge order sync, review F7). Adopting an
+        # unknown order requires an EXPLICIT sleeve param; without one, this is a 404.
         resolved = sleeve_id or await self._resolve_sleeve(client_order_id)
+        if resolved is None:
+            raise OrderNotFoundError(
+                f"no local record of order {client_order_id}; pass an explicit sleeve_id to "
+                "adopt an order the platform did not place"
+            )
         broker = self._brokers.get(resolved)
         if broker is None:
             raise OrderNotFoundError(f"unknown sleeve '{resolved}' for order {client_order_id}")
@@ -86,9 +95,9 @@ class CancelOrder:
         )
         return CancelResult(correlation_id=correlation_id, order=order, sleeve_id=resolved)
 
-    async def _resolve_sleeve(self, client_order_id: str) -> str:
+    async def _resolve_sleeve(self, client_order_id: str) -> str | None:
         events = await self._event_store.read_all()
-        return order_sleeve(events, client_order_id) or self._default_sleeve_id
+        return order_sleeve(events, client_order_id)
 
     async def _append(
         self, stream_id: str, event_type: str, payload: dict[str, Any], correlation_id: str

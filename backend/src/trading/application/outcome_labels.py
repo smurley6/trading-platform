@@ -104,6 +104,10 @@ class LabelReport:
     ok: int
     unresolvable: int
     committed: bool
+    # Ticker-resolved, labelable-provenance signals dropped by `exclude_tickers` BEFORE labeling
+    # (e.g. the 44 leaked sec_form4 NAN signals from the Task 04c issuer-CIK filter fix). 0 when
+    # no exclusion set was supplied — unchanged behavior from before this field existed.
+    excluded: int = 0
 
 
 def _entry_index(points: Sequence[tuple[datetime, Decimal]], disclosed_at: datetime) -> int | None:
@@ -178,14 +182,20 @@ class LabelOutcomes:
         label_run_id: str,
         dry_run: bool,
         signals: Sequence[Signal] | None = None,
+        exclude_tickers: frozenset[str] | None = None,
     ) -> LabelReport:
         """Label the labelable signals, writing (unless dry_run) a fresh ``label_run_id`` run.
 
         Pulls REAL+BACKFILLED ticker-resolved signals from the read model when ``signals`` is not
         supplied; when it IS supplied (tests / explicit callers), that batch is used as-is but
         SYNTHETIC input is refused (:func:`ensure_no_synthetic`) and only ticker-resolved,
-        labelable-provenance signals are labeled. On a --confirm run the labels replace this run
-        id's rows (delete-then-write) and ONE ``user.action`` audit event is appended.
+        labelable-provenance signals are labeled. ``exclude_tickers`` (case-insensitive; compared
+        upper-cased) drops matching signals BEFORE labeling — e.g. known-bad data admitted by a
+        since-fixed upstream defect that must stay in the append-only event log but should not
+        feed the research projection; excluded signals are counted (``LabelReport.excluded``) but
+        never labeled. On a --confirm run the labels replace this run id's rows (delete-then-write)
+        and ONE ``user.action`` audit event is appended, recording the exclusion set for
+        provenance.
         """
         as_of = self._clock.now()
 
@@ -204,6 +214,20 @@ class LabelOutcomes:
             for s in candidates
             if s.provenance in LABELABLE_PROVENANCE and s.ticker is not None and s.ticker.strip()
         ]
+
+        excluded_count = 0
+        if exclude_tickers:
+            excluded_count = sum(
+                1
+                for s in labelable
+                if s.ticker is not None and s.ticker.strip().upper() in exclude_tickers
+            )
+            labelable = [
+                s
+                for s in labelable
+                if s.ticker is None or s.ticker.strip().upper() not in exclude_tickers
+            ]
+
         # Defence in depth: even a read-model pull must never carry SYNTHETIC into the labeler.
         ensure_no_synthetic(labelable)
 
@@ -220,7 +244,11 @@ class LabelOutcomes:
         if not dry_run:
             await self._labels_store.replace_run(label_run_id, labels)
             await self._append_audit(
-                label_run_id=label_run_id, as_of=as_of, signal_count=len(labelable)
+                label_run_id=label_run_id,
+                as_of=as_of,
+                signal_count=len(labelable),
+                exclude_tickers=exclude_tickers,
+                excluded_count=excluded_count,
             )
             committed = True
 
@@ -232,6 +260,7 @@ class LabelOutcomes:
             ok=ok,
             unresolvable=unresolvable,
             committed=committed,
+            excluded=excluded_count,
         )
 
     async def _fetch_bars(self, signals: Sequence[Signal]) -> PriceSeries:
@@ -374,12 +403,22 @@ class LabelOutcomes:
             label_run_id=run_id,
         )
 
-    async def _append_audit(self, *, label_run_id: str, as_of: datetime, signal_count: int) -> None:
+    async def _append_audit(
+        self,
+        *,
+        label_run_id: str,
+        as_of: datetime,
+        signal_count: int,
+        exclude_tickers: frozenset[str] | None,
+        excluded_count: int,
+    ) -> None:
         """Append ONE user.action audit event recording the run parameters (not a PIT signal).
 
         occurred_at = clock.now(): this is an audit fact about the run, so it is stamped with the
         run's wall-clock (unlike a backfilled signal.received event, whose occurred_at is its
-        disclosure timestamp).
+        disclosure timestamp). ``exclude_tickers``/``excluded_count`` record the ticker exclusion
+        set (if any) so a label run's provenance is complete — e.g. which known-bad tickers (the
+        Task 04c leaked-issuer NAN signals) were deliberately kept out of this run.
         """
         await self._event_store.append(
             DomainEvent(
@@ -393,6 +432,8 @@ class LabelOutcomes:
                     "provenance_filter": sorted(p.value for p in LABELABLE_PROVENANCE),
                     "benchmark_policy": "sector_etf_proxy_else_market_spy",
                     "signal_count": signal_count,
+                    "exclude_tickers": sorted(exclude_tickers) if exclude_tickers else [],
+                    "excluded_count": excluded_count,
                 },
                 occurred_at=self._clock.now(),
                 correlation_id=label_run_id,

@@ -19,20 +19,58 @@ absent from the series.
 Default OFF: wired only when `enable_historical_data` is set and data credentials resolve
 (see `main.py`); otherwise the backtest uses `SyntheticHistoricalPrices` and makes no network
 calls.
+
+**End clamping (Task 09).** The subscription in use is entitled to delayed/IEX data, not
+recent SIP: a request whose ``end`` reaches into "now" 403s with
+``{"message":"subscription does not permit querying recent SIP data"}"`` — confirmed live (see
+the 2026-07-06 MEMORY.md change-log entry for the exact probe). The labeler legitimately asks
+for bars through a signal's horizon end, which can be in the future for a young signal, so the
+adapter itself clamps the EFFECTIVE end before every request rather than pushing that decision
+onto every caller. Callers still see the FULL requested window in the returned `PriceSeries`
+(simply fewer/no bars past the clamp) — this is transparent shrinkage, not a rejected request.
 """
 
+import asyncio
+import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import httpx
 
+from trading.application.ports.clock import ClockPort
 from trading.domain.prices import PriceSeries
+
+logger = logging.getLogger(__name__)
+
+# How far behind "now" the effective request end is clamped, absent a session-boundary clamp.
+# Chosen conservatively above Alpaca's ~15-minute SIP delay so the developing (in-progress)
+# daily bar for the current session — which itself aggregates the trailing window up to "now" —
+# is never inside the requested range.
+_RECENT_DATA_BUFFER = timedelta(minutes=16)
+
+# Truncate an error response body to this many characters before it goes into the raised
+# message/log — enough to see the actual Alpaca error payload without unbounded log spam.
+_ERROR_BODY_TRUNCATE = 500
+
+# Bounded retry policy for 429 rate-limit responses. Alpaca's data API enforces a per-minute
+# request quota; a long paginated bars walk (the labeler's whole-corpus fetch) will hit it in
+# normal operation, so 429 is retried with exponential backoff — honoring a `Retry-After`
+# header when present — rather than failing the whole job. Any other status is never retried.
+_RATE_LIMIT_MAX_RETRIES = 6
+_RATE_LIMIT_MAX_DELAY_SECONDS = 60.0
 
 
 class AlpacaHistoricalDataError(Exception):
-    pass
+    """Raised on a non-2xx response. Carries the HTTP status and (truncated) response body so
+    the real cause (e.g. a subscription/SIP-entitlement error) is never masked — see the
+    2026-07-06 MEMORY.md change-log entry for the debugging cost of the previous behavior."""
+
+    def __init__(self, status_code: int, body: str, *, message: str | None = None) -> None:
+        self.status_code = status_code
+        self.body = body[:_ERROR_BODY_TRUNCATE]
+        super().__init__(message or f"historical data request failed ({status_code}): {self.body}")
 
 
 class AlpacaHistoricalData:
@@ -44,6 +82,8 @@ class AlpacaHistoricalData:
         secret_key: str,
         base_url: str,
         timeframe: str = "1Day",
+        clock: ClockPort | None = None,
+        feed: str | None = None,
     ) -> None:
         self._client = client
         self._base_url = base_url.rstrip("/")
@@ -52,6 +92,41 @@ class AlpacaHistoricalData:
             "APCA-API-KEY-ID": key_id,
             "APCA-API-SECRET-KEY": secret_key,
         }
+        # Escape hatch only (Task 09, `Settings.alpaca_data_feed`): unset by default, so NO
+        # `feed` param is sent and Alpaca serves its default entitled feed. Do not default this
+        # to "iex" — see the config.py comment on `alpaca_data_feed`.
+        self._feed = feed
+        # Optional injected clock so the end-clamp is deterministically testable (FixedClock in
+        # unit tests). The composition root has a `SystemClock` in scope at construction time
+        # (see `main.py`), so it is threaded through here rather than re-plumbed; if ever
+        # constructed without one (e.g. an older call site), `datetime.now(UTC)` is used
+        # directly at call time — see `_now()`.
+        self._clock = clock
+
+    def _now(self) -> datetime:
+        if self._clock is not None:
+            return self._clock.now()
+        # No clock injected: fall back to wall-clock time directly. Documented deliberate
+        # decision (Task 09) — not re-plumbing the composition root just for this adapter; every
+        # current call site (`main.py`) DOES pass a clock, so this branch is a defensive default
+        # only (e.g. a test or future call site that constructs the adapter bare).
+        return datetime.now(UTC)
+
+    def _clamp_end(self, requested_end: datetime) -> datetime:
+        """Clamp the effective request end to ``min(requested_end, now - _RECENT_DATA_BUFFER)``.
+
+        The labeler may legitimately ask for bars through a horizon end that is in the future
+        for a young signal; Alpaca's recent-SIP entitlement check 403s once the window reaches
+        into "now" (live-verified — see the 2026-07-06 MEMORY.md entry). Clamping here means
+        every caller of this adapter gets a request Alpaca will actually serve, without needing
+        its own clamping logic.
+        """
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        boundary = now.astimezone(UTC) - _RECENT_DATA_BUFFER
+        requested = requested_end if requested_end.tzinfo else requested_end.replace(tzinfo=UTC)
+        return min(requested.astimezone(UTC), boundary)
 
     async def price_series(
         self, symbols: Sequence[str], start: datetime, end: datetime
@@ -59,6 +134,8 @@ class AlpacaHistoricalData:
         wanted = [s.strip().upper() for s in symbols if s.strip()]
         if not wanted:
             return PriceSeries(series={})
+
+        effective_end = self._clamp_end(end)
 
         # Accumulate bars per symbol across pages.
         bars_by_symbol: dict[str, list[tuple[datetime, Decimal]]] = {}
@@ -68,8 +145,10 @@ class AlpacaHistoricalData:
                 "symbols": ",".join(wanted),
                 "timeframe": self._timeframe,
                 "start": _iso(start),
-                "end": _iso(end),
+                "end": _iso(effective_end),
             }
+            if self._feed:
+                params["feed"] = self._feed
             if page_token:
                 params["page_token"] = page_token
             payload = await self._fetch(params)
@@ -90,21 +169,54 @@ class AlpacaHistoricalData:
         return PriceSeries(series=series)
 
     async def _fetch(self, params: dict[str, str]) -> dict[str, Any]:
-        response = await self._client.get(
-            f"{self._base_url}/v2/stocks/bars",
-            headers=self._headers,
-            params=params,
-        )
-        if response.status_code in (401, 403):
+        for attempt in range(_RATE_LIMIT_MAX_RETRIES + 1):
+            response = await self._client.get(
+                f"{self._base_url}/v2/stocks/bars",
+                headers=self._headers,
+                params=params,
+            )
+            if response.status_code != 429 or attempt == _RATE_LIMIT_MAX_RETRIES:
+                break
+            delay = _retry_delay(response, attempt)
+            logger.warning(
+                "historical data rate-limited (429): retry %d/%d in %.0fs",
+                attempt + 1,
+                _RATE_LIMIT_MAX_RETRIES,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        if response.status_code == 401:
+            # 401 is a genuine credential problem (missing/invalid key pair) — "check
+            # credentials" is accurate guidance here and is kept.
+            body = response.text[:_ERROR_BODY_TRUNCATE]
+            logger.error("historical data auth failed (401): check credentials; body=%s", body)
             raise AlpacaHistoricalDataError(
-                f"historical data auth failed ({response.status_code}): check credentials"
+                response.status_code,
+                body,
+                message=f"historical data auth failed (401): check credentials; body={body}",
             )
         if response.status_code >= 400:
-            raise AlpacaHistoricalDataError(
-                f"historical data request failed ({response.status_code}): {response.text}"
-            )
+            # 403 (and any other 4xx/5xx) is NOT assumed to be a credentials issue — it may be a
+            # subscription/entitlement error (e.g. recent-SIP), rate limit, or bad request. The
+            # real response body is logged and propagated verbatim (truncated) so the actual
+            # cause is never masked.
+            body = response.text[:_ERROR_BODY_TRUNCATE]
+            logger.error("historical data request failed (%s): %s", response.status_code, body)
+            raise AlpacaHistoricalDataError(response.status_code, body)
         payload: dict[str, Any] = response.json()
         return payload
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying a 429: the server's `Retry-After` when present and
+    parseable, else exponential backoff (2, 4, 8, ... s), both capped at the max delay."""
+    header = response.headers.get("Retry-After")
+    if header is not None:
+        try:
+            return min(max(float(header), 0.0), _RATE_LIMIT_MAX_DELAY_SECONDS)
+        except ValueError:
+            pass
+    return min(2.0 ** (attempt + 1), _RATE_LIMIT_MAX_DELAY_SECONDS)
 
 
 def _iso(value: datetime) -> str:

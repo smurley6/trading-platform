@@ -68,11 +68,20 @@ from trading.infrastructure.reference import COMPANY_DIRECTORY
 
 logger = logging.getLogger(__name__)
 
-# Per-source-type reliability prior for corporate-insider trades. Defined HERE (not in the
-# data_sources __init__) per the adapter's brief. Form 4 is hard, legally-mandated disclosure
-# but is lagged (filed up to two business days after the trade) and indirect, so it sits a touch
-# below contract awards yet above noisy statements.
-RELIABILITY_INSIDER_TRADE = 0.75
+# Per-source-type reliability priors for corporate-insider trades, SIDE-AWARE (Task 10,
+# docs/RESEARCH-PLAN.md; Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 68,242 ok labels,
+# 2026-07-07). Originally a single flat prior (``RELIABILITY_INSIDER_TRADE = 0.75``) covering both
+# sides; Phase 6's five adversarially-verified analyses refuted that flat prior: the only verified
+# directional edge is PURCHASES (ex-LUV 60.9% direction-aligned / +1.01% mean, n=724, monotone by
+# horizon), while SALES are anti-predictive as bearish inputs (sold stocks outperformed their
+# sector, +2.26% at h=20, n=13,110; side-aligned sale hit rate 45.5-48.2%). Purchases keep a
+# reduced (not equal) reliability pending a larger sample — see the re-review trigger in
+# docs/RESEARCH-PLAN.md ("Re-review triggers"); sales are zeroed out of conviction entirely (still
+# ingested/recorded/labeled — this is a conviction-weighting change only, never a data-collection
+# one; see `_SENTIMENT_BY_CODE`/`_RELIABILITY_BY_CODE` below and their use in `_live_signal` /
+# `_historical_signal`).
+RELIABILITY_INSIDER_PURCHASE = 0.60
+RELIABILITY_INSIDER_SALE = 0.0
 
 _RECENT_FEED = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&output=atom"
 _ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -98,6 +107,13 @@ _SALE_CODE = "S"
 _PURCHASE_SENTIMENT = 0.5
 _SALE_SENTIMENT = -0.5
 _SENTIMENT_BY_CODE = {_PURCHASE_CODE: _PURCHASE_SENTIMENT, _SALE_CODE: _SALE_SENTIMENT}
+# Side-aware reliability lookup (Task 10): the SAME per-signal stamp mechanism as
+# `_SENTIMENT_BY_CODE` above, keyed on the identical already-classified `code`, so the split lands
+# at the adapter stamp site rather than inventing a parallel lookup mechanism.
+_RELIABILITY_BY_CODE = {
+    _PURCHASE_CODE: RELIABILITY_INSIDER_PURCHASE,
+    _SALE_CODE: RELIABILITY_INSIDER_SALE,
+}
 
 # SEC fair-access policy: <= 10 requests/second. A simple monotonic sleep-based limiter is
 # sufficient for our sequential (non-parallel) walk.
@@ -120,6 +136,17 @@ class _ParsedTransaction:
     ticker: str
     issuer_cik: str
     owner: str
+    # reportingOwnerRelationship + aff10b5One, parsed once per ownership document and copied onto
+    # every transaction it yields (they are document-level facts about the filer, not per-row).
+    # Data-plumbing ONLY (Task 12): threaded into raw_payload so role and 10b5-1 plan splits become
+    # computable after a future re-backfill; NO conviction/weight/filter depends on them. Each is
+    # nullable so "absent in source XML" stays distinguishable from a genuine False — the 10b5-1
+    # flag in particular is never False-by-default.
+    is_officer: bool | None
+    is_director: bool | None
+    is_ten_percent_owner: bool | None
+    officer_title: str | None
+    is_10b5_1: bool | None
     transaction_index: int  # position within the filing's kept (P/S) rows, for source_uid
     code: str
     sentiment: float
@@ -147,6 +174,17 @@ def _classify_transactions(document: str) -> list[_ParsedTransaction]:
     owner = _text(root, "reportingOwner/reportingOwnerId/rptOwnerName")
     issuer_cik = _text(root, "issuer/issuerCik")
 
+    # Document-level filer attributes (Task 12, data-plumbing only). Parsed once and copied onto
+    # every kept row. A missing/malformed relationship block leaves the three role flags and the
+    # title None (never False) — backward compatible: absence is not evidence of False. The
+    # aff10b5One flag lives at the ownershipDocument root, not under reportingOwner.
+    relationship = root.find("reportingOwner/reportingOwnerRelationship")
+    is_officer = _bool_flag(relationship, "isOfficer")
+    is_director = _bool_flag(relationship, "isDirector")
+    is_ten_percent_owner = _bool_flag(relationship, "isTenPercentOwner")
+    officer_title = _optional_text(relationship, "officerTitle")
+    is_10b5_1 = _bool_flag(root, "aff10b5One")
+
     parsed: list[_ParsedTransaction] = []
     for txn in root.findall("nonDerivativeTable/nonDerivativeTransaction"):
         code = _text(txn, "transactionCoding/transactionCode")
@@ -167,6 +205,11 @@ def _classify_transactions(document: str) -> list[_ParsedTransaction]:
                 ticker=ticker,
                 issuer_cik=issuer_cik,
                 owner=owner,
+                is_officer=is_officer,
+                is_director=is_director,
+                is_ten_percent_owner=is_ten_percent_owner,
+                officer_title=officer_title,
+                is_10b5_1=is_10b5_1,
                 transaction_index=len(parsed),
                 code=code,
                 sentiment=sentiment,
@@ -212,7 +255,7 @@ class SecForm4Source:
     def filter_description(self) -> str | None:
         if not self._filter_enabled:
             return None
-        return "CIK filter: issuers whose tickers are in COMPANY_DIRECTORY"
+        return "Issuer CIK filter: issuers whose tickers are in COMPANY_DIRECTORY"
 
     # --- Live path (unchanged behavior) ----------------------------------------------------------
 
@@ -255,18 +298,28 @@ class SecForm4Source:
 
         Walks EDGAR's quarterly form.idx indexes covering the window, keeps form-type-4 rows
         (form 4/A amendments are counted and skipped) whose Date Filed falls in the window and
-        whose issuer CIK passes the (default-on) filter, fetches the full-submission text for
-        each kept row (ONE request per filing — header + ownership XML together), and emits one
-        Signal per classified open-market transaction. ``created_at`` = the filing's
-        ACCEPTANCE-DATETIME (converted from US/Eastern to UTC) — never the transaction date.
+        whose FILER CIK (the index row's CIK — a Form 4 is a joint filing by the issuer plus
+        every reporting owner, so this is NOT necessarily the issuer) passes the (default-on)
+        pre-filter, fetches the full-submission text for each kept row (ONE request per filing —
+        header + ownership XML together, deduplicated per accession so a filing with multiple
+        passing filer rows is fetched only once), and — when the filter is active — drops the
+        filing's signals unless the PARSED issuer CIK also passes, before emitting one Signal per
+        classified open-market transaction. ``created_at`` = the filing's ACCEPTANCE-DATETIME
+        (converted from US/Eastern to UTC) — never the transaction date.
         """
         cik_filter = await self._load_cik_filter() if self._filter_enabled else None
 
         amendments_skipped = 0
         no_ticker_skipped = 0
         cik_filtered_out = 0
+        issuer_filtered_out = 0
+        duplicate_index_rows_skipped = 0
         fetch_failed = 0
         signals: list[Signal] = []
+        # Per-call (in-memory) dedupe: one accession fetched+emitted at most once, no matter how
+        # many of its filer rows (issuer + reporting owners) pass the index pre-filter. Scoped to
+        # THIS fetch_historical call only — cross-run dedupe remains the backfill-seen store's job.
+        seen_accessions: set[str] = set()
 
         for year, quarter in _quarters_covering(start, end):
             index_text = await self._get_text(_FORM_INDEX_URL.format(year=year, quarter=quarter))
@@ -278,8 +331,27 @@ class SecForm4Source:
                     continue
                 if not (start.date() <= row.date_filed <= end.date()):
                     continue
+                # BANDWIDTH PRE-FILTER ONLY: the index row's CIK is the FILER's CIK (issuer OR any
+                # reporting owner on the joint filing), not necessarily the issuer's. This check
+                # may skip obviously-out rows before any fetch, but it is NOT the authoritative
+                # in/out decision — that happens below, against the parsed issuer CIK, once the
+                # filing is fetched. This heuristic is therefore over-inclusive by design (a
+                # directory reporting-owner's row lets a non-directory issuer's filing through to
+                # the fetch step) and never under-inclusive (an issuer is always a filer on its
+                # own Form 4s).
                 if cik_filter is not None and row.cik not in cik_filter:
                     cik_filtered_out += 1
+                    continue
+
+                # Per-accession dedupe BEFORE the fetch: the index row's File Name column encodes
+                # the accession number (e.g. ".../0000789019-24-000010.txt"), which is reliably
+                # available without a network round-trip. A single accession that appears as
+                # multiple filer rows (issuer + reporting owner(s), all sharing one filing) is
+                # therefore fetched and emitted AT MOST ONCE per call, regardless of how many of
+                # its rows pass the pre-filter above.
+                accession_hint = _accession_from_file_name(row.file_name)
+                if accession_hint is not None and accession_hint in seen_accessions:
+                    duplicate_index_rows_skipped += 1
                     continue
 
                 submission_url = _SUBMISSION_URL.format(file_name=row.file_name)
@@ -299,6 +371,9 @@ class SecForm4Source:
                 if accepted_at is None:
                     continue
                 accession = _extract_accession(submission) or row.file_name
+                if accession_hint is not None:
+                    seen_accessions.add(accession_hint)
+                seen_accessions.add(accession)
 
                 document = _extract_ownership_xml(submission)
                 if document is None:
@@ -308,6 +383,17 @@ class SecForm4Source:
                     continue
                 if not transactions[0].ticker:
                     no_ticker_skipped += 1
+                    continue
+
+                # AUTHORITATIVE filter decision: the PARSED issuer CIK from the ownership XML
+                # (same zero-padding as the index-row/company_tickers.json CIKs). This is what
+                # actually decides in/out — the index-row check above is only a bandwidth
+                # heuristic. Fixes the leak where a non-directory issuer's filing passed because a
+                # directory company was merely a co-filing reporting owner.
+                raw_issuer_cik = transactions[0].issuer_cik
+                issuer_cik = _pad_cik(raw_issuer_cik) if raw_issuer_cik else ""
+                if cik_filter is not None and issuer_cik not in cik_filter:
+                    issuer_filtered_out += 1
                     continue
 
                 for txn in transactions:
@@ -322,11 +408,14 @@ class SecForm4Source:
 
         logger.info(
             "sec_form4 historical walk: %d signal(s), %d 4/A amendment(s) skipped, "
-            "%d row(s) CIK-filtered out, %d filing(s) skipped (no issuer ticker), "
+            "%d row(s) CIK-filtered out, %d filing(s) issuer-filtered out, "
+            "%d duplicate index row(s) skipped, %d filing(s) skipped (no issuer ticker), "
             "%d filing(s) failed to fetch",
             len(signals),
             amendments_skipped,
             cik_filtered_out,
+            issuer_filtered_out,
+            duplicate_index_rows_skipped,
             no_ticker_skipped,
             fetch_failed,
         )
@@ -373,6 +462,26 @@ class SecForm4Source:
 
 
 def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
+    # id granularity brought up to the historical accession:index scheme (review F25). The old
+    # live id (issuer + transaction DATE + code) collapsed a same-day cluster of three officers
+    # buying the same issuer — the single most informative Form 4 pattern — into ONE rm_signals
+    # row (rm_signals is keyed on signal_id), silently dropping two of the three. The accession
+    # (parsed from the EDGAR archive URL) is per-filing, so three officers = three accessions =
+    # three ids; ``:transaction_index`` further separates multiple kept rows in one filing.
+    # created_at is UNCHANGED here (still the transaction date): the live created_at question is a
+    # SEPARATE defect, out of scope for this id fix (task-19 / review F25 guardrail).
+    accession = _accession_from_archive_url(source_url)
+    if accession is not None:
+        source_uid = f"{accession}:{txn.transaction_index}"
+        signal_id = f"sec-form4-{source_uid}"
+    else:
+        # Defensive fallback when the URL carries no accession directory: owner + date + code +
+        # row index still separate a same-day multi-officer cluster into distinct ids.
+        source_uid = None
+        signal_id = (
+            f"sec-form4-{txn.issuer_cik or txn.ticker}-{_owner_slug(txn.owner)}-"
+            f"{txn.txn_date.date().isoformat()}-{txn.code}-{txn.transaction_index}"
+        )
     payload: dict[str, Any] = {
         "ticker": txn.ticker,
         "issuer_cik": txn.issuer_cik,
@@ -383,16 +492,26 @@ def _live_signal(txn: _ParsedTransaction, *, source_url: str) -> Signal:
         "transaction_value": txn.value,
         "transaction_date": txn.txn_date.date().isoformat(),
         "source_url": source_url,
+        # Traceability parity with the historical path (accession + per-row source_uid), when the
+        # archive URL exposed the accession. Both None when it did not (additive, JSONB-safe).
+        "accession": accession,
+        "source_uid": source_uid,
+        # Task 12 filer attributes (data-plumbing only; nullable when absent in source XML).
+        "is_officer": txn.is_officer,
+        "is_director": txn.is_director,
+        "is_ten_percent_owner": txn.is_ten_percent_owner,
+        "officer_title": txn.officer_title,
+        "is_10b5_1": txn.is_10b5_1,
     }
     return Signal(
-        id=f"sec-form4-{txn.issuer_cik or txn.ticker}-{txn.txn_date.date().isoformat()}-{txn.code}",
+        id=signal_id,
         created_at=txn.txn_date,
         source_type=SignalSource.DISCLOSED_TRADE,
         ticker=txn.ticker,
         politician_id=None,
         sentiment=txn.sentiment,
         politician_weight=_value_weight(txn.value),
-        source_reliability=RELIABILITY_INSIDER_TRADE,
+        source_reliability=_RELIABILITY_BY_CODE[txn.code],
         raw_payload=payload,
         # Real SEC disclosure, no politician dependency -> REAL.
         provenance=Provenance.REAL,
@@ -421,6 +540,12 @@ def _historical_signal(
         "source_url": source_url,
         "accession": accession,
         "source_uid": source_uid,
+        # Task 12 filer attributes (data-plumbing only; nullable when absent in source XML).
+        "is_officer": txn.is_officer,
+        "is_director": txn.is_director,
+        "is_ten_percent_owner": txn.is_ten_percent_owner,
+        "officer_title": txn.officer_title,
+        "is_10b5_1": txn.is_10b5_1,
     }
     return Signal(
         id=f"sec-form4-hist-{source_uid}",
@@ -430,7 +555,7 @@ def _historical_signal(
         politician_id=None,
         sentiment=txn.sentiment,
         politician_weight=_value_weight(txn.value),
-        source_reliability=RELIABILITY_INSIDER_TRADE,
+        source_reliability=_RELIABILITY_BY_CODE[txn.code],
         raw_payload=payload,
         # Real SEC disclosure; the backfill use case re-stamps to BACKFILLED regardless (Task 02).
         provenance=Provenance.REAL,
@@ -459,7 +584,13 @@ def _parse_recent_feed(feed: str) -> list[str]:
 @dataclass(frozen=True, slots=True)
 class _IndexRow:
     form_type: str
-    cik: str  # zero-padded 10-digit, matching company_tickers.json's cik_str once padded
+    # zero-padded 10-digit CIK of the FILER on this index row — NOT necessarily the issuer. A
+    # Form 4 is a joint filing by the issuer plus every reporting owner, and EDGAR's form.idx
+    # emits one row PER FILER, so the same accession can appear multiple times under different
+    # CIKs (the issuer's own row, plus one row per reporting owner). Matches
+    # company_tickers.json's cik_str once zero-padded, but callers must not assume `cik` is the
+    # issuer — see `fetch_historical`'s post-fetch issuer-CIK filter for the authoritative check.
+    cik: str
     date_filed: date
     file_name: str
 
@@ -577,6 +708,47 @@ def _extract_accession(submission_text: str) -> str | None:
     return match.group(1) if match else None
 
 
+# The live path's archive URLs embed the accession as a NO-DASHES 18-digit directory, e.g.
+# ".../edgar/data/320193/000032019326000077/form4.xml"; we re-dash it to the canonical
+# "0000320193-26-000077" so a live signal's source_uid matches the historical accession:index
+# scheme exactly (review F25).
+_ARCHIVE_ACCESSION_RE = re.compile(r"/(\d{10})(\d{2})(\d{6})/")
+
+
+def _accession_from_archive_url(url: str) -> str | None:
+    """The canonical dashed accession from a live EDGAR archive URL (review F25), or ``None`` when
+    the URL carries no 18-digit accession directory (the caller then uses the owner+date fallback
+    id)."""
+    match = _ARCHIVE_ACCESSION_RE.search(url)
+    if match is None:
+        return None
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _owner_slug(owner: str) -> str:
+    """A compact, id-safe token for a reporting owner name (fallback live id only, review F25):
+    uppercase alphanumerics, other runs collapsed to a single '-'. Empty -> 'unknown'."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", owner).strip("-").upper()
+    return slug or "UNKNOWN"
+
+
+_FILE_NAME_ACCESSION_RE = re.compile(r"(\d{10}-\d{2}-\d{6})\.txt$")
+
+
+def _accession_from_file_name(file_name: str) -> str | None:
+    """The dashed accession number encoded in a form.idx row's File Name column, WITHOUT any
+    network fetch (e.g. ``edgar/data/789019/0000789019-24-000010.txt`` ->
+    ``0000789019-24-000010``). Used to dedupe multiple filer rows for the SAME accession (issuer
+    + reporting owner(s)) before deciding whether to fetch at all — the SGML header's own
+    ``ACCESSION NUMBER:`` line (see ``_extract_accession``) is the authoritative value once a
+    filing IS fetched, but this pre-fetch hint is what makes the "one fetch per accession"
+    guarantee possible without an extra request. Returns ``None`` if the file name doesn't match
+    the expected shape (defensive; the pre-fetch dedupe is then simply skipped for that row and
+    the post-fetch accession-based dedupe still applies)."""
+    match = _FILE_NAME_ACCESSION_RE.search(file_name)
+    return match.group(1) if match else None
+
+
 def _extract_ownership_xml(submission_text: str) -> str | None:
     """Pull the embedded ownership document out of a full-submission ``.txt``'s ``<XML>`` block.
 
@@ -628,3 +800,34 @@ def _text(element: ET.Element, path: str) -> str:
     if found is None or found.text is None:
         return ""
     return found.text.strip()
+
+
+def _optional_text(element: ET.Element | None, path: str) -> str | None:
+    """Verbatim (whitespace-trimmed) text of ``path``, or None when the parent block, the child,
+    or its text is absent/empty. Used for ``officerTitle`` (Task 12): None means "not stated in the
+    source XML", distinct from an empty title."""
+    if element is None:
+        return None
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    stripped = found.text.strip()
+    return stripped or None
+
+
+def _bool_flag(element: ET.Element | None, path: str) -> bool | None:
+    """Tri-state parse of an EDGAR ownership boolean (``1``/``true`` -> True, ``0``/``false`` ->
+    False, absent/unrecognized -> None). None is deliberate (Task 12): a missing flag must never be
+    coerced to False, so a future backfill can tell "filer was not a 10b5-1 plan / not an officer"
+    apart from "the source XML never carried the field"."""
+    if element is None:
+        return None
+    found = element.find(path)
+    if found is None or found.text is None:
+        return None
+    text = found.text.strip().lower()
+    if text in ("1", "true"):
+        return True
+    if text in ("0", "false"):
+        return False
+    return None

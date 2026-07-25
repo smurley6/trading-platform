@@ -38,7 +38,11 @@ class FakeBroker:
         *,
         cash: Decimal = Decimal("10000"),
         equity: Decimal = Decimal("10000"),
-        buying_power: Decimal = Decimal("0"),
+        # A KNOWN, non-binding reserve. Not 0: since review F17 a reserve of exactly 0 is a real
+        # EXHAUSTED account that floors a buy to zero (a clean reject), not the "unknown reserve"
+        # sentinel — so the default here has to be large enough never to be the binding cap in
+        # tests about the OTHER gates.
+        buying_power: Decimal = Decimal("1000000"),
         positions: Sequence[BrokerPosition] = (),
     ) -> None:
         self._account = BrokerAccount(cash=cash, equity=equity, buying_power=buying_power)

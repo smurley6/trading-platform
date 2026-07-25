@@ -9,6 +9,7 @@ whole log to repopulate the tables from scratch (spec section 9 — projections 
 positions agree with the live engine and the in-memory projection.
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -31,6 +32,8 @@ from trading.infrastructure.persistence.tables import (
     rm_positions_table,
     rm_signals_table,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresReadModel:
@@ -85,12 +88,22 @@ class PostgresReadModel:
             fees=Decimal(str(payload.get("fees", "0"))),
             filled_at=datetime.fromisoformat(str(payload["filled_at"])),
         )
+        # Lock the position row FOR UPDATE inside this append transaction (review F19). The
+        # projection update is a read-modify-write (read the current quantity/cost basis, fold in
+        # the fill, upsert the new absolute values); under READ COMMITTED two fills for the same
+        # (sleeve, symbol) from different order streams — the poller and the WS stream, or a cron
+        # process racing the web app — would otherwise both read the same base quantity and the
+        # second UPSERT would clobber the first increment (a silently lost update that compounds
+        # until a manual rebuild). FOR UPDATE serializes the two appends: the second SELECT blocks
+        # until the first commits, then reads the already-incremented row and folds on top of it.
         existing = (
             await conn.execute(
-                select(rm_positions_table.c.quantity, rm_positions_table.c.avg_price).where(
+                select(rm_positions_table.c.quantity, rm_positions_table.c.avg_price)
+                .where(
                     rm_positions_table.c.sleeve_id == sleeve_id,
                     rm_positions_table.c.symbol == symbol,
                 )
+                .with_for_update()
             )
         ).one_or_none()
         positions: dict[str, Position] = {}
@@ -101,7 +114,21 @@ class PostgresReadModel:
                 avg_entry_price=Decimal(str(existing.avg_price)),
             )
         # Reuse the domain cost-basis math; cash is irrelevant to the held-position view.
-        updated = Portfolio(cash=Decimal("0"), positions=positions).apply_fill(fill)
+        # Tolerant of an out-of-order/oversell SELL: clamp to flat and flag, never raise INSIDE
+        # this append transaction — a raise here aborts the whole append and permanently wedges
+        # order sync for the sleeve (review F7). The live trading engine still uses strict
+        # `apply_fill`; this is the rebuildable system-of-record projection.
+        updated, clamped = Portfolio(cash=Decimal("0"), positions=positions).apply_fill_tolerant(
+            fill
+        )
+        if clamped:
+            logger.warning(
+                "clamped oversell in projection: sleeve=%s symbol=%s sold_qty=%s "
+                "(SELL exceeded held; recorded fill, position floored to flat)",
+                sleeve_id,
+                symbol,
+                fill.quantity,
+            )
         position = updated.positions.get(symbol)
         if position is None:
             await conn.execute(

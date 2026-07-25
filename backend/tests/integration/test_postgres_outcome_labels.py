@@ -1,9 +1,12 @@
-"""Postgres outcome-labels store integration tests (Task 03, migration 0005).
+"""Postgres outcome-labels store integration tests (Task 03, migration 0005; Task 05 read ext).
 
 Require TEST_DATABASE_URL pointing at a Postgres with migrations applied (the integration job
 runs `alembic upgrade head`). Prove the replace_run round-trip, delete_run, and the rerun
 overwrite semantics (delete-then-write, so a rerun of a run id never duplicates) the labeler
-depends on.
+depends on, plus (Task 05) `latest_run_id`/`labels_for_run`, the minimal read extension the
+diagnostic job needs, and `labels_for_signals`, the per-signal read the Signals research surface
+(UI Phase D) needs (no migration: "latest" orders by the surrogate `id` primary key, since there
+is no `created_at` column).
 """
 
 import os
@@ -128,6 +131,71 @@ async def test_latest_run_id_returns_most_recently_written() -> None:
     finally:
         await store.delete_run(run_a)
         await store.delete_run(run_b)
+        await engine.dispose()
+
+
+async def test_latest_run_id_is_the_most_recently_inserted_row() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresOutcomeLabels(engine)
+    run_a = f"run-a-{uuid4()}"
+    run_b = f"run-b-{uuid4()}"
+    try:
+        await store.replace_run(run_a, [_label(run_a, signal_id="s1", horizon=1)])
+        await store.replace_run(run_b, [_label(run_b, signal_id="s2", horizon=1)])
+        # run_b was inserted after run_a -> latest, regardless of the run ids' string ordering.
+        assert await store.latest_run_id() == run_b
+    finally:
+        await store.delete_run(run_a)
+        await store.delete_run(run_b)
+        await engine.dispose()
+
+
+async def test_latest_run_id_rerun_of_earlier_run_becomes_latest_again() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresOutcomeLabels(engine)
+    run_a = f"run-a-{uuid4()}"
+    run_b = f"run-b-{uuid4()}"
+    try:
+        await store.replace_run(run_a, [_label(run_a, signal_id="s1", horizon=1)])
+        await store.replace_run(run_b, [_label(run_b, signal_id="s2", horizon=1)])
+        assert await store.latest_run_id() == run_b
+        # Re-running run_a re-inserts its rows (delete-then-write), making it latest again.
+        await store.replace_run(run_a, [_label(run_a, signal_id="s1", horizon=1)])
+        assert await store.latest_run_id() == run_a
+    finally:
+        await store.delete_run(run_a)
+        await store.delete_run(run_b)
+        await engine.dispose()
+
+
+async def test_labels_for_run_round_trips_and_empty_for_unknown_run() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    store = PostgresOutcomeLabels(engine)
+    run_id = f"run-{uuid4()}"
+    try:
+        labels = [
+            _label(run_id, signal_id="s1", horizon=1),
+            _label(run_id, signal_id="s1", horizon=5, status="unresolvable"),
+        ]
+        await store.replace_run(run_id, labels)
+        result = {
+            (label.signal_id, label.horizon_days): label
+            for label in await store.labels_for_run(run_id)
+        }
+        assert result[("s1", 1)].status == "ok"
+        assert result[("s1", 1)].abnormal_return == 0.0123
+        assert result[("s1", 5)].status == "unresolvable"
+        assert result[("s1", 5)].reason == "insufficient_forward_bars"
+
+        assert await store.labels_for_run(f"unknown-{uuid4()}") == []
+    finally:
+        await store.delete_run(run_id)
         await engine.dispose()
 
 

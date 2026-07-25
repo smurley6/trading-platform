@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 
-from trading.application.ports.market_data import Quote
+from trading.application.ports.market_data import NoRealQuoteError, Quote
 from trading.infrastructure.market_data.feed_backed import FeedBackedMarketData
 
 _NOW = datetime(2026, 6, 12, tzinfo=UTC)
@@ -68,3 +68,39 @@ async def test_falls_back_on_nonpositive_price(bad_last: str) -> None:
         _FakeFallback(),
     )
     assert (await bridge.get_quote("AAPL")).last == Decimal("200")
+
+
+# --- Real-data mode (fallback=None): NEVER substitute a synthetic price (review F4) -----------
+
+
+async def test_real_mode_uses_live_feed_when_priced() -> None:
+    bridge = FeedBackedMarketData(
+        _FakeFeed(enabled=True, quotes={"AAPL": _quote("AAPL", "290.22")}),
+        None,
+    )
+    assert (await bridge.get_quote("AAPL")).last == Decimal("290.22")
+
+
+async def test_real_mode_raises_when_feed_has_no_quote() -> None:
+    bridge = FeedBackedMarketData(_FakeFeed(enabled=True, quotes={}), None)
+    with pytest.raises(NoRealQuoteError):
+        await bridge.get_quote("OBSCURE")
+
+
+@pytest.mark.parametrize("bad_last", ["0", "-1"])
+async def test_real_mode_raises_on_nonpositive_price(bad_last: str) -> None:
+    bridge = FeedBackedMarketData(
+        _FakeFeed(enabled=True, quotes={"AAPL": _quote("AAPL", bad_last)}),
+        None,
+    )
+    with pytest.raises(NoRealQuoteError):
+        await bridge.get_quote("AAPL")
+
+
+async def test_real_mode_raises_when_feed_disabled() -> None:
+    bridge = FeedBackedMarketData(
+        _FakeFeed(enabled=False, quotes={"AAPL": _quote("AAPL", "290.22")}),
+        None,
+    )
+    with pytest.raises(NoRealQuoteError):
+        await bridge.get_quote("AAPL")

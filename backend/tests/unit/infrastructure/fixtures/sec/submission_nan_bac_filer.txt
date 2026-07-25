@@ -1,0 +1,127 @@
+<SEC-DOCUMENT>0001140361-24-049485.txt : 20240425
+<SEC-HEADER>0001140361-24-049485.hdr.sgml : 20240425
+<ACCEPTANCE-DATETIME>20240425153000
+ACCESSION NUMBER:		0001140361-24-049485
+CONFORMED SUBMISSION TYPE:	4
+PUBLIC DOCUMENT COUNT:		1
+CONFORMED PERIOD OF REPORT:	20240423
+FILED AS OF DATE:		20240425
+DATE AS OF CHANGE:		20240425
+
+REPORTING-OWNER:
+
+	OWNER DATA:
+		COMPANY CONFORMED NAME:			BANK OF AMERICA CORP /DE/
+		CENTRAL INDEX KEY:			0000070858
+		ORGANIZATION NAME:
+
+	FILING VALUES:
+		FORM TYPE:		4
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	001-12345
+		FILM NUMBER:		24560001
+
+	MAIL ADDRESS:
+		STREET 1:		100 NORTH TRYON STREET
+		CITY:			CHARLOTTE
+		STATE:			NC
+		ZIP:			28255
+
+ISSUER:
+
+	COMPANY DATA:
+		COMPANY CONFORMED NAME:			Nuveen New York Quality Municipal Income Fund
+		CENTRAL INDEX KEY:			0001074769
+		STANDARD INDUSTRIAL CLASSIFICATION:	[6726]
+		ORGANIZATION NAME:           	05 Investment Vehicle
+		IRS NUMBER:				000000000
+		STATE OF INCORPORATION:			MA
+		FISCAL YEAR END:			0831
+
+	BUSINESS ADDRESS:
+		STREET 1:		333 WEST WACKER DRIVE
+		CITY:			CHICAGO
+		STATE:			IL
+		ZIP:			60606
+
+	MAIL ADDRESS:
+		STREET 1:		333 WEST WACKER DRIVE
+		CITY:			CHICAGO
+		STATE:			IL
+		ZIP:			60606
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>4
+<SEQUENCE>1
+<FILENAME>form4nan.xml
+<DESCRIPTION>FORM 4
+<TEXT>
+<XML>
+<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0508</schemaVersion>
+    <documentType>4</documentType>
+    <periodOfReport>2024-04-23</periodOfReport>
+    <notSubjectToSection16>0</notSubjectToSection16>
+    <issuer>
+        <issuerCik>0001074769</issuerCik>
+        <issuerName>Nuveen New York Quality Municipal Income Fund</issuerName>
+        <issuerTradingSymbol>NAN</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0000070858</rptOwnerCik>
+            <rptOwnerName>BANK OF AMERICA CORP /DE/</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerRelationship>
+            <isDirector>0</isDirector>
+            <isOfficer>0</isOfficer>
+            <isTenPercentOwner>1</isTenPercentOwner>
+            <officerTitle></officerTitle>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle>
+                <value>Common Shares</value>
+            </securityTitle>
+            <transactionDate>
+                <value>2024-04-23</value>
+            </transactionDate>
+            <transactionCoding>
+                <transactionFormType>4</transactionFormType>
+                <transactionCode>P</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares>
+                    <value>12000</value>
+                </transactionShares>
+                <transactionPricePerShare>
+                    <value>10.50</value>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode>
+                    <value>A</value>
+                </transactionAcquiredDisposedCode>
+            </transactionAmounts>
+            <postTransactionAmounts>
+                <sharesOwnedFollowingTransaction>
+                    <value>512000</value>
+                </sharesOwnedFollowingTransaction>
+            </postTransactionAmounts>
+            <ownershipNature>
+                <directOrIndirectOwnership>
+                    <value>I</value>
+                </directOrIndirectOwnership>
+            </ownershipNature>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+    <ownerSignature>
+        <signatureName>/s/ Jane Filer, Attorney-in-Fact for Bank of America Corp</signatureName>
+        <signatureDate>2024-04-25</signatureDate>
+    </ownerSignature>
+</ownershipDocument>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>

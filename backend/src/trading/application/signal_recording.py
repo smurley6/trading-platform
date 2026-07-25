@@ -6,6 +6,7 @@ push endpoint funnel through here so emission lives in exactly one place. Evalua
 these events back; it never re-emits them.
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -13,6 +14,8 @@ from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
 from trading.domain.events import DomainEvent, EventType
 from trading.domain.signals import Signal
+
+logger = logging.getLogger(__name__)
 
 
 def signal_payload(signal: Signal) -> dict[str, object]:
@@ -38,6 +41,7 @@ async def record_signals(
     signals: Sequence[Signal],
     correlation_id: str,
     occurred_at: datetime | None = None,
+    skip_existing_streams: bool = False,
 ) -> None:
     """Append one ``signal.received`` event per signal (the single emission path).
 
@@ -46,12 +50,25 @@ async def record_signals(
     ``occurred_at`` is point-in-time correct, never the ingest wall-clock (RESEARCH-PLAN §2). The
     override applies to every signal in this call, so a backfill caller records one signal at a
     time with that signal's own ``created_at`` (its disclosure timestamp).
+
+    ``skip_existing_streams`` (opt-in; default OFF) is the append-time idempotency guard for the
+    LIVE ingest path (review F1): when set, a signal whose ``signal-{id}`` stream already holds an
+    event is skipped rather than re-appended, so a re-scan of the lookback window never grows a
+    second copy in the log. It is DEFAULT OFF so the historical backfill (which has its own
+    ``backfill_seen`` dedupe), the backtest recorder, and the manual push endpoint keep byte-for-
+    byte identical behaviour — only ``IngestSignals`` opts in.
     """
     stamp = clock.now() if occurred_at is None else occurred_at
     for signal in signals:
+        stream_id = f"signal-{signal.id}"
+        if skip_existing_streams and await event_store.read_stream(stream_id):
+            logger.debug(
+                "skipping already-recorded signal stream %s (idempotent append)", stream_id
+            )
+            continue
         await event_store.append(
             DomainEvent(
-                stream_id=f"signal-{signal.id}",
+                stream_id=stream_id,
                 event_type=EventType.SIGNAL_RECEIVED,
                 payload=signal_payload(signal),
                 occurred_at=stamp,

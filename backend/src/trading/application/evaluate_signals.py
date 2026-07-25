@@ -6,23 +6,26 @@ correlation id, so any trade answers "what signals, what conviction, what risk v
 what market context" (spec section 12).
 """
 
+import asyncio
 import logging
 from collections.abc import Collection, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 from trading.application.data_integrity import ensure_real_signals, tradeable_signals
-from trading.application.place_order import PlaceOrder, PlaceOrderRequest
+from trading.application.place_order import OrderSubmissionError, PlaceOrder, PlaceOrderRequest
 from trading.application.ports.broker import BrokerOrder, BrokerPort
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
-from trading.application.ports.market_data import MarketDataPort, Quote
+from trading.application.ports.lock import CrossProcessLockPort
+from trading.application.ports.market_data import MarketDataPort, NoRealQuoteError, Quote
 from trading.application.risk import RiskContext, RiskGate
 from trading.domain.decisions import Decision, RiskVerdict
 from trading.domain.events import DomainEvent, EventType
-from trading.domain.orders import OrderSide
+from trading.domain.orders import TERMINAL_STATUSES, OrderSide
 from trading.domain.positions import Portfolio, Position
 from trading.domain.signals import Signal
 from trading.domain.sleeves import Sleeve
@@ -51,6 +54,8 @@ class EvaluateSignals:
         event_store: EventStorePort,
         clock: ClockPort,
         require_real_data: bool = False,
+        initial_peak_equity: Decimal = Decimal("0"),
+        cross_process_lock: CrossProcessLockPort | None = None,
     ) -> None:
         self._strategy = strategy
         self._sleeve = sleeve
@@ -62,7 +67,18 @@ class EvaluateSignals:
         self._clock = clock
         # When True (a real broker is in play), refuse to evaluate on any non-REAL signal.
         self._require_real_data = require_real_data
-        self._peak_equity = Decimal("0")
+        # Serialize the evaluate->place path (review F6). One asyncio.Lock per sleeve (this instance
+        # is the sleeve's single evaluator) closes IN-PROCESS overlap — two execute() coroutines
+        # snapshotting the account before either places. The cross-process lock (a Postgres advisory
+        # lock in prod, no-op in-memory) closes the CRON-vs-WEB case a per-process lock cannot see.
+        self._lock = asyncio.Lock()
+        self._cross_process_lock = cross_process_lock
+        # Peak-equity high-water mark for the drawdown circuit breaker. Seeded at startup from
+        # the durable log (max PORTFOLIO_SNAPSHOT equity; review F3) so a one-shot cron / redeploy
+        # compares current equity against the REAL peak instead of a fresh zero — otherwise peak
+        # == current every run and the max_drawdown_pct breaker can never trip. Updated in-process
+        # below on each cycle.
+        self._peak_equity = initial_peak_equity
 
     async def execute(
         self,
@@ -73,7 +89,32 @@ class EvaluateSignals:
         place: bool = True,
     ) -> EvaluationResult:
         correlation_id = correlation_id or str(uuid4())
+        # Serialize the whole snapshot->size->place critical section (review F6). The per-sleeve
+        # asyncio.Lock stops in-process overlap; the cross-process advisory lock stops the
+        # cron-vs-web race. Both are context managers, so a mid-loop failure releases them on ALL
+        # paths. Paired with the DETERMINISTIC client_order_id below, so even a lock that is somehow
+        # bypassed falls back to broker-side idempotency instead of double exposure (review F5).
+        guard = (
+            self._cross_process_lock.guard(f"evaluate-{self._sleeve.id}")
+            if self._cross_process_lock is not None
+            else nullcontext()
+        )
+        async with self._lock, guard:
+            return await self._evaluate(
+                signals,
+                correlation_id=correlation_id,
+                only_symbols=only_symbols,
+                place=place,
+            )
 
+    async def _evaluate(
+        self,
+        signals: Sequence[Signal],
+        *,
+        correlation_id: str,
+        only_symbols: Collection[str] | None,
+        place: bool,
+    ) -> EvaluationResult:
         # Anti-placeholder guard (fail-closed): with a real broker, a single SYNTHETIC signal in
         # the window aborts the whole evaluation — no real order is ever driven by fake data.
         if self._require_real_data:
@@ -93,6 +134,16 @@ class EvaluateSignals:
                 for p in await self._broker.list_positions()
             },
         )
+        # Open-order awareness (review F5): a DAY order placed pre-open queues UNFILLED until 09:30
+        # ET, so it is invisible to list_positions() during the window the cron runs in. Count each
+        # open order's not-yet-filled quantity as held (BUY +, SELL -) so a queued order is not
+        # re-proposed on a second evaluation (a crash-retry, POST /ingest, the scheduler). Paper
+        # fills synchronously, so its orders are always terminal and `pending` is empty — the paper
+        # path is unchanged and deterministic.
+        pending = _pending_by_symbol(await self._broker.list_orders())
+        # Deterministic per-run trade date: the idempotency key below is stable across retries and
+        # overlapping runs on the same calendar day (review F5).
+        cycle_date = self._clock.now().date().isoformat()
         self._peak_equity = max(self._peak_equity, account.equity)
         # Shared-pool buying-power reserve for this cycle. `portfolio`/`account` come from the ONE
         # shared broker book, so both algos size against the same live pool; this running reserve
@@ -107,14 +158,29 @@ class EvaluateSignals:
             # Execute-proposal path: restrict to the explicitly chosen symbols (None = all).
             if only_symbols is not None and target.symbol not in only_symbols:
                 continue
-            current = portfolio.quantity(target.symbol)
+            # `current` folds in pending open-order quantity (review F5) so a queued-but-unfilled
+            # order counts as held: the delta below — and the position value the risk gate sizes
+            # against — reflect the exposure already in flight, not just settled positions.
+            current = portfolio.quantity(target.symbol) + pending.get(target.symbol, Decimal("0"))
             delta = target.quantity - current
             if delta == 0:
                 continue
             side = OrderSide.BUY if delta > 0 else OrderSide.SELL
             quantity = abs(delta)
 
-            quote = await self._market_data.get_quote(target.symbol)
+            try:
+                quote = await self._market_data.get_quote(target.symbol)
+            except NoRealQuoteError:
+                # Fail closed (review F4): with a real account, no live price means NO trade for
+                # this symbol — never a guessed one. Skip before any decision/market_context event
+                # is recorded, so the audit trail never carries a synthetic price. Other symbols
+                # with valid quotes still evaluate.
+                logger.warning(
+                    "skipping %s: no real market price available; no order placed",
+                    target.symbol,
+                    extra={"correlation_id": correlation_id},
+                )
+                continue
             decision = Decision(
                 id=str(uuid4()),
                 strategy_id=self._strategy.strategy_id,
@@ -190,17 +256,35 @@ class EvaluateSignals:
                 # Manual mode: the decision + risk verdict are recorded for audit, but no order
                 # is placed — the trade is surfaced as a proposal for human approval instead.
                 continue
-            broker_order = await self._place_order.execute(
-                PlaceOrderRequest(
-                    sleeve_id=self._sleeve.id,
-                    decision_id=decision.id,
-                    client_order_id=f"ord-{decision.id}",
-                    symbol=target.symbol,
-                    side=side,
-                    quantity=assessment.approved_quantity,
-                    correlation_id=correlation_id,
+            # DETERMINISTIC idempotency key (review F5): derived from stable inputs, NOT a fresh
+            # uuid4 per attempt. A retry or overlapping run for the same (sleeve, symbol, side,
+            # cycle-date) mints the SAME client_order_id, so the broker's own idempotency
+            # (paper: dict dedupe; Alpaca: 422 -> fetch existing) collapses it to one order.
+            client_order_id = f"ord-{self._sleeve.id}-{target.symbol}-{side.value}-{cycle_date}"
+            # Isolate each placement (review F17): a single broker rejection (e.g. Alpaca 403
+            # insufficient buying power) must NOT abort the remaining decisions — those include
+            # risk-reducing SELLs and the closing portfolio snapshot. PlaceOrder already durably
+            # records the ORDER_INTENT + ORDER_SUBMIT_FAILED before raising, so the failure is on
+            # the audit trail; here we log and move on to the next proposal.
+            try:
+                broker_order = await self._place_order.execute(
+                    PlaceOrderRequest(
+                        sleeve_id=self._sleeve.id,
+                        decision_id=decision.id,
+                        client_order_id=client_order_id,
+                        symbol=target.symbol,
+                        side=side,
+                        quantity=assessment.approved_quantity,
+                        correlation_id=correlation_id,
+                    )
                 )
-            )
+            except OrderSubmissionError:
+                logger.warning(
+                    "order placement failed for %s; continuing with remaining decisions",
+                    target.symbol,
+                    extra={"correlation_id": correlation_id},
+                )
+                continue
             orders.append(broker_order)
 
         await self._snapshot(correlation_id)
@@ -241,6 +325,28 @@ class EvaluateSignals:
                 correlation_id=correlation_id,
             )
         )
+
+
+def _pending_by_symbol(orders: Sequence[BrokerOrder]) -> dict[str, Decimal]:
+    """Net not-yet-filled quantity per symbol across OPEN broker orders (review F5).
+
+    Only non-terminal orders contribute, and only their unfilled remainder (an order's already-
+    filled shares are already reflected in ``list_positions``). BUY remainders add to held, SELL
+    remainders subtract, so a queued order counts as exposure in flight and is not re-proposed.
+    """
+    pending: dict[str, Decimal] = {}
+    for order in orders:
+        if order.status in TERMINAL_STATUSES:
+            continue
+        filled = Decimal("0")
+        for fill in order.fills:
+            filled += fill.quantity
+        remainder = order.quantity - filled
+        if remainder <= 0:
+            continue
+        signed = remainder if order.side is OrderSide.BUY else -remainder
+        pending[order.symbol] = pending.get(order.symbol, Decimal("0")) + signed
+    return pending
 
 
 def _quote_payload(quote: Quote) -> dict[str, str]:

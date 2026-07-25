@@ -15,6 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from trading.application.ports.outcome_labels import OutcomeLabel
 from trading.infrastructure.persistence.tables import outcome_labels_table
 
+# `latest_run_id` (Task 05) orders by this surrogate identity column, NOT a `created_at` column
+# (there isn't one — no migration was added for the diagnostic's read extension). Insertion
+# order via `MAX(id)` is the "most recently written" row; if that run's most recent write was an
+# empty `replace_run` (a rerun that produced zero rows), it has no rows left and so cannot be the
+# max — this mirrors "a run with no rows can't be considered latest" rather than tracking writes
+# independent of rows, which is an accepted, documented limitation (see the port docstring).
+_LATEST_RUN_ID_QUERY = (
+    select(outcome_labels_table.c.label_run_id).order_by(outcome_labels_table.c.id.desc()).limit(1)
+)
+
 
 class PostgresOutcomeLabels:
     def __init__(self, engine: AsyncEngine) -> None:
@@ -59,20 +69,36 @@ class PostgresOutcomeLabels:
             return int((await conn.execute(query)).scalar_one())
 
     async def latest_run_id(self) -> str | None:
-        # The table has no timestamp; `id` is a monotonic identity, so the row with the greatest
-        # id belongs to the most recently written run (a rerun's delete-then-write gets fresh ids).
-        query = (
-            select(outcome_labels_table.c.label_run_id)
-            .order_by(outcome_labels_table.c.id.desc())
-            .limit(1)
+        """The `label_run_id` of the highest surrogate `id` row (most recently inserted)."""
+        async with self._engine.connect() as conn:
+            result = await conn.execute(_LATEST_RUN_ID_QUERY)
+            row = result.first()
+            return None if row is None else str(row[0])
+
+    async def labels_for_run(self, label_run_id: str) -> Sequence[OutcomeLabel]:
+        query = select(outcome_labels_table).where(
+            outcome_labels_table.c.label_run_id == label_run_id
         )
         async with self._engine.connect() as conn:
-            row = (await conn.execute(query)).first()
-        return None if row is None else str(row[0])
+            rows = (await conn.execute(query)).mappings().all()
+        return [
+            OutcomeLabel(
+                signal_id=row["signal_id"],
+                ticker=row["ticker"],
+                horizon_days=row["horizon_days"],
+                abnormal_return=row["abnormal_return"],
+                benchmark=row["benchmark"],
+                status=row["status"],
+                reason=row["reason"],
+                label_run_id=row["label_run_id"],
+            )
+            for row in rows
+        ]
 
     async def labels_for_signals(
         self, signal_ids: Sequence[str], *, label_run_id: str
     ) -> Sequence[OutcomeLabel]:
+        """The rows of ``label_run_id`` belonging to ``signal_ids`` (UI Phase D read extension)."""
         if not signal_ids:
             return []
         query = select(

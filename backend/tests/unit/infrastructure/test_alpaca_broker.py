@@ -189,3 +189,51 @@ async def test_pending_order_has_no_fills() -> None:
     assert order.status is OrderStatus.ACKNOWLEDGED
     assert order.fills == ()
     assert order.order_type is OrderType.MARKET
+
+
+def _order_json(index: int, submitted_at: str) -> dict[str, object]:
+    return {
+        "id": f"broker-{index}",
+        "client_order_id": f"ord-{index}",
+        "symbol": "LMT",
+        "qty": "1",
+        "filled_qty": "0",
+        "side": "buy",
+        "type": "market",
+        "status": "new",
+        "submitted_at": submitted_at,
+    }
+
+
+async def test_list_orders_paginates_past_the_500_order_page() -> None:
+    """F18: history beyond one 500-order page is fully paginated with the `after` cursor.
+
+    A single page would truncate at 500, so every older order would read back as broker='missing'
+    drift and brick the readiness reconciliation check. The adapter must return ALL 650 orders.
+    """
+    total = 650
+    all_orders = [
+        _order_json(i, f"2026-06-13T14:{i // 60:02d}:{i % 60:02d}Z") for i in range(total)
+    ]
+    seen_after: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v2/orders"
+        after = request.url.params.get("after")
+        seen_after.append(after)
+        # Serve orders strictly after the cursor, up to the 500 page limit, ascending.
+        start = (
+            0
+            if after is None
+            else next(i for i, o in enumerate(all_orders) if o["submitted_at"] == after) + 1
+        )
+        page = all_orders[start : start + 500]
+        return httpx.Response(200, json=page)
+
+    orders = await _broker(handler).list_orders()
+
+    assert len(orders) == total  # nothing truncated
+    assert {o.client_order_id for o in orders} == {f"ord-{i}" for i in range(total)}
+    # Paged: first request has no cursor, later ones advance it.
+    assert seen_after[0] is None
+    assert len(seen_after) >= 2

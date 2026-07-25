@@ -38,6 +38,7 @@ _LEGISLATORS_YAML = """
     first: Glenn
     last: Thompson
     official_full: Glenn Thompson
+    nickname: Champ
   terms:
     - type: rep
       state: PA
@@ -163,6 +164,23 @@ def test_committee_chair_is_classified_and_carries_full_committee_name(
     assert thompson.track_record_score == 1.0  # neutral
 
 
+def test_nickname_field_is_carried_through_from_source_data(
+    roster: dict[str, Politician],
+) -> None:
+    """Task 07 (docs/RESEARCH-PLAN.md): the roster loader must not drop ``name.nickname`` — the
+    filer-string resolver (``resolve_filer``) needs it as an alternate first-name token."""
+    thompson = roster["T000467"]
+    assert thompson.nickname == "Champ"
+
+
+def test_nickname_is_none_when_source_has_no_nickname_field(
+    roster: dict[str, Politician],
+) -> None:
+    # Jasmine Crockett's fixture entry carries no `nickname` key at all -> None, never fabricated.
+    crockett = roster["C001067"]
+    assert crockett.nickname is None
+
+
 def test_ranking_member_is_senior(roster: dict[str, Politician]) -> None:
     wicker = roster["W000437"]
     assert wicker.name == "Roger F. Wicker"
@@ -240,6 +258,7 @@ _LEGISLATORS_HISTORICAL_YAML = """
     first: Retired
     last: Senior
     official_full: Retired Senior Member
+    nickname: Sonny
   terms:
     - type: rep
       state: OH
@@ -294,6 +313,14 @@ def test_historical_roster_classifies_by_terms_served_with_empty_committees() ->
     assert junior.role is PoliticianRole.MEMBER
     assert junior.committees == ()
     assert junior.base_weight == DEFAULT_BASE_WEIGHTS[PoliticianRole.MEMBER]
+
+
+def test_historical_roster_carries_nickname_too() -> None:
+    """Task 07: the historical-roster parser must not drop ``name.nickname`` either — a
+    since-retired filer can use their nickname on a Clerk PTR just like a sitting member."""
+    politicians = {p.id: p for p in parse_historical_roster(_LEGISLATORS_HISTORICAL_YAML)}
+    assert politicians["R000577"].nickname == "Sonny"
+    assert politicians["R000578"].nickname is None
 
 
 async def test_fetch_and_parse_historical_roster_uses_mock_transport() -> None:

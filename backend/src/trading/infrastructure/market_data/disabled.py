@@ -41,3 +41,6 @@ class DisabledQuoteStream:
 
     async def add_symbols(self, symbols: Sequence[str]) -> None:
         return None
+
+    async def remove_symbols(self, symbols: Sequence[str]) -> None:
+        return None

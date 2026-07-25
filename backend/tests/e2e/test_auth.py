@@ -135,11 +135,37 @@ async def test_secured_mode_accepts_x_api_key(secured_client: httpx.AsyncClient)
     assert resp.status_code == 200
 
 
-async def test_get_reads_stay_open_when_secured(secured_client: httpx.AsyncClient) -> None:
-    # GET read endpoints are never guarded, even with auth enabled.
-    assert (await secured_client.get("/events")).status_code == 200
+async def test_public_reads_stay_open_when_secured(secured_client: httpx.AsyncClient) -> None:
+    # Genuinely public reads are never guarded, even with auth enabled.
     assert (await secured_client.get("/sleeves")).status_code == 200
     assert (await secured_client.get("/kill-switch")).status_code == 200
+    assert (await secured_client.get("/conviction")).status_code == 200
+
+
+async def test_sensitive_reads_require_key_when_secured(
+    secured_client: httpx.AsyncClient,
+) -> None:
+    # Account financials, the full event log, and live positions are sensitive reads (review F24):
+    # with a key configured they 401 without it.
+    assert (await secured_client.get("/events")).status_code == 401
+    assert (await secured_client.get("/capital")).status_code == 401
+    assert (await secured_client.get("/positions/live")).status_code == 401
+
+
+async def test_sensitive_reads_accept_key_when_secured(
+    secured_client: httpx.AsyncClient,
+) -> None:
+    headers = {"X-API-Key": "s3cret"}
+    assert (await secured_client.get("/events", headers=headers)).status_code == 200
+    assert (await secured_client.get("/capital", headers=headers)).status_code == 200
+    assert (await secured_client.get("/positions/live", headers=headers)).status_code == 200
+
+
+async def test_sensitive_reads_stay_open_when_unsecured(open_client: httpx.AsyncClient) -> None:
+    # No key configured (dev default) => sensitive reads remain open, like every other read.
+    assert (await open_client.get("/events")).status_code == 200
+    assert (await open_client.get("/capital")).status_code == 200
+    assert (await open_client.get("/positions/live")).status_code == 200
 
 
 async def test_health_endpoints_stay_open_when_secured(secured_client: httpx.AsyncClient) -> None:

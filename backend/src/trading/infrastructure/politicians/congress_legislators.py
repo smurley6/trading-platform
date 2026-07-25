@@ -43,6 +43,12 @@ public-record data, not a placeholder). The composition root is responsible for 
 current + historical into one :class:`CongressLegislatorsRepository` for the historical House
 source — see ``main.py``'s lazy historical-roster loader (fetched only on first use, never at
 startup, so a bare app boot stays network-silent).
+
+**Nicknames (Task 07, docs/RESEARCH-PLAN.md).** Both parsers also carry ``name.nickname`` (e.g.
+official first name "Richard" / nickname "Rick") onto :class:`Politician.nickname` — a filer
+string using the informal form ("Rick Allen") would otherwise never contiguously match the
+official full name. See :mod:`trading.infrastructure.politicians.name_matching` for how this
+is consumed.
 """
 
 from collections.abc import Sequence
@@ -132,6 +138,7 @@ def parse_roster(
                 base_weight=DEFAULT_BASE_WEIGHTS[role],
                 track_record_score=_NEUTRAL_TRACK_RECORD,
                 provenance=Provenance.REAL,
+                nickname=_nickname(entry),
             )
         )
     return tuple(politicians)
@@ -177,6 +184,7 @@ def parse_historical_roster(legislators_historical_yaml: str) -> tuple[Politicia
                 base_weight=DEFAULT_BASE_WEIGHTS[role],
                 track_record_score=_NEUTRAL_TRACK_RECORD,
                 provenance=Provenance.REAL,
+                nickname=_nickname(entry),
             )
         )
     return tuple(politicians)
@@ -359,3 +367,16 @@ def _official_full(entry: dict[str, object]) -> str:
         if isinstance(official_full, str):
             return official_full
     return ""
+
+
+def _nickname(entry: dict[str, object]) -> str | None:
+    """The ``name.nickname`` field (Task 07, docs/RESEARCH-PLAN.md) — a preferred given name
+    distinct from the official first name (e.g. official "Richard" / nickname "Rick"), used by
+    :mod:`trading.infrastructure.politicians.name_matching` as an alternate first-name token when
+    matching filer strings that use the informal form. ``None`` when absent (most members)."""
+    name = entry.get("name")
+    if isinstance(name, dict):
+        nickname = name.get("nickname")
+        if isinstance(nickname, str) and nickname.strip():
+            return nickname.strip()
+    return None

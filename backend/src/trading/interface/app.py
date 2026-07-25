@@ -233,8 +233,10 @@ def create_app(deps: AppDeps) -> FastAPI:
     # Structured JSON access logging + request/latency metrics + a propagated request id.
     app.add_middleware(ObservabilityMiddleware, metrics=deps.metrics)
 
-    # API-key guard for mutating/sensitive endpoints. Unset => open (dev default; auth logs a
-    # single startup warning). Set => protected routes require the key. GET reads stay open.
+    # API-key guard for mutating endpoints AND sensitive reads (review F24). Unset => open (dev
+    # default; auth logs a single startup warning). Set => protected routes require the key;
+    # genuinely public reads (/sleeves, /conviction, health) stay open. The WebSocket routes reuse
+    # `auth.is_authorized` directly since a rejected socket is closed, not answered with a 401.
     auth = ApiKeyAuth(deps.api_key)
     protected = [Depends(auth)]
 
@@ -276,7 +278,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
-    @app.get("/events", response_model=list[EventOut])
+    @app.get("/events", response_model=list[EventOut], dependencies=protected)
     async def list_events(
         stream_id: Annotated[str | None, Query()] = None,
         correlation_id: Annotated[str | None, Query()] = None,
@@ -439,7 +441,7 @@ def create_app(deps: AppDeps) -> FastAPI:
         symbols = sorted({p.symbol for p in held})
         return TrackedSymbolsOut(symbols=symbols or list(deps.default_watchlist))
 
-    @app.get("/positions/live", response_model=LivePositionsOut)
+    @app.get("/positions/live", response_model=LivePositionsOut, dependencies=protected)
     async def live_positions() -> LivePositionsOut:
         held = await deps.read_model.held_positions()
         feed = deps.quote_feed
@@ -455,7 +457,7 @@ def create_app(deps: AppDeps) -> FastAPI:
             positions=[LivePositionOut.from_marked(m) for m in marked],
         )
 
-    @app.get("/capital", response_model=CapitalOut)
+    @app.get("/capital", response_model=CapitalOut, dependencies=protected)
     async def capital() -> CapitalOut:
         # The single shared capital pool both algos draw from = the live Alpaca account. Reports
         # buying power / cash / equity for that one book, plus each algo's slice of it (market value
@@ -563,12 +565,30 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.post("/cycle/mode", response_model=CycleModeOut, dependencies=protected)
     async def set_cycle_mode(body: CycleModeIn) -> CycleModeOut:
         # Live arm/disarm of autonomous trading for the scheduled political cycle. Updates the
-        # reporting copy AND the running PoliticalCycle so the next scheduled tick honours it
-        # with no redeploy. NOT persisted: reverts to the CYCLE_TRADE_MODE env default on
-        # restart, so a restart never silently resumes 'auto'.
+        # reporting copy AND the running PoliticalCycle so the next in-process tick honours it with
+        # no redeploy, AND appends a durable CYCLE_MODE_CHANGED event (plus a USER_ACTION audit
+        # event, mirroring the kill-switch idiom) so the choice survives a restart and reaches the
+        # daily cron: build_dependencies replays the latest one at startup (review F16). Without
+        # the event, a 'manual' disarm was process-local — the cron re-read the env default and a
+        # web redeploy silently resumed 'auto'.
+        correlation_id = str(uuid4())
         deps.cycle_trade_mode = body.mode
         if deps.political_cycle is not None:
             deps.political_cycle.trade_mode = body.mode
+        await _append(
+            deps,
+            _USER_ACTION_STREAM,
+            EventType.USER_ACTION,
+            {"action": "cycle_mode", "mode": body.mode},
+            correlation_id,
+        )
+        await _append(
+            deps,
+            "cycle",
+            EventType.CYCLE_MODE_CHANGED,
+            {"mode": body.mode},
+            correlation_id,
+        )
         return CycleModeOut(mode=body.mode)
 
     @app.get("/kill-switch", response_model=KillSwitchOut)
@@ -646,10 +666,22 @@ def create_app(deps: AppDeps) -> FastAPI:
 
     @app.websocket("/ws/events")
     async def stream_events(websocket: WebSocket) -> None:
+        # The event firehose exposes every signal, order, fill, and decision — a sensitive read
+        # (review F24). When a key is configured, require it BEFORE accepting, via either the
+        # Authorization: Bearer / X-API-Key headers (service clients) or — because the browser
+        # WebSocket constructor cannot set request headers — the Sec-WebSocket-Protocol offer
+        # ["api-key", "<key>"] (task-22). A rejected socket is closed with 1008 (policy violation)
+        # and never accepted, so no unauthenticated client can be sent an event frame.
+        authorized, subprotocol = auth.authorize_websocket(websocket)
+        if not authorized:
+            await websocket.close(code=1008)
+            return
         if deps.event_bus is None:
             await websocket.close(code=1011)
             return
-        await websocket.accept()
+        # Echoing back one of the OFFERED subprotocols is mandatory: a browser fails the handshake
+        # otherwise. It is the sentinel, never the key (that would leak it into a response header).
+        await websocket.accept(subprotocol=subprotocol)
         queue = deps.event_bus.subscribe()
         try:
             while True:
@@ -683,14 +715,21 @@ def create_app(deps: AppDeps) -> FastAPI:
         # subscribe requests. Mirrors /ws/events (per-connection queue, clean disconnect).
         await stream.add_symbols(await _tracked_symbols(deps))
         queue = stream.subscribe()
+        # Symbols THIS connection asked to add, so they can be removed from the shared upstream
+        # socket when it disconnects (review F23) — an anonymous client must not leave junk symbols
+        # on the one shared feed. The stream refcounts, so a symbol another client still wants (or
+        # a platform-tracked one) survives.
+        client_added: set[str] = set()
         push = asyncio.ensure_future(_push_quotes(websocket, queue))
-        recv = asyncio.ensure_future(_handle_quote_requests(websocket, stream))
+        recv = asyncio.ensure_future(_handle_quote_requests(websocket, stream, client_added))
         try:
             await asyncio.wait({push, recv}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (push, recv):
                 task.cancel()
             stream.unsubscribe(queue)
+            if client_added:
+                await stream.remove_symbols(sorted(client_added))
 
     return app
 
@@ -716,13 +755,20 @@ async def _push_quotes(websocket: WebSocket, queue: "asyncio.Queue[Quote]") -> N
         )
 
 
-async def _handle_quote_requests(websocket: WebSocket, stream: QuoteStreamPort) -> None:
+async def _handle_quote_requests(
+    websocket: WebSocket, stream: QuoteStreamPort, client_added: set[str]
+) -> None:
     while True:
         message = await websocket.receive_json()
         if isinstance(message, dict) and message.get("action") == "subscribe":
             requested = message.get("symbols")
             if isinstance(requested, list):
-                await stream.add_symbols([str(s) for s in requested])
+                symbols = [str(s) for s in requested]
+                # Record what this connection requested so it can be removed on disconnect. The
+                # stream validates/caps/refcounts; removing the same set later is balanced because
+                # the stream normalizes identically on add and remove (review F23).
+                client_added.update(symbols)
+                await stream.add_symbols(symbols)
 
 
 def _parse_symbols(raw: str | None) -> list[str]:

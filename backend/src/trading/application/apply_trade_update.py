@@ -27,11 +27,16 @@ from typing import Any
 from uuid import uuid4
 
 from trading.application.ports.clock import ClockPort
-from trading.application.ports.event_store import EventStorePort
+from trading.application.ports.event_store import EventStorePort, ExpectedVersionError
 from trading.application.ports.trade_updates import TradeUpdate
-from trading.application.projections import order_statuses_from_events
+from trading.application.projections import order_statuses_from_events, stream_version
 from trading.domain.events import DomainEvent, EventType, StoredEvent
 from trading.domain.orders import OrderStatus
+
+# Bound on the compare-and-set fill re-read loop (review F9): a conflict means the polling
+# order-sync (or a re-delivered stream frame) advanced the order stream between our read and
+# write; we re-read and re-decide. Real contention is a single racing writer.
+_FILL_CAS_ATTEMPTS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +88,7 @@ class ApplyTradeUpdate:
             # Not an order this sleeve placed (or not yet recorded) — ignore.
             return ApplyResult(recorded_fill=False, recorded_status_change=False, skipped=True)
 
-        recorded_fill = await self._maybe_record_fill(update, events, correlation_id)
+        recorded_fill = await self._maybe_record_fill(update, correlation_id)
         recorded_status = await self._maybe_record_status(update, local_statuses, correlation_id)
         return ApplyResult(
             recorded_fill=recorded_fill,
@@ -91,36 +96,44 @@ class ApplyTradeUpdate:
             skipped=False,
         )
 
-    async def _maybe_record_fill(
-        self, update: TradeUpdate, events: Sequence[StoredEvent], correlation_id: str
-    ) -> bool:
+    async def _maybe_record_fill(self, update: TradeUpdate, correlation_id: str) -> bool:
         if not update.is_fill:
             return False
         assert update.fill_price is not None and update.fill_quantity is not None
-        # Cumulative-quantity idempotency: the update's filled qty is the broker's running
-        # total for the order; only the unrecorded increment is appended. <= 0 means the
-        # poller (or an earlier stream frame) already recorded this fill.
-        already = _recorded_fill_quantity(events, update.client_order_id)
-        increment = update.fill_quantity - already
-        if increment <= 0:
-            return False
-        await self._append(
-            f"order-{update.client_order_id}",
-            EventType.ORDER_FILLED,
-            {
-                "client_order_id": update.client_order_id,
-                "sleeve_id": self._sleeve_id,
-                "symbol": update.symbol,
-                "side": update.side.value,
-                "price": str(update.fill_price),
-                "quantity": str(increment),
-                "fees": "0",  # Alpaca equities are commission-free
-                "filled_at": (update.filled_at or update.occurred_at).isoformat(),
-                "source": "trade_updates_stream",
-            },
-            correlation_id,
-        )
-        return True
+        stream_id = f"order-{update.client_order_id}"
+        # Cumulative-quantity idempotency: the update's filled qty is the broker's running total
+        # for the order; only the unrecorded increment is appended. <= 0 means the poller (or an
+        # earlier stream frame) already recorded this fill. The append is compare-and-set against
+        # the order stream's version, so a poller writing the SAME fill concurrently loses the
+        # race, we re-read, and the increment is then <= 0 — recorded exactly once (review F9).
+        for _ in range(_FILL_CAS_ATTEMPTS):
+            events = await self._event_store.read_all()
+            already = _recorded_fill_quantity(events, update.client_order_id)
+            increment = update.fill_quantity - already
+            if increment <= 0:
+                return False
+            try:
+                await self._append(
+                    stream_id,
+                    EventType.ORDER_FILLED,
+                    {
+                        "client_order_id": update.client_order_id,
+                        "sleeve_id": self._sleeve_id,
+                        "symbol": update.symbol,
+                        "side": update.side.value,
+                        "price": str(update.fill_price),
+                        "quantity": str(increment),
+                        "fees": "0",  # Alpaca equities are commission-free
+                        "filled_at": (update.filled_at or update.occurred_at).isoformat(),
+                        "source": "trade_updates_stream",
+                    },
+                    correlation_id,
+                    expected_version=stream_version(events, stream_id),
+                )
+                return True
+            except ExpectedVersionError:
+                continue  # a concurrent writer advanced the stream; re-read and re-decide
+        return False
 
     async def _maybe_record_status(
         self, update: TradeUpdate, local_statuses: dict[str, str], correlation_id: str
@@ -149,7 +162,13 @@ class ApplyTradeUpdate:
         return True
 
     async def _append(
-        self, stream_id: str, event_type: str, payload: dict[str, Any], correlation_id: str
+        self,
+        stream_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        correlation_id: str,
+        *,
+        expected_version: int | None = None,
     ) -> None:
         await self._event_store.append(
             DomainEvent(
@@ -158,5 +177,6 @@ class ApplyTradeUpdate:
                 payload=payload,
                 occurred_at=self._clock.now(),
                 correlation_id=correlation_id,
-            )
+            ),
+            expected_version=expected_version,
         )

@@ -17,35 +17,44 @@ class InMemoryOutcomeLabels:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._by_run: dict[str, list[OutcomeLabel]] = {}
+        # Insertion order of `replace_run` calls (Task 05). A plain dict preserves FIRST-insertion
+        # order and does NOT move a re-inserted key to the end, so this list is the authoritative
+        # "most recently written" record `latest_run_id` needs; a rerun of the same run id counts
+        # as a fresh write, matching the Postgres impl's insertion-order (surrogate `id`) semantics.
+        self._write_order: list[str] = []
 
     async def replace_run(self, label_run_id: str, labels: Sequence[OutcomeLabel]) -> None:
         async with self._lock:
             # Delete-then-write: a rerun of the same run id overwrites rather than duplicates.
-            # Pop first so the re-added key moves to the END of the dict, mirroring the Postgres
-            # store where a rerun's rows get fresh (highest) identity ids — `latest_run_id` then
-            # returns the most-recently-written run in either backend.
-            self._by_run.pop(label_run_id, None)
             self._by_run[label_run_id] = list(labels)
+            if label_run_id in self._write_order:
+                self._write_order.remove(label_run_id)
+            self._write_order.append(label_run_id)
 
     async def delete_run(self, label_run_id: str) -> None:
         async with self._lock:
             self._by_run.pop(label_run_id, None)
+            if label_run_id in self._write_order:
+                self._write_order.remove(label_run_id)
 
     async def count_for_run(self, label_run_id: str) -> int:
         async with self._lock:
             return len(self._by_run.get(label_run_id, ()))
 
     async def latest_run_id(self) -> str | None:
+        """The most recently written run id (Task 05), or ``None`` if the store is empty."""
         async with self._lock:
-            if not self._by_run:
-                return None
-            # Dict preserves insertion order; replace_run re-adds at the end, so the last key is
-            # the most recently written run.
-            return next(reversed(self._by_run))
+            return self._write_order[-1] if self._write_order else None
+
+    async def labels_for_run(self, label_run_id: str) -> Sequence[OutcomeLabel]:
+        """All label rows for ``label_run_id`` (Task 05 read extension)."""
+        async with self._lock:
+            return list(self._by_run.get(label_run_id, ()))
 
     async def labels_for_signals(
         self, signal_ids: Sequence[str], *, label_run_id: str
     ) -> Sequence[OutcomeLabel]:
+        """The rows of ``label_run_id`` belonging to ``signal_ids`` (UI Phase D read extension)."""
         wanted = set(signal_ids)
         async with self._lock:
             return [

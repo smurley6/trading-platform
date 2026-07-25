@@ -52,6 +52,39 @@ def test_overselling_raises() -> None:
         portfolio.apply_fill(_fill(OrderSide.SELL, "100", "6"))
 
 
+def test_apply_fill_tolerant_matches_strict_for_a_valid_sell() -> None:
+    # For BUYs and valid SELLs the tolerant variant is identical to strict apply_fill and never
+    # flags a clamp (review F7).
+    portfolio = Portfolio(cash=Decimal("1000"))
+    portfolio, clamped = portfolio.apply_fill_tolerant(_fill(OrderSide.BUY, "100", "5"))
+    assert clamped is False
+    portfolio, clamped = portfolio.apply_fill_tolerant(_fill(OrderSide.SELL, "110", "5"))
+    assert clamped is False
+    assert "AAPL" not in portfolio.positions
+    assert portfolio.cash == Decimal("1050")
+
+
+def test_apply_fill_tolerant_clamps_an_oversell_instead_of_raising() -> None:
+    # A SELL exceeding held (or with no held position at all) must NOT raise in the projection —
+    # it is clamped to flat and flagged, so an out-of-order fill can be recorded without aborting
+    # the append (review F7). Only the shares actually held are removed.
+    portfolio = Portfolio(cash=Decimal("1000"))
+    portfolio, _ = portfolio.apply_fill_tolerant(_fill(OrderSide.BUY, "100", "5"))
+    portfolio, clamped = portfolio.apply_fill_tolerant(_fill(OrderSide.SELL, "110", "8"))
+    assert clamped is True
+    assert "AAPL" not in portfolio.positions
+    # Cash reflects only the 5 shares actually held and sold at 110, not the phantom 8.
+    assert portfolio.cash == Decimal("500") + Decimal("110") * Decimal("5")
+
+
+def test_apply_fill_tolerant_sell_with_no_position_is_a_flagged_noop() -> None:
+    portfolio = Portfolio(cash=Decimal("1000"))
+    portfolio, clamped = portfolio.apply_fill_tolerant(_fill(OrderSide.SELL, "110", "3"))
+    assert clamped is True
+    assert portfolio.positions == {}
+    assert portfolio.cash == Decimal("1000")  # nothing held -> nothing sold
+
+
 def test_equity_marks_positions_to_market() -> None:
     portfolio = Portfolio(cash=Decimal("500"))
     portfolio = portfolio.apply_fill(_fill(OrderSide.BUY, "100", "5"))

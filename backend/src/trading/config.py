@@ -9,6 +9,10 @@ from typing import Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trading.domain.form4_edge import (
+    DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS,
+    DEFAULT_FORM4_EXPECTED_EDGE_H1,
+)
 from trading.domain.sleeves import TradingMode
 
 
@@ -34,6 +38,23 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     mode_default: TradingMode = TradingMode.PAPER
+
+    @field_validator("mode_default")
+    @classmethod
+    def _reject_live_mode_default(cls, v: TradingMode) -> TradingMode:
+        # Boot is ALWAYS paper (review F10). MODE_DEFAULT=live would route every sleeve straight
+        # to the live account from the first cycle, bypassing the entire readiness gate (no
+        # caps-vs-live-ceilings check, no reconciliation, no confirm, no SLEEVE_MODE_CHANGED /
+        # USER_ACTION audit event). Live is reachable ONLY through the gated AssessLiveReadiness /
+        # POST /sleeves/{id}/mode path, which performs those checks and records the audit events.
+        if v is TradingMode.LIVE:
+            raise ValueError(
+                "MODE_DEFAULT=live is not allowed: boot is always paper. Going live bypasses the "
+                "readiness gate (caps-vs-live-ceilings, reconciliation, confirm) and records no "
+                "audit event. Enable live per sleeve via POST /sleeves/{id}/mode after ALLOW_LIVE "
+                "and the readiness preflight pass. Leave MODE_DEFAULT unset (paper)."
+            )
+        return v
 
     # Event store: in-memory when unset (dev), Postgres when set.
     database_url: str | None = None
@@ -67,6 +88,18 @@ class Settings(BaseSettings):
     conviction_min_sources_for_full_corroboration: int = 1
     conviction_max_corroboration_factor: float | None = None
     conviction_scale: float = 25.0
+
+    # Form 4 buy edge calibration (task-13, docs/RESEARCH-PLAN.md §2-§3). Anchored on the EPISODE-
+    # level Phase-7 read (label run a38d3848), NOT the inflated label-level pooled numbers. Neither
+    # value touches TRADE/WATCH thresholds or sizing multipliers on its own — they are the honest
+    # constants sizing/gate code must anchor on, each with the OLD value recoverable here:
+    #   * `form4_expected_edge_h1`: the per-trade edge at h=1 = ex-LUV per-episode mean +0.41%.
+    #     Recover the OLD label-level pooled anchor (+1.0%) with FORM4_EXPECTED_EDGE_H1=0.01.
+    #   * `form4_buy_decay_half_life_days`: post-acceptance decay half-life (days) — weight
+    #     concentrates in days 0-5 (edge at h=1; h=20 hit 46% / median negative). Recover the OLD
+    #     flat (no-decay) holding with FORM4_BUY_DECAY_HALF_LIFE_DAYS=0.
+    form4_expected_edge_h1: float = DEFAULT_FORM4_EXPECTED_EDGE_H1
+    form4_buy_decay_half_life_days: float = DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS
 
     # Scheduled-cycle trade mode (FR-EXE). Governs BOTH the daily cron and the in-process
     # web-service scheduler (when INGEST_INTERVAL_SECONDS > 0). Default 'manual' is the SAFE
@@ -120,6 +153,12 @@ class Settings(BaseSettings):
     alpaca_data_stream_url: str = "wss://stream.data.alpaca.markets/v2/iex"
     alpaca_data_key_id: str | None = None
     alpaca_data_secret_key: str | None = None
+    # Optional historical-bars feed override (Task 09), UNSET by default: the historical-bars
+    # adapter sends NO `feed` query param at all, letting Alpaca pick its default entitled feed.
+    # Do NOT default this to "iex" — consolidated-tape (SIP) bar quality must hold corpus-wide
+    # for the labeler/backtest; this is an escape hatch for a specific subscription/incident,
+    # not a standing choice. Set e.g. `ALPACA_DATA_FEED=iex` only if a real 403 requires it.
+    alpaca_data_feed: str | None = None
     # Watchlist used by /quotes/tracked when the platform holds no positions yet.
     default_watchlist: list[str] = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "SPCX"]
 
@@ -258,8 +297,17 @@ class Settings(BaseSettings):
     # /sleeves/{id}/readiness). UNSET (the default) => those endpoints stay OPEN, and the app
     # logs a single startup warning so an unprotected deployment is never silent. SET => callers
     # must present it via `Authorization: Bearer <key>` or the `X-API-Key` header; a mismatch is
-    # 401. GET read endpoints stay open regardless. Env-only, NEVER commit a real key.
+    # 401. Sensitive reads (/capital, /events, /positions/live, /ws/events) join the writes under
+    # the guard (review F24); genuinely public reads (/sleeves, /conviction, health) stay open.
+    # Env-only, NEVER commit a real key.
     api_key: str | None = None
+    # Fail-closed auth escape hatch (review F12). When a REAL Alpaca broker is wired (paper or
+    # live) but `api_key` is unset, the composition root REFUSES to start — an internet-exposed
+    # Render URL would otherwise leave the order-placing / risk-control endpoints open to anyone.
+    # Set this true ONLY to deliberately accept an unauthenticated real-broker deployment (e.g.
+    # one reachable solely on a private network); the default keeps a dropped API_KEY from
+    # silently exposing the write surface.
+    allow_unauthenticated: bool = False
 
     # --- Hardening: observability (interface/composition agent) -----------------------------
     # Structured JSON request logging + Prometheus-text /metrics are always on (dependency-light,

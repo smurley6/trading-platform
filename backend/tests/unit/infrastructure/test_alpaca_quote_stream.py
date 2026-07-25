@@ -194,10 +194,72 @@ async def test_unsubscribe_stops_delivery() -> None:
     assert queue.empty()
 
 
-async def test_error_frame_raises_from_reader() -> None:
-    # The fatal path surfaces as AlpacaQuoteStreamError inside _connect_and_consume.
-    error_frame = json.dumps([{"T": "error", "msg": "bad"}])
+async def test_auth_error_frame_raises_from_reader() -> None:
+    # A FATAL auth error frame (code 401) surfaces as AlpacaQuoteStreamError (review F23).
+    error_frame = json.dumps([{"T": "error", "code": 401, "msg": "not authenticated"}])
     ws = FakeWebSocket([error_frame])
     stream = _stream(ws)
     with pytest.raises(AlpacaQuoteStreamError):
         await stream._connect_and_consume()
+
+
+async def test_non_auth_error_frame_is_non_fatal_and_stream_survives() -> None:
+    """F23: a non-auth upstream error (e.g. a junk symbol tripping the IEX symbol limit) must NOT
+    kill the shared feed — it is logged and the stream keeps consuming the next quote."""
+    symbol_limit_error = json.dumps([{"T": "error", "code": 405, "msg": "symbol limit exceeded"}])
+    ws = FakeWebSocket([_AUTH_OK, symbol_limit_error, _QUOTE])
+    stream = _stream(ws)
+    queue = stream.subscribe()
+
+    task = asyncio.ensure_future(stream.run())
+    # The error frame did not tear down the reader: the following quote is still delivered.
+    quote = await asyncio.wait_for(queue.get(), timeout=1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert quote.symbol == "AAPL"
+
+
+async def test_remove_symbols_unsubscribes_when_last_client_leaves() -> None:
+    """F23: a client-added symbol is unsubscribed upstream when removed (not a seed symbol)."""
+    ws = FakeWebSocket([_AUTH_OK])
+    stream = _stream(ws)  # seed = AAPL
+
+    task = asyncio.ensure_future(stream.run())
+    for _ in range(100):
+        if ws.sent:
+            break
+        await asyncio.sleep(0.01)
+    await stream.add_symbols(["LMT"])
+    await stream.remove_symbols(["LMT", "AAPL"])  # AAPL is a seed -> never unsubscribed
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    unsubscribes = [json.loads(s) for s in ws.sent if "unsubscribe" in s]
+    assert {"action": "unsubscribe", "quotes": ["LMT"]} in unsubscribes
+    # The seed symbol is never unsubscribed.
+    assert not any("AAPL" in u["quotes"] for u in unsubscribes)
+
+
+async def test_invalid_and_excess_symbols_are_dropped() -> None:
+    """F23: junk symbols are rejected and the total subscription is capped."""
+    ws = FakeWebSocket([_AUTH_OK])
+    stream = _stream(ws)
+
+    task = asyncio.ensure_future(stream.run())
+    for _ in range(100):
+        if ws.sent:
+            break
+        await asyncio.sleep(0.01)
+    # A junk symbol (has a space / lowercase-only garbage) is dropped; a valid one subscribes.
+    await stream.add_symbols(["not a symbol", "!!!", "nvda"])
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    subscribed: set[str] = set()
+    for s in ws.sent:
+        if "subscribe" in s and "unsubscribe" not in s:
+            subscribed.update(json.loads(s)["quotes"])
+    assert "NVDA" in subscribed
+    assert "!!!" not in subscribed
+    assert not any(" " in q for q in subscribed)

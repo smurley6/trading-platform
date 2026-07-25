@@ -57,7 +57,7 @@ import logging
 import math
 import re
 import zipfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -73,9 +73,9 @@ from trading.application.ports.reference_data import SectorMapPort
 from trading.domain.politicians import Politician
 from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal, SignalSource
-from trading.infrastructure.data_sources import RELIABILITY_DISCLOSED_TRADE
 from trading.infrastructure.data_sources.throttle import RateLimiter
 from trading.infrastructure.data_sources.weighting import politician_weight_for
+from trading.infrastructure.politicians.name_matching import resolve_filer
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,18 @@ _EFILED_DOC_ID_MIN_LEN = 8
 _BUY_SENTIMENT = 0.5
 _SELL_SENTIMENT = -0.5
 
+# Conviction-weight prior for House disclosures — BENCHED to 0.0 (Task 10, docs/RESEARCH-PLAN.md;
+# Phase 6 label run a38d3848-f1eb-4a55-8a6d-15e8f1464f7a, 68,242 ok labels, 2026-07-07). House
+# disclosures previously shared `infrastructure/data_sources/__init__.py::RELIABILITY_DISCLOSED_
+# TRADE` (0.7, also used by congress_trades/senate_efd); Phase 6 found House is direction-aligned
+# zero under every cut (measured 0.504 vs the 0.70 prior), with the apparent h=20 sector premium a
+# mega-cap composition artifact, refuting that shared prior FOR THIS SOURCE. House now defines its
+# OWN constant (no longer imports the shared one) so benching it cannot silently affect
+# congress_trades/senate_efd, which keep the unrefuted 0.7 prior. Benching is a conviction WEIGHT
+# only: ingestion, recording, and labeling of House signals are unchanged (data keeps accruing for
+# the re-review trigger in docs/RESEARCH-PLAN.md, "Re-review triggers").
+RELIABILITY_HOUSE_DISCLOSURE = 0.0
+
 # Asset-type codes we keep: stock and options (both are tradeable equity exposure). Anything
 # else (e.g. bonds, mutual funds) is ignored.
 _KEPT_ASSET_TYPES = frozenset({"ST", "OP"})
@@ -102,10 +114,54 @@ _TICKER_RE = re.compile(r"\(([A-Z][A-Z0-9.\-]*)\)")
 _ASSET_TYPE_RE = re.compile(r"\[([A-Z]{2})\]")
 _TXN_TYPE_RE = re.compile(r"(?<![A-Za-z])([PSE])(?![A-Za-z])")
 _DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})")
-_AMOUNT_RE = re.compile(r"\$([\d,]+)\s*-\s*\$([\d,]+)")
 _NAME_RE = re.compile(r"Name:\s*(.+)")
 _STATE_DISTRICT_RE = re.compile(r"State/District:\s*([A-Za-z0-9]+)")
 _FILING_ID_RE = re.compile(r"Filing ID #?\s*(\d+)")
+
+# The Clerk's CLOSED amount-bracket vocabulary (Task 07, docs/RESEARCH-PLAN.md). Every PTR amount
+# cell is one of these ten strings, verbatim (a fixed schema, not free-form dollar figures), so
+# each bracket gets its own tolerant pattern rather than one generic "$X - $Y" regex: a PDF's text
+# layer can wrap the cell across lines/columns, interleaving the asset-type bracket or other cell
+# text between the low and high figures (e.g. "$15,001 -\n[ST] $50,000"), so patterns match
+# anywhere in a widened row block with `re.DOTALL` and tolerate arbitrary whitespace/newlines (and
+# any other intervening characters) between the two figures, keyed on the two dollar amounts
+# themselves being present and correctly ordered — no other bracket's numbers exist in between.
+_AMOUNT_BRACKETS: tuple[tuple[float, float], ...] = (
+    (1_001, 15_000),
+    (15_001, 50_000),
+    (50_001, 100_000),
+    (100_001, 250_000),
+    (250_001, 500_000),
+    (500_001, 1_000_000),
+    (1_000_001, 5_000_000),
+    (5_000_001, 25_000_000),
+    (25_000_001, 50_000_000),
+)
+
+
+def _bracket_pattern(low: float, high: float) -> re.Pattern[str]:
+    """A tolerant regex for one closed bracket: the exact low/high figures, any whitespace or
+    other intervening text (including newlines, from a wrapped PDF layout) between the '$low'
+    and '- $high' halves. Non-greedy so it cannot accidentally bridge past a DIFFERENT bracket's
+    figures on an adjacent row."""
+    low_txt = f"{int(low):,}"
+    high_txt = f"{int(high):,}"
+    return re.compile(rf"\${low_txt}\s*-\s*(?:\S+\s+)*?\${high_txt}", re.DOTALL)
+
+
+_BRACKET_PATTERNS: tuple[tuple[re.Pattern[str], float, float], ...] = tuple(
+    (_bracket_pattern(low, high), low, high) for low, high in _AMOUNT_BRACKETS
+)
+# The open-top bracket has no upper figure; tolerate the Clerk's wrapped rendering the same way
+# the closed brackets do ("over $50,000,000" possibly split across a line break after "over", or
+# with other cell text such as an asset-type bracket interleaved before the dollar figure).
+_OPEN_TOP_RE = re.compile(r"over\s*(?:\S+\s+)*?\$50,000,000", re.IGNORECASE | re.DOTALL)
+# Sentinel pair for the open-top bracket: distinct from the (0.0, 0.0) parse-miss sentinel and
+# from every closed bracket's high figure. `_amount_weight`'s existing log-scale-of-midpoint
+# formula already saturates at 2.0x well below this midpoint, so this sentinel does not change
+# `_amount_weight`'s semantics (Task 07 scope: parsing only, `_amount_weight` untouched).
+_OPEN_TOP_LOW = 50_000_001.0
+_OPEN_TOP_HIGH = 100_000_000.0
 
 # Historical-path throttle: polite sequential PDF fetches against the Clerk's servers (same
 # ceiling style as Task 04a's SEC fair-access limiter, no formal published rate limit here).
@@ -194,7 +250,7 @@ def _build_signal(
         politician_id=politician.id,
         sentiment=txn.sentiment,
         politician_weight=base_weight * _amount_weight(txn.amount_low, txn.amount_high),
-        source_reliability=RELIABILITY_DISCLOSED_TRADE,
+        source_reliability=RELIABILITY_HOUSE_DISCLOSURE,
         raw_payload=raw_payload,
         provenance=provenance,
     )
@@ -229,10 +285,23 @@ class HouseDisclosuresSource:
         self._limiter = RateLimiter(
             min_interval=_MIN_REQUEST_INTERVAL, sleep=sleep or asyncio.sleep
         )
+        # Diagnostic counters from the most recent fetch_historical() call (Task 07,
+        # docs/RESEARCH-PLAN.md), exposed via last_run_summary()
+        # (SummarizingHistoricalSource, application/ports/data_source.py).
+        self._last_run_summary: dict[str, object] | None = None
 
     @property
     def name(self) -> str:
         return "house_disclosures"
+
+    def last_run_summary(self) -> Mapping[str, object] | None:
+        """Diagnostic counters from the most recent ``fetch_historical`` call (Task 07):
+        ``unmatched_filers`` (by reason: ``no_candidate``/``ambiguous``) and
+        ``amount_parse_misses``. ``None`` until ``fetch_historical`` has run at least once on
+        this instance. Implements
+        :class:`~trading.application.ports.data_source.SummarizingHistoricalSource`.
+        """
+        return self._last_run_summary
 
     # --- Live path (unchanged behavior) -----------------------------------------------------
 
@@ -244,14 +313,15 @@ class HouseDisclosuresSource:
 
         signals: list[Signal] = []
         for entry in entries:
-            politician = self._politicians.find_in_text(entry.name)
+            politician, _reason = resolve_filer(entry.name, self._politicians.all())
             if politician is None:
-                # Member not in the roster -> we cannot weight the trade, so skip the filing.
+                # Member not in the roster (or ambiguous) -> we cannot weight the trade, so skip
+                # the filing. The live path has no per-run summary to attribute a reason to.
                 continue
             text = await self._fetch_ptr_text(entry)
             if text is None:
                 continue
-            for txn in _parse_transactions(text):
+            for txn in _parse_transactions(text, doc_id=entry.doc_id):
                 if txn.ticker is None:
                     # Unchanged live behavior: a transaction line with no regex-matched ticker
                     # is skipped (no entity-resolver fallback on the live path).
@@ -337,11 +407,15 @@ class HouseDisclosuresSource:
         ``raw_payload["transaction_date"]``). ``source_uid`` = ``"{DocID}:{row_index}"``.
         """
         politicians = await self._politician_repository()
+        roster = politicians.all()
 
         paper_filings_skipped = 0
         unmatched_filer_skipped = 0
+        unmatched_filers_no_candidate = 0
+        unmatched_filers_ambiguous = 0
         unresolved_ticker = 0
         unparseable_pdfs = 0
+        amount_parse_misses = 0
         signals: list[Signal] = []
 
         for year in _years_covering(start, end):
@@ -352,12 +426,18 @@ class HouseDisclosuresSource:
             for entry in _parse_index(xml_bytes):
                 if not (start <= entry.filing_date <= end):
                     continue
-                politician = politicians.find_in_text(entry.name)
+                politician, reason = resolve_filer(entry.name, roster)
                 if politician is None:
                     unmatched_filer_skipped += 1
+                    if reason == "ambiguous":
+                        unmatched_filers_ambiguous += 1
+                    else:
+                        unmatched_filers_no_candidate += 1
                     logger.info(
-                        "house_disclosures historical: filer not in roster, skipped (doc_id=%s)",
+                        "house_disclosures historical: filer not in roster, skipped "
+                        "(doc_id=%s, reason=%s)",
                         entry.doc_id,
+                        reason,
                     )
                     continue
 
@@ -371,7 +451,9 @@ class HouseDisclosuresSource:
                     )
                     continue
 
-                for row_index, txn in enumerate(_parse_transactions(text)):
+                for row_index, txn in enumerate(_parse_transactions(text, doc_id=entry.doc_id)):
+                    if txn.amount_low == 0.0 and txn.amount_high == 0.0:
+                        amount_parse_misses += 1
                     ticker = txn.ticker or self._resolve_ticker(txn.raw_block)
                     if ticker is None:
                         unresolved_ticker += 1
@@ -397,14 +479,29 @@ class HouseDisclosuresSource:
                         )
                     )
 
+        self._last_run_summary = {
+            "signals": len(signals),
+            "paper_filings_skipped": paper_filings_skipped,
+            "unmatched_filers": {
+                "no_candidate": unmatched_filers_no_candidate,
+                "ambiguous": unmatched_filers_ambiguous,
+            },
+            "unresolved_ticker": unresolved_ticker,
+            "unparseable_pdfs": unparseable_pdfs,
+            "amount_parse_misses": amount_parse_misses,
+        }
         logger.info(
             "house_disclosures historical walk: %d signal(s), %d paper filing(s) skipped, "
-            "%d filer(s) not in roster, %d unresolved ticker(s), %d unparseable PDF(s)",
+            "%d filer(s) not in roster (%d no_candidate, %d ambiguous), %d unresolved "
+            "ticker(s), %d unparseable PDF(s), %d amount-bracket parse miss(es)",
             len(signals),
             paper_filings_skipped,
             unmatched_filer_skipped,
+            unmatched_filers_no_candidate,
+            unmatched_filers_ambiguous,
             unresolved_ticker,
             unparseable_pdfs,
+            amount_parse_misses,
         )
         return signals
 
@@ -512,14 +609,60 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str | None:
     return text or None
 
 
-def _parse_transactions(text: str) -> list[_Transaction]:
+# How many lines before/after the asset-type-bracket line to include in the AMOUNT window (Task
+# 07, Scope B). Ticker/sentiment/date parsing keep using the narrower 2-line `block` (unchanged,
+# still correct for those fields); only the amount-bracket search widens, since wide/wrapped PDF
+# layouts can push the low or high figure a line further away than the immediate predecessor. The
+# window is CONSTRAINED so it can never cross into a NEIGHBORING transaction's rows (review F26);
+# see `_amount_window`.
+_AMOUNT_WINDOW_BEFORE = 2
+_AMOUNT_WINDOW_AFTER = 1
+
+
+def _amount_window(lines: list[str], index: int) -> str:
+    """The current transaction's OWN line span for amount-bracket parsing (review F26).
+
+    ``index`` is the transaction's asset-type (``[ST]``/``[OP]``) line. The window extends up to
+    ``_AMOUNT_WINDOW_BEFORE`` lines back and ``_AMOUNT_WINDOW_AFTER`` lines forward, but STOPS
+    before any line that belongs to a neighbouring transaction:
+
+      * backward — a line carrying ANOTHER asset-type bracket (a neighbour's ``[ST]``/``[OP]``);
+      * forward  — a line carrying another asset-type bracket OR a transaction date (a neighbour's
+        main row always starts with a date; this row's own high-figure continuation line — e.g.
+        ``[ST] $50,000`` — never does).
+
+    Without this guard the old fixed ``[index-2 : index+2]`` window spanned transaction boundaries,
+    so a row two lines from a smaller-bracket neighbour could inherit the neighbour's bracket.
+    """
+    start = index
+    for offset in range(1, _AMOUNT_WINDOW_BEFORE + 1):
+        candidate = index - offset
+        if candidate < 0 or _ASSET_TYPE_RE.search(lines[candidate]):
+            break
+        start = candidate
+    end = index
+    for offset in range(1, _AMOUNT_WINDOW_AFTER + 1):
+        candidate = index + offset
+        if candidate >= len(lines):
+            break
+        if _ASSET_TYPE_RE.search(lines[candidate]) or _DATE_RE.search(lines[candidate]):
+            break
+        end = candidate
+    return "\n".join(lines[start : end + 1])
+
+
+def _parse_transactions(text: str, *, doc_id: str = "") -> list[_Transaction]:
     """Parse all kept (stock/option, purchase/sale) transactions out of a PTR text layer.
 
     Each transaction spans the line carrying its asset-type bracket (``[ST]``/``[OP]``); the
     ticker may sit on that line or the line above it, so we join each bracket line with its
-    predecessor before parsing. A transaction is returned even when no ticker regex-matches
-    (``ticker=None``) — the LIVE caller filters these out; the HISTORICAL caller attempts entity
-    resolution and, failing that, still emits the signal (Task 04b).
+    predecessor before parsing (unchanged). A transaction is returned even when no ticker
+    regex-matches (``ticker=None``) — the LIVE caller filters these out; the HISTORICAL caller
+    attempts entity resolution and, failing that, still emits the signal (Task 04b).
+
+    ``doc_id`` (historical path only, best-effort) is passed through purely so an amount-parse
+    miss can be logged with the filing it came from (Task 07, Scope B); the live path does not
+    supply it and simply logs without a DocID.
     """
     lines = text.splitlines()
     transactions: list[_Transaction] = []
@@ -531,13 +674,18 @@ def _parse_transactions(text: str) -> list[_Transaction]:
         if asset_type not in _KEPT_ASSET_TYPES:
             continue
         block = f"{lines[index - 1]} {line}" if index > 0 else line
-        txn = _parse_transaction_block(block, asset_type)
+        amount_window = _amount_window(lines, index)
+        txn = _parse_transaction_block(
+            block, asset_type, amount_window=amount_window, doc_id=doc_id
+        )
         if txn is not None:
             transactions.append(txn)
     return transactions
 
 
-def _parse_transaction_block(block: str, asset_type: str) -> _Transaction | None:
+def _parse_transaction_block(
+    block: str, asset_type: str, *, amount_window: str, doc_id: str
+) -> _Transaction | None:
     sentiment = _transaction_sentiment(block)
     if sentiment == 0.0:
         return None
@@ -549,7 +697,7 @@ def _parse_transaction_block(block: str, asset_type: str) -> _Transaction | None
     ticker_match = _TICKER_RE.search(block)
     ticker = ticker_match.group(1).upper() if ticker_match else None
 
-    amount_low, amount_high = _parse_amount_range(block)
+    amount_low, amount_high = _parse_amount_range(amount_window, doc_id=doc_id)
     return _Transaction(
         ticker=ticker,
         raw_block=block,
@@ -562,16 +710,50 @@ def _parse_transaction_block(block: str, asset_type: str) -> _Transaction | None
 
 
 def _transaction_sentiment(block: str) -> float:
-    """Map the standalone single-letter transaction code to a sentiment (E=exchange -> skip)."""
-    match = _TXN_TYPE_RE.search(block)
-    if match is None:
-        return 0.0
-    code = match.group(1)
+    """Map the row's transaction code to a sentiment, reading the code POSITIONALLY (review F11).
+
+    The transaction code is a standalone ``P``/``S``/``E`` that occupies its OWN column: it sits
+    AFTER the asset name + ticker parenthetical and IMMEDIATELY BEFORE the first transaction date.
+    The old first-standalone-``[PSE]``-anywhere search matched inside asset names instead — an
+    ``S&P …`` purchase parsed as a SALE (the standalone ``S`` in "S&P" won), a ``J.P. Morgan…``
+    sale as a PURCHASE (the ``P`` in "J.P."), a ``(S)`` ticker inverted the side, and a stray
+    standalone ``E`` (e.g. "Series E") silently dropped a real P/S row as an exchange. We therefore
+    search ONLY the span between the ticker parenthetical (or the row start when the ticker sits
+    after the date, or is absent) and the first date, and take the code nearest the date.
+    ``E`` = exchange has no clean directional read, so it maps to 0.0 (skip) — but only when it is
+    the genuine code column, never because it appeared inside an asset name. ``None`` (no code in
+    the column) also maps to 0.0.
+    """
+    code = _transaction_code(block)
     if code == "P":
         return _BUY_SENTIMENT
     if code == "S":
         return _SELL_SENTIMENT
     return 0.0
+
+
+def _transaction_code(block: str) -> str | None:
+    """The row's standalone transaction code (``P``/``S``/``E``), read positionally (review F11).
+
+    Window = ``[end of the last ticker parenthetical that closes before the first date, first
+    date)``; when no ticker parenthetical closes before the date (the ticker can render AFTER the
+    date column, or be absent) the window starts at the row's beginning. Within that window we take
+    the standalone code NEAREST the date (the last match) — the code column always abuts the date,
+    so no other standalone ``[PSE]`` can sit between them. Returns ``None`` when the block has no
+    date to anchor on or no standalone code in the window.
+    """
+    date_match = _DATE_RE.search(block)
+    if date_match is None:
+        return None
+    window_end = date_match.start()
+    window_start = 0
+    for ticker_match in _TICKER_RE.finditer(block):
+        if ticker_match.end() <= window_end:
+            window_start = ticker_match.end()
+        else:
+            break
+    codes = _TXN_TYPE_RE.findall(block[window_start:window_end])
+    return codes[-1] if codes else None
 
 
 def _first_date(block: str) -> datetime | None:
@@ -585,13 +767,58 @@ def _first_date(block: str) -> datetime | None:
         return None
 
 
-def _parse_amount_range(block: str) -> tuple[float, float]:
-    match = _AMOUNT_RE.search(block)
-    if match is None:
+def _parse_amount_range(block: str, *, doc_id: str = "") -> tuple[float, float]:
+    """Extract the Clerk's amount bracket from ``block`` (Task 07 Scope B; review F26).
+
+    Collects every closed-bracket (see ``_BRACKET_PATTERNS``) and open-top match in ``block``,
+    then PREFERS THE MATCH NEAREST THE TRANSACTION LINE — the row's own asset-type (``[ST]``/
+    ``[OP]``) bracket — over the smallest bracket that happens to match. The old code returned the
+    first (smallest) bracket in ascending order, so when a widened window still held a smaller
+    NEIGHBOURING bracket it silently attributed that neighbour's amount to this row. The window is
+    now also constrained (see ``_amount_window``) so a neighbour's figures rarely reach this
+    search at all; the nearest-preference is the second line of defence and the tiebreak.
+
+    When more than one DISTINCT bracket matches, that ambiguity is LOGGED (a visible parse event,
+    never silently absorbed). ``(0.0, 0.0)`` remains STRICTLY the parse-miss sentinel — nothing
+    matched — logged with ``doc_id`` so misses stay visible per run.
+    """
+    anchor = _amount_anchor(block)
+    # (distance from the transaction line, low, high) for every bracket match anywhere in block.
+    candidates: list[tuple[int, float, float]] = []
+    for pattern, low, high in _BRACKET_PATTERNS:
+        for match in pattern.finditer(block):
+            candidates.append((abs(match.start() - anchor), low, high))
+    for match in _OPEN_TOP_RE.finditer(block):
+        candidates.append((abs(match.start() - anchor), _OPEN_TOP_LOW, _OPEN_TOP_HIGH))
+
+    if not candidates:
+        logger.info(
+            "house_disclosures: amount-bracket parse miss (doc_id=%s)",
+            doc_id or "unknown",
+        )
         return (0.0, 0.0)
-    low = _to_float(match.group(1).replace(",", ""))
-    high = _to_float(match.group(2).replace(",", ""))
+
+    distinct = {(low, high) for _distance, low, high in candidates}
+    if len(distinct) > 1:
+        logger.warning(
+            "house_disclosures: ambiguous amount bracket, choosing the one nearest the "
+            "transaction line (doc_id=%s, candidates=%s)",
+            doc_id or "unknown",
+            sorted(distinct),
+        )
+    # Nearest the transaction line wins; the smaller bracket is only a stable tiebreak.
+    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
+    _distance, low, high = candidates[0]
     return (low, high)
+
+
+def _amount_anchor(block: str) -> int:
+    """Where the transaction line sits in ``block`` for nearest-bracket scoring (review F26): the
+    position of the row's own asset-type (``[ST]``/``[OP]``) bracket, which always abuts the
+    amount cell. Falls back to the block start when no asset-type bracket is present (e.g. a
+    direct ``_parse_amount_range`` call on a bare row string)."""
+    asset_match = _ASSET_TYPE_RE.search(block)
+    return asset_match.start() if asset_match else 0
 
 
 def _amount_weight(amount_low: float, amount_high: float) -> float:

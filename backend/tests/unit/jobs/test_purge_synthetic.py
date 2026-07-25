@@ -2,8 +2,10 @@
 
 NEVER touches a real DB: ``build_dependencies`` is monkeypatched to return a lightweight deps
 backed by the same in-memory wiring production uses (ProjectingEventStore + InMemoryReadModel),
-seeded with REAL and SYNTHETIC signals. We assert the dry run changes nothing, ``--confirm``
-makes the read-model / live view real-only, and the summaries report the right counts.
+seeded with REAL, BACKFILLED, and SYNTHETIC signals. We assert the dry run changes nothing,
+``--confirm`` purges ONLY SYNTHETIC (task-08: BACKFILLED must survive untouched), and the
+summaries report REAL/BACKFILLED/SYNTHETIC counts separately alongside retained-by-provenance
+counts.
 """
 
 import asyncio
@@ -13,7 +15,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from tests.conftest import FixedClock, SignalFactory
-from trading.application.data_integrity import non_real_signals
+from trading.application.data_integrity import purge_eligible
 from trading.application.ports.event_store import EventStorePort
 from trading.application.ports.read_model import ReadModelPort
 from trading.application.projections import signals_from_events
@@ -123,14 +125,14 @@ async def test_dry_run_changes_nothing(
     assert rc == 0
     # Read side is untouched: both synthetic signals are still present.
     after = list(await read_model.all_signals())
-    assert len(non_real_signals(after)) == 2
+    assert len(purge_eligible(after)) == 2
     assert len(after) == 4
     out = capsys.readouterr().out
     assert "DRY-RUN" in out
     assert "SYNTHETIC signals identified for purge: 2" in out
 
 
-async def test_confirm_makes_read_model_real_only(
+async def test_confirm_makes_read_model_synthetic_free(
     monkeypatch: pytest.MonkeyPatch,
     clock: FixedClock,
     make_signal: SignalFactory,
@@ -144,12 +146,13 @@ async def test_confirm_makes_read_model_real_only(
 
     assert rc == 0
     after = list(await read_model.all_signals())
-    # The live/read-model view is now REAL-only: only the two real signals survive.
-    assert non_real_signals(after) == []
+    # The live/read-model view is now synthetic-free: only the two real signals survive (no
+    # BACKFILLED was seeded here — that mixed-provenance case is covered separately below).
+    assert purge_eligible(after) == []
     assert {s.id for s in after} == {real_a.id, real_b.id}
     out = capsys.readouterr().out
     assert "purged 2 synthetic signal(s)" in out
-    assert "read side is now REAL-only." in out
+    assert "read side is now SYNTHETIC-free (REAL + BACKFILLED retained)." in out
 
 
 async def test_confirm_preserves_append_only_event_log(
@@ -167,6 +170,76 @@ async def test_confirm_preserves_append_only_event_log(
     # The event log is the append-only system of record: nothing is deleted from it. All four
     # signal.received events (real AND synthetic) remain on the log; only the read side changed.
     assert len(await store.read_all()) == before_count
+
+
+async def test_confirm_purges_synthetic_and_legacy_but_retains_real_and_backfilled(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FixedClock,
+    make_signal: SignalFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """task-08 acceptance: mixed-provenance regression fixture.
+
+    REAL + BACKFILLED + SYNTHETIC + one legacy event with NO provenance key at all. The purge
+    must remove ONLY the SYNTHETIC signal and the legacy (fail-closed-to-SYNTHETIC) event,
+    retaining REAL and BACKFILLED untouched. All four counts are asserted exactly.
+    """
+    store, read_model = await _seed(clock)
+    real = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.REAL)
+    backfilled = make_signal(source_type=SignalSource.CONTRACT, provenance=Provenance.BACKFILLED)
+    synthetic = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.SYNTHETIC)
+    await record_signals(
+        event_store=store,
+        clock=clock,
+        signals=[real, backfilled, synthetic],
+        correlation_id="seed",
+    )
+    # A legacy event predating the `provenance` field: no such key in its payload at all. The
+    # rest of the system treats this as SYNTHETIC (fail-closed default), so it must also be
+    # purged — exercising `_is_synthetic_signal_event`'s payload-default path directly, since
+    # `record_signals`/`signal_payload` always stamp a provenance key for a live `Signal`.
+    legacy_payload: dict[str, object] = {
+        "signal_id": "s-legacy",
+        "created_at": clock.now().isoformat(),
+        "source_type": SignalSource.DISCLOSED_TRADE.value,
+        "ticker": "AAPL",
+        "politician_id": None,
+        "sentiment": 0.5,
+        "politician_weight": 1.0,
+        "source_reliability": 1.0,
+        "raw_payload": {},
+        # no "provenance" key
+    }
+    await store.append(
+        DomainEvent(
+            stream_id="signal-s-legacy",
+            event_type=EventType.SIGNAL_RECEIVED,
+            payload=legacy_payload,
+            occurred_at=clock.now(),
+            correlation_id="seed-legacy",
+        )
+    )
+    _patch_build(monkeypatch, store, read_model)
+
+    before = list(await read_model.all_signals())
+    assert len(before) == 4  # sanity: all four rows landed in the read model pre-purge
+
+    rc = await purge_synthetic.run_purge(confirm=True)
+
+    assert rc == 0
+    after = list(await read_model.all_signals())
+    assert {s.id for s in after} == {real.id, backfilled.id}
+    # All four counts, asserted exactly: 1 REAL, 1 BACKFILLED retained; 2 SYNTHETIC (explicit +
+    # legacy fail-closed) purged.
+    real_after = [s for s in after if s.provenance is Provenance.REAL]
+    backfilled_after = [s for s in after if s.provenance is Provenance.BACKFILLED]
+    assert len(real_after) == 1
+    assert len(backfilled_after) == 1
+    assert len(purge_eligible(before)) == 2  # explicit SYNTHETIC + legacy, pre-purge
+    assert purge_eligible(after) == []  # nothing purge-eligible survives
+    out = capsys.readouterr().out
+    assert "purged 2 synthetic signal(s)" in out
+    assert "read side now has 1 real, 1 backfilled (retained, untouched), 0 synthetic" in out
 
 
 class _SyncEventStore:
@@ -241,7 +314,7 @@ def test_main_dry_run_returns_zero(
 
     # No --confirm: dry run, exit 0, read side unchanged (both synthetic signals remain).
     assert purge_synthetic.main([]) == 0
-    assert len(non_real_signals(asyncio.run(deps.read_model.all_signals()))) == 2
+    assert len(purge_eligible(asyncio.run(deps.read_model.all_signals()))) == 2
 
 
 def test_main_confirm_returns_zero_and_purges(
@@ -251,7 +324,7 @@ def test_main_confirm_returns_zero_and_purges(
     monkeypatch.setattr(purge_synthetic, "build_dependencies", lambda _settings: deps)
 
     assert purge_synthetic.main(["--confirm"]) == 0
-    assert non_real_signals(asyncio.run(deps.read_model.all_signals())) == []
+    assert purge_eligible(asyncio.run(deps.read_model.all_signals())) == []
 
 
 def test_main_returns_one_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,3 +333,55 @@ def test_main_returns_one_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(purge_synthetic, "build_dependencies", _boom)
     assert purge_synthetic.main([]) == 1
+
+
+async def test_confirm_retries_and_keeps_events_appended_during_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FixedClock,
+    make_signal: SignalFactory,
+) -> None:
+    """F21: an event the live service appends DURING the rebuild must not be silently dropped.
+
+    The rebuild TRUNCATEs and replays a snapshot; if the log grows mid-pass the newly appended
+    event's rows would vanish. The confirm path re-reads the log after each rebuild and RETRIES
+    with the fuller snapshot until it converges, so the concurrently-appended signal survives.
+    """
+    inner_store = InMemoryEventStore(clock)
+    read_model = InMemoryReadModel()
+    # Seed the log directly (plain store; the BEFORE report reads it via signals_from_events).
+    real = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.REAL)
+    synthetic = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.SYNTHETIC)
+    await record_signals(
+        event_store=inner_store, clock=clock, signals=[real, synthetic], correlation_id="seed"
+    )
+
+    # A REAL signal that the "live service" appends WHILE the first rebuild pass is running.
+    concurrent = make_signal(source_type=SignalSource.CONTRACT, provenance=Provenance.REAL)
+    original_rebuild = read_model.rebuild
+    injected = {"done": False}
+
+    async def rebuild_with_growth(events: Sequence[StoredEvent]) -> None:
+        if not injected["done"]:
+            injected["done"] = True
+            await record_signals(
+                event_store=inner_store,
+                clock=clock,
+                signals=[concurrent],
+                correlation_id="concurrent-append",
+            )
+        await original_rebuild(events)
+
+    monkeypatch.setattr(read_model, "rebuild", rebuild_with_growth)
+    _patch_build(monkeypatch, inner_store, read_model)
+
+    rc = await purge_synthetic.run_purge(confirm=True)
+
+    assert rc == 0
+    assert injected["done"]  # the growth WAS injected mid-rebuild
+    after_ids = {s.id for s in await read_model.all_signals()}
+    # The concurrently-appended event was NOT dropped by the truncate+replay: it only survives
+    # because the confirm path detected the grown log and retried with the fuller snapshot (a
+    # single non-retrying rebuild would have rebuilt from the 2-event snapshot and lost it).
+    assert concurrent.id in after_ids
+    assert real.id in after_ids
+    assert synthetic.id not in after_ids  # still purged

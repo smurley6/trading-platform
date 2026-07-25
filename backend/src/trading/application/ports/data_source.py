@@ -1,6 +1,6 @@
 """Data source port: every external provider is an adapter behind this (FR-ING-1)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -63,4 +63,26 @@ class FilterableHistoricalSource(Protocol):
 
     def filter_description(self) -> str | None:
         """A short human-readable description of the ACTIVE filter, or ``None`` if disabled."""
+        ...
+
+
+@runtime_checkable
+class SummarizingHistoricalSource(Protocol):
+    """Optional capability: a historical source that tracks per-run diagnostic counters beyond
+    the Signals it returns (Task 07, docs/RESEARCH-PLAN.md).
+
+    Kept SEPARATE from :class:`HistoricalDataSourcePort` for the same reason as
+    :class:`FilterableHistoricalSource`: ``fetch_historical`` returns ``Sequence[Signal]`` for
+    EVERY historical source, so a source-specific diagnostic (e.g. House disclosures' roster-match
+    and amount-bracket-parse counters) cannot live on that shared return type without breaking
+    every other implementer. Instead a source MAY additionally implement this capability,
+    detected via ``isinstance`` (no ``hasattr`` probing) — the job/use case that drives a backfill
+    run checks for it and folds ``last_run_summary()`` into the operator-facing report/event.
+    ``HouseDisclosuresSource`` is the first implementer: ``unmatched_filers`` (by reason:
+    ``no_candidate``/``ambiguous``) and ``amount_parse_misses``.
+    """
+
+    def last_run_summary(self) -> Mapping[str, object] | None:
+        """Diagnostic counters from the most recent ``fetch_historical`` call, or ``None`` if it
+        has not run yet on this instance."""
         ...

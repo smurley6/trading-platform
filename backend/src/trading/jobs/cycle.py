@@ -77,8 +77,48 @@ async def run_cycle() -> None:
             result.ingestion.correlation_id,
             extra={"correlation_id": result.evaluation.correlation_id},
         )
+        # Close the async-fill loop from the cron itself (review F14): with the poller/stream off
+        # in the documented cron deployment, no fill of any cron-placed order was ever recorded and
+        # the same drift was re-appended every run. Order-sync ingests the PRIOR run's fills (this
+        # run's orders fill at the open, after the pre-open cron exits) and reconcile then diffs the
+        # updated projection against the one broker book, deduping unchanged drift. Best-effort: a
+        # failure here must not fail the ingest/evaluate cycle that already committed.
+        await _sync_and_reconcile(deps)
     finally:
         await _teardown(deps)
+
+
+async def _sync_and_reconcile(deps: AppDeps) -> None:
+    """Run every sleeve's order-sync then the pool reconcile, isolating any failure.
+
+    Each step is independent so one broker hiccup cannot strand the others or fail the cron whose
+    ingest/evaluate work is already durably recorded.
+    """
+    for sync in deps.order_syncs:
+        try:
+            sync_report = await sync.execute()
+            logger.info(
+                "cron order-sync: sleeve=%s fills=%d status_changes=%d checked=%d failed=%d",
+                sync_report.sleeve_id,
+                sync_report.fills_emitted,
+                sync_report.status_changes_emitted,
+                sync_report.checked_orders,
+                sync_report.failed_orders,
+            )
+        except Exception:
+            logger.exception("cron order-sync failed")
+    for reconciler in deps.reconcilers:
+        try:
+            recon_report = await reconciler.execute()
+            logger.info(
+                "cron reconcile: sleeve=%s drift_count=%d checked_positions=%d checked_orders=%d",
+                recon_report.sleeve_id,
+                len(recon_report.drifts),
+                recon_report.checked_positions,
+                recon_report.checked_orders,
+            )
+        except Exception:
+            logger.exception("cron reconcile failed")
 
 
 def main() -> int:

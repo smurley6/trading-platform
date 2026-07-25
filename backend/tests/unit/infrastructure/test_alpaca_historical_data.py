@@ -1,13 +1,15 @@
 """AlpacaHistoricalData against a mock HTTP transport — request shaping, daily-bar parsing
-into a PriceSeries, pagination across next_page_token, and error handling. No network."""
+into a PriceSeries, pagination across next_page_token, error handling, the Task 09 end-clamp,
+and the optional feed override. No network."""
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 import pytest
 
+from tests.conftest import FixedClock
 from trading.infrastructure.market_data.alpaca_history import (
     AlpacaHistoricalData,
     AlpacaHistoricalDataError,
@@ -144,12 +146,52 @@ async def test_empty_results() -> None:
     assert series.symbols() == ()
 
 
-async def test_auth_failure_raises() -> None:
+async def test_401_mentions_check_credentials() -> None:
+    # 401 is a genuine credential problem -- "check credentials" is accurate and kept (Task 09).
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, text="forbidden")
+        return httpx.Response(401, text="unauthorized")
 
-    with pytest.raises(AlpacaHistoricalDataError, match="auth failed"):
+    with pytest.raises(AlpacaHistoricalDataError, match="check credentials") as excinfo:
         await _provider(handler).price_series(["AAPL"], _START, _END)
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.body == "unauthorized"
+
+
+async def test_403_propagates_real_body_not_check_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Task 09: a 403 is NOT assumed to be a credentials problem (it may be a subscription/
+    # entitlement error, e.g. Alpaca's "subscription does not permit querying recent SIP data").
+    # The real body must propagate verbatim -- the old "check credentials" wording masked this.
+    body = '{"message":"subscription does not permit querying recent SIP data"}'
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text=body)
+
+    with (
+        caplog.at_level("ERROR"),
+        pytest.raises(AlpacaHistoricalDataError) as excinfo,
+    ):
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert "check credentials" not in str(excinfo.value)
+    assert body in str(excinfo.value)
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.body == body
+    # Logged at ERROR before raising.
+    assert any(body in record.message for record in caplog.records)
+
+
+async def test_error_body_truncated_to_500_chars() -> None:
+    huge_body = "x" * 2000
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text=huge_body)
+
+    with pytest.raises(AlpacaHistoricalDataError) as excinfo:
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+    assert len(excinfo.value.body) == 500
+    assert excinfo.value.body == huge_body[:500]
 
 
 async def test_server_error_raises() -> None:
@@ -171,3 +213,241 @@ async def test_naive_datetimes_are_serialized_as_utc() -> None:
     naive_end = datetime(2026, 1, 3)  # noqa: DTZ001 - deliberately naive input
     await _provider(handler).price_series(["AAPL"], naive_start, naive_end)
     assert captured["start"] == "2026-01-01T00:00:00Z"
+
+
+# --- Task 09: header-construction regression (spec item 4) -----------------------------------
+
+
+async def test_header_construction_pins_exact_alpaca_auth_headers() -> None:
+    """Pins the EXACT header names/values sent, from Settings-shaped key_id/secret_key -- the
+    probe (task spec) already validated this behavior; this regression test pins it so a future
+    refactor cannot silently rename/drop the auth headers."""
+    captured_headers: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers["APCA-API-KEY-ID"] = request.headers.get("APCA-API-KEY-ID")
+        captured_headers["APCA-API-SECRET-KEY"] = request.headers.get("APCA-API-SECRET-KEY")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="PKTESTKEYID123",
+        secret_key="test-secret-value-456",
+        base_url="https://data.alpaca.markets",
+    )
+    await provider.price_series(["AAPL"], _START, _END)
+
+    assert captured_headers == {
+        "APCA-API-KEY-ID": "PKTESTKEYID123",
+        "APCA-API-SECRET-KEY": "test-secret-value-456",
+    }
+
+
+# --- Task 09: end clamping ---------------------------------------------------------------------
+
+
+async def test_future_end_clamps_to_now_minus_16_minutes_under_fixed_clock() -> None:
+    clock = FixedClock(datetime(2026, 7, 6, 12, 0, tzinfo=UTC))
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["end"] = request.url.params.get("end")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+        clock=clock,
+    )
+    future_end = datetime(2026, 9, 26, 23, 5, 37, tzinfo=UTC)  # the app-shaped 403 case
+    await provider.price_series(["AAPL"], _START, future_end)
+
+    expected = clock.now() - timedelta(minutes=16)
+    assert captured["end"] == expected.isoformat().replace("+00:00", "Z")
+
+
+async def test_past_end_before_clamp_boundary_is_unchanged() -> None:
+    clock = FixedClock(datetime(2026, 7, 6, 12, 0, tzinfo=UTC))
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["end"] = request.url.params.get("end")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+        clock=clock,
+    )
+    # Well before now - 16min: the requested end wins the min(), unclamped.
+    await provider.price_series(["AAPL"], _START, _END)
+    assert captured["end"] == "2026-01-03T00:00:00Z"
+
+
+async def test_end_exactly_at_clamp_boundary_is_unchanged() -> None:
+    clock = FixedClock(datetime(2026, 7, 6, 12, 0, tzinfo=UTC))
+    boundary = clock.now() - timedelta(minutes=16)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["end"] = request.url.params.get("end")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+        clock=clock,
+    )
+    await provider.price_series(["AAPL"], _START, boundary)
+    assert captured["end"] == boundary.isoformat().replace("+00:00", "Z")
+
+
+async def test_no_injected_clock_falls_back_to_wall_clock_and_still_clamps() -> None:
+    # No clock injected: falls back to datetime.now(UTC) directly (documented decision). A
+    # far-future requested end must still be clamped to (real) now - 16min, not sent verbatim.
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["end"] = request.url.params.get("end")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+    )
+    far_future = datetime(2099, 1, 1, tzinfo=UTC)
+    await provider.price_series(["AAPL"], _START, far_future)
+
+    sent_end = datetime.fromisoformat(str(captured["end"]).replace("Z", "+00:00"))
+    assert sent_end < far_future
+    assert sent_end < datetime.now(UTC)
+
+
+# --- Task 09: optional feed override -----------------------------------------------------------
+
+
+async def test_no_feed_setting_sends_no_feed_param() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["has_feed"] = "feed" in request.url.params
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    await _provider(handler).price_series(["AAPL"], _START, _END)
+    assert captured["has_feed"] is False
+
+
+async def test_feed_setting_passed_through_as_query_param() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["feed"] = request.url.params.get("feed")
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+        feed="iex",
+    )
+    await provider.price_series(["AAPL"], _START, _END)
+    assert captured["feed"] == "iex"
+
+
+# --- 429 rate-limit retry ---------------------------------------------------------------
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the module's asyncio.sleep with a recorder; returns the recorded delays."""
+    from types import SimpleNamespace
+
+    from trading.infrastructure.market_data import alpaca_history
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(alpaca_history, "asyncio", SimpleNamespace(sleep=fake_sleep))
+    return delays
+
+
+async def test_429_retries_with_exponential_backoff_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, json={"message": "too many requests."})
+        return httpx.Response(200, json=_BARS)
+
+    series = await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert calls["n"] == 3
+    assert delays == [2.0, 4.0]
+    assert series.price_at("AAPL", datetime(2026, 1, 1, 12, tzinfo=UTC)) == Decimal("100.5")
+
+
+async def test_429_honors_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                429, json={"message": "too many requests."}, headers={"Retry-After": "7"}
+            )
+        return httpx.Response(200, json=_BARS)
+
+    await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert delays == [7.0]
+
+
+async def test_429_exhausted_retries_raises_with_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={"message": "too many requests."})
+
+    with pytest.raises(AlpacaHistoricalDataError) as excinfo:
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert excinfo.value.status_code == 429
+    # 6 retries -> 7 total requests; the final 429 is raised, not slept on.
+    assert calls["n"] == 7
+    assert len(delays) == 6
+    # Exponential and capped at 60s.
+    assert delays == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+
+async def test_non_429_errors_are_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    delays = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, text="boom")
+
+    with pytest.raises(AlpacaHistoricalDataError):
+        await _provider(handler).price_series(["AAPL"], _START, _END)
+
+    assert calls["n"] == 1
+    assert delays == []

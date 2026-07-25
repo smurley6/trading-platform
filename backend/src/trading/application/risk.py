@@ -44,10 +44,14 @@ class RiskContext:
     peak_equity: Decimal
     current_position_value: Decimal  # market value already held in this symbol (the shared book)
     price: Decimal
-    # Spendable buying power remaining in the shared pool. 0 => guard disabled (unknown/simulator),
-    # so pre-existing callers and the paper simulator are unaffected. When >0 (a live account) a
-    # BUY is capped so combined orders can't over-commit the one shared account.
-    remaining_buying_power: Decimal = Decimal("0")
+    # Spendable buying power remaining in the shared pool. `None` => UNKNOWN (guard disabled), the
+    # default, so pre-existing callers and the readiness probe are unaffected. A real Decimal is a
+    # KNOWN reserve and the guard is active: a positive value caps a BUY so combined orders can't
+    # over-commit the one shared account; ZERO is a real exhausted reserve (fully invested) that
+    # floors the BUY to zero → a clean REJECT, NOT a disabled guard. (review F17: 0 previously
+    # doubled as the "unknown" sentinel, so a fully-invested account bypassed the guard, the BUY
+    # reached the broker, and its 403 aborted the whole cycle including risk-reducing SELLs.)
+    remaining_buying_power: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,9 +114,12 @@ class RiskGate:
                 )
             # Shared-pool guard: never let a BUY (alone or combined with earlier BUYs in the same
             # cycle, once the caller decrements this) exceed the spendable buying power of the one
-            # shared account. Skipped when unknown/zero (simulator/back-compat).
+            # shared account. `None` = unknown reserve → skip (simulator/back-compat). A KNOWN
+            # reserve is enforced even at exactly 0: an exhausted account floors the BUY to zero,
+            # which the `approved <= 0` check below turns into a clean REJECT — no broker call, no
+            # 403, no aborted cycle (review F17).
             if (
-                context.remaining_buying_power > 0
+                context.remaining_buying_power is not None
                 and approved * context.price > context.remaining_buying_power
             ):
                 approved = _floor_quantity(context.remaining_buying_power / context.price)

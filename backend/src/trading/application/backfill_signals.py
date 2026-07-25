@@ -153,6 +153,12 @@ class BackfillSignals:
         if not dry_run and new_signals:
             # One event per signal so occurred_at is that signal's own disclosure timestamp
             # (record_signals stamps every event in a call with the single override passed).
+            # Mark each uid seen IMMEDIATELY after its own append, not once for the whole batch
+            # (review F20): a crash/OOM/connection drop partway through a multi-thousand-signal
+            # run would otherwise leave appended-but-unmarked events, and the documented recovery
+            # (re-run the window) would re-append every one of them — permanently, since the log
+            # is append-only. `mark` is idempotent, so per-signal marking is safe on a re-run and
+            # bounds the duplication window to the single in-flight signal at the crash instant.
             for signal in new_signals:
                 await record_signals(
                     event_store=self._event_store,
@@ -161,7 +167,7 @@ class BackfillSignals:
                     correlation_id=correlation_id,
                     occurred_at=signal.created_at,
                 )
-            await self._seen.mark(self._source.name, [_uid(s) for s in new_signals])
+                await self._seen.mark(self._source.name, [_uid(signal)])
             committed_correlation = correlation_id
 
         return BackfillReport(

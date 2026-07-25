@@ -11,6 +11,7 @@ from sqlalchemy import Row, func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from trading.application.ports.event_store import ExpectedVersionError
 from trading.domain.events import DomainEvent, StoredEvent
 from trading.infrastructure.persistence.tables import events_table
 
@@ -31,43 +32,67 @@ class PostgresEventStore:
         self._engine = engine
         self._on_append = on_append
 
-    async def append(self, event: DomainEvent) -> StoredEvent:
+    async def append(
+        self, event: DomainEvent, *, expected_version: int | None = None
+    ) -> StoredEvent:
+        if expected_version is not None:
+            # Opt-in compare-and-set for the fill writers (review F9): insert at exactly
+            # expected_version+1 and DO NOT retry on a taken slot — surface the conflict so the
+            # caller re-reads instead of double-recording. The normal path (below) is untouched.
+            return await self._append_at(event, expected_version + 1, retry_on_conflict=False)
         for _ in range(_APPEND_RETRIES):
             try:
-                async with self._engine.begin() as conn:
-                    next_seq = await conn.scalar(
-                        select(func.coalesce(func.max(events_table.c.seq), 0) + 1).where(
-                            events_table.c.stream_id == event.stream_id
-                        )
-                    )
-                    assert next_seq is not None
-                    result = await conn.execute(
-                        insert(events_table)
-                        .values(
-                            event_id=event.event_id,
-                            stream_id=event.stream_id,
-                            seq=next_seq,
-                            event_type=event.event_type,
-                            schema_version=event.schema_version,
-                            occurred_at=event.occurred_at,
-                            payload=event.payload,
-                            correlation_id=event.correlation_id,
-                        )
-                        .returning(events_table.c.id, events_table.c.recorded_at)
-                    )
-                    row = result.one()
-                    stored = StoredEvent(
-                        event=event, seq=int(next_seq), recorded_at=row.recorded_at
-                    )
-                    if self._on_append is not None:
-                        # Same transaction: read-model rows commit with the event, or not at all.
-                        await self._on_append(conn, stored, int(row.id))
-                    return stored
+                next_seq = await self._next_seq(event.stream_id)
+                return await self._append_at(event, next_seq, retry_on_conflict=True)
             except IntegrityError:
                 continue  # another writer claimed this seq; retry with a fresh one
         raise EventStoreConcurrencyError(
             f"failed to append to stream '{event.stream_id}' after {_APPEND_RETRIES} attempts"
         )
+
+    async def _next_seq(self, stream_id: str) -> int:
+        async with self._engine.connect() as conn:
+            next_seq = await conn.scalar(
+                select(func.coalesce(func.max(events_table.c.seq), 0) + 1).where(
+                    events_table.c.stream_id == stream_id
+                )
+            )
+        assert next_seq is not None
+        return int(next_seq)
+
+    async def _append_at(
+        self, event: DomainEvent, seq: int, *, retry_on_conflict: bool
+    ) -> StoredEvent:
+        try:
+            async with self._engine.begin() as conn:
+                result = await conn.execute(
+                    insert(events_table)
+                    .values(
+                        event_id=event.event_id,
+                        stream_id=event.stream_id,
+                        seq=seq,
+                        event_type=event.event_type,
+                        schema_version=event.schema_version,
+                        occurred_at=event.occurred_at,
+                        payload=event.payload,
+                        correlation_id=event.correlation_id,
+                    )
+                    .returning(events_table.c.id, events_table.c.recorded_at)
+                )
+                row = result.one()
+                stored = StoredEvent(event=event, seq=seq, recorded_at=row.recorded_at)
+                if self._on_append is not None:
+                    # Same transaction: read-model rows commit with the event, or not at all.
+                    await self._on_append(conn, stored, int(row.id))
+                return stored
+        except IntegrityError:
+            if retry_on_conflict:
+                raise  # caller's loop reallocates a fresh seq
+            # CAS path: the (stream_id, seq) slot was taken by a racing writer between the
+            # caller's read and this insert. Seqs are gap-free, so expected_version is stale.
+            raise ExpectedVersionError(
+                f"stream '{event.stream_id}' advanced past expected version {seq - 1}"
+            ) from None
 
     async def read_stream(self, stream_id: str) -> Sequence[StoredEvent]:
         return await self._read(events_table.c.stream_id == stream_id)

@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from trading.application.evaluate_signals import EvaluateSignals
+from trading.application.form4_corroboration import (
+    ONE_OFF_CONVICTION_CAP,
+    collapse_form4_signals,
+    form4_oneoff_capped_tickers,
+)
 from trading.application.ports.broker import BrokerOrder
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.read_model import ReadModelPort
@@ -87,9 +92,15 @@ class ScanProposals:
         self._top_n = top_n
 
     async def execute(self) -> ProposalScan:
-        window = await self._read_model.signals_in_window(
+        raw_window = await self._read_model.signals_in_window(
             now=self._clock.now(), window_days=self._window_days
         )
+        # Form 4 episode dedupe (task-11): repeated filings from one filer stream are one
+        # corroboration vote, so both the strategy and the predicted-candidate scan below score
+        # deduped signals. The one-off gate below is derived from the RAW window (its trailing-7d
+        # filer count), independently of the corroboration-window dedupe.
+        window = collapse_form4_signals(raw_window)
+        capped_tickers = form4_oneoff_capped_tickers(raw_window, now=self._clock.now())
         held = await self._read_model.held_positions()
         portfolio = Portfolio(
             cash=Decimal("0"),
@@ -99,6 +110,10 @@ class ScanProposals:
         # Proposals: the strategy's actionable TRADE-tier targets vs current holdings.
         proposals: list[ProposalCandidate] = []
         for sp in self._strategy.evaluate(window, portfolio):
+            # One-off WATCH gate: a lone Form 4 buy never auto-proposes a trade. It re-surfaces as
+            # a WATCH-tier predicted candidate below (capped to ONE_OFF_CONVICTION_CAP there).
+            if sp.target.symbol in capped_tickers and sp.target.quantity > 0:
+                continue
             current = portfolio.quantity(sp.target.symbol)
             delta = sp.target.quantity - current
             if delta == 0:
@@ -134,12 +149,23 @@ class ScanProposals:
                 thresholds=self._thresholds,
                 params=self._conviction_params,
             )
-            if result.action is ConvictionAction.WATCH:
+            score = result.score
+            action = result.action
+            if ticker in capped_tickers:
+                # One-off WATCH gate: a lone Form 4 buy is capped below TRADE, so a formula-strong
+                # one-off lands here as WATCH instead of proposing a trade.
+                score = min(score, ONE_OFF_CONVICTION_CAP)
+                action = (
+                    ConvictionAction.WATCH
+                    if score >= self._thresholds.watch
+                    else ConvictionAction.IGNORE
+                )
+            if action is ConvictionAction.WATCH:
                 predicted.append(
                     PredictedCandidate(
                         symbol=ticker,
-                        conviction_score=result.score,
-                        action=result.action.value,
+                        conviction_score=score,
+                        action=action.value,
                         distinct_source_types=tuple(s.value for s in result.distinct_source_types),
                         contributing_signal_ids=result.contributing_signal_ids,
                     )

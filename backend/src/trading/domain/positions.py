@@ -107,3 +107,25 @@ class Portfolio:
             else:
                 positions.pop(fill.symbol, None)
         return Portfolio(cash=cash, positions=positions)
+
+    def apply_fill_tolerant(self, fill: Fill) -> tuple["Portfolio", bool]:
+        """Like `apply_fill`, but for the PROJECTION / system-of-record view: an oversell (a
+        SELL exceeding the held quantity) is CLAMPED to flat instead of raising.
+
+        Fills can legitimately arrive out of order in the projection — e.g. a SELL synced before
+        its BUY under Alpaca's newest-first order list, or spanning two catch-up runs (review
+        F7). The strict `apply_fill` guards the LIVE trading engine's math and is unchanged; this
+        variant keeps the append transaction from aborting (which permanently wedged order sync).
+        Returns `(portfolio, clamped)` where `clamped` is True when the SELL was truncated to the
+        held quantity (only the shares actually held are removed; the phantom remainder is
+        dropped). BUYs and valid SELLs behave exactly like `apply_fill`.
+        """
+        if fill.side is OrderSide.SELL:
+            existing = self.positions.get(fill.symbol)
+            held = existing.quantity if existing else Decimal("0")
+            if fill.quantity > held:
+                positions = dict(self.positions)
+                positions.pop(fill.symbol, None)
+                cash = self.cash + fill.price * held - fill.fees
+                return Portfolio(cash=cash, positions=positions), True
+        return self.apply_fill(fill), False

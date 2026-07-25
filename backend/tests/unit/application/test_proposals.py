@@ -110,6 +110,47 @@ async def test_none_ticker_signal_excluded_from_scan(
     assert None not in seen
 
 
+async def test_predicted_candidate_excludes_benched_source_types(
+    clock: FixedClock, make_signal: SignalFactory
+) -> None:
+    """The predicted-candidate path reports only source types with positive reliability. A
+    benched (0.0-reliability) signal of a DIFFERENT source type sharing the ticker must neither
+    appear in ``distinct_source_types`` nor lift the WATCH-tier score (task-10 close-out).
+
+    Both the score used for tiering and the reported source types flow from
+    ``compute_conviction``, so the domain's benched-source exclusion governs this path."""
+    from trading.domain.signals import SignalSource
+
+    # An active WATCH-tier signal (1.0 * 2.0 * 1.0 * scale(25) = 50 -> WATCH) plus a benched
+    # signal of a different source type on the same ticker.
+    signals = [
+        make_signal(
+            ticker="NOC",
+            sentiment=1.0,
+            politician_weight=2.0,
+            source_type=SignalSource.DISCLOSED_TRADE,
+        ),
+        make_signal(
+            ticker="NOC",
+            sentiment=1.0,
+            politician_weight=2.0,
+            source_reliability=0.0,
+            source_type=SignalSource.STATEMENT,
+        ),
+    ]
+    active_only = [signals[0]]
+
+    scan = await _scanner(_FakeReadModel(signals), clock).execute()
+    baseline = await _scanner(_FakeReadModel(active_only), clock).execute()
+
+    assert [p.symbol for p in scan.predicted] == ["NOC"]
+    predicted = scan.predicted[0]
+    # Benched STATEMENT must not appear; only the active DISCLOSED_TRADE type is reported.
+    assert predicted.distinct_source_types == ("disclosed_trade",)
+    # Score is unchanged vs. the active signal alone — no corroboration lift from the benched one.
+    assert predicted.conviction_score == pytest.approx(baseline.predicted[0].conviction_score)
+
+
 async def test_held_target_is_not_re_proposed(
     clock: FixedClock, make_signal: SignalFactory
 ) -> None:
@@ -126,6 +167,53 @@ async def test_held_target_is_not_re_proposed(
     scan = await _scanner(_FakeReadModel(signals, held), clock).execute()
     assert scan.proposals == ()
     assert "LMT" not in {p.symbol for p in scan.predicted}
+
+
+def _form4_buy(
+    sid: str, *, clock: FixedClock, ticker: str = "LUV", owner: str = "OWNER A", accession: str
+) -> Signal:
+    """A Form 4 purchase strong enough to clear TRADE alone: 0.5 * 10 * 0.6 * 25 = 75."""
+    from trading.domain.provenance import Provenance
+    from trading.domain.signals import SignalSource
+
+    return Signal(
+        id=sid,
+        created_at=clock.now(),
+        source_type=SignalSource.DISCLOSED_TRADE,
+        ticker=ticker,
+        politician_id=None,
+        sentiment=0.5,
+        politician_weight=10.0,
+        source_reliability=0.6,
+        raw_payload={"owner": owner, "accession": accession},
+        provenance=Provenance.REAL,
+    )
+
+
+async def test_scan_caps_solo_form4_one_off_to_predicted(clock: FixedClock) -> None:
+    # A lone insider buy scores TRADE-tier on the formula (75) but has no second same-ticker filer
+    # in the trailing 7d, so the one-off gate demotes it: no proposal, a WATCH-tier predicted at 69.
+    solo = _form4_buy("f1", clock=clock, accession="acc-1")
+    scan = await _scanner(_FakeReadModel([solo]), clock).execute()
+
+    assert "LUV" not in {p.symbol for p in scan.proposals}
+    predicted = {p.symbol: p for p in scan.predicted}
+    assert "LUV" in predicted
+    assert predicted["LUV"].action == "watch"
+    assert predicted["LUV"].conviction_score == pytest.approx(69.0)
+
+
+async def test_scan_two_owner_form4_buys_lift_the_cap_to_a_proposal(clock: FixedClock) -> None:
+    # A second, independent filer on the same ticker in the trailing 7d lifts the one-off cap, so
+    # the ticker proposes a trade again.
+    signals = [
+        _form4_buy("f1", clock=clock, owner="ALPHA", accession="acc-1"),
+        _form4_buy("f2", clock=clock, owner="BETA", accession="acc-2"),
+    ]
+    scan = await _scanner(_FakeReadModel(signals), clock).execute()
+
+    assert "LUV" in {p.symbol for p in scan.proposals}
+    assert "LUV" not in {p.symbol for p in scan.predicted}
 
 
 class _RecordingEvaluator:

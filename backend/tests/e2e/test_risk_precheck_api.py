@@ -36,8 +36,10 @@ _LIMITS = RiskLimits(
 
 class _StubBroker:
     def __init__(self, positions: Sequence[BrokerPosition] = ()) -> None:
+        # buying_power is a KNOWN, non-binding reserve: since review F17 a reserve of exactly 0
+        # is a real exhausted account (clean reject), not an "unknown reserve" sentinel.
         self._account = BrokerAccount(
-            cash=Decimal("10000"), equity=Decimal("10000"), buying_power=Decimal("0")
+            cash=Decimal("10000"), equity=Decimal("10000"), buying_power=Decimal("1000000")
         )
         self._positions = list(positions)
 

@@ -10,6 +10,13 @@ folded from events on append — it is populated by an explicit labeler run and 
 re-running the labeler. ``replace_run`` gives rebuild semantics: a rerun of a given
 ``label_run_id`` deletes that run's rows first, then writes the fresh batch, so re-running never
 duplicates (each run id is self-cleaning).
+
+``latest_run_id``/``labels_for_run`` (Task 05, docs/RESEARCH-PLAN.md §2-§3) are the minimal READ
+extension the diagnostic job needs, and ``labels_for_signals`` (UI Phase D) is the per-signal
+read the Signals research surface needs; no migration was required (no `created_at` column
+exists on the `outcome_labels` table). "Latest" is defined by insertion order (the surrogate
+`id` primary key in Postgres; append order in memory) since a `label_run_id` is a UUID with no
+embedded ordering of its own.
 """
 
 from collections.abc import Sequence
@@ -65,14 +72,20 @@ class OutcomeLabelsPort(Protocol):
         ...
 
     async def latest_run_id(self) -> str | None:
-        """The ``label_run_id`` of the most recently written run, or None when the store is empty.
+        """The most recently WRITTEN ``label_run_id`` (by insertion order), or ``None`` if empty.
 
-        "Most recent" is the run holding the highest surrogate id (the last batch inserted) — the
-        table has no timestamp column, but ``id`` is a monotonically increasing identity, so a
-        rerun (delete-then-write) of a run reorders it to newest. Read-only; used by the Signals
-        research surface (UI Phase D) to show the current label run without the caller having to
-        know its id.
+        "Most recent" is insertion order, not a timestamp column (there is none) and not the
+        `label_run_id` string's own ordering (it is an opaque UUID) — the run holding the highest
+        surrogate `id` in Postgres (append order in memory), i.e. the last batch inserted, by
+        whichever run wrote it last (a rerun's `replace_run` counts as a fresh write for this
+        purpose, since it deletes-then-reinserts that run's rows). Read-only; used by the
+        diagnostic job (Task 05) and by the Signals research surface (UI Phase D) to reach the
+        current label run without the caller having to know its id.
         """
+        ...
+
+    async def labels_for_run(self, label_run_id: str) -> Sequence[OutcomeLabel]:
+        """Every label row stored for ``label_run_id`` (empty if the run id is unknown/empty)."""
         ...
 
     async def labels_for_signals(

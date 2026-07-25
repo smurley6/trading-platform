@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -18,6 +19,11 @@ class BrokerOrder:
     order_type: OrderType
     status: OrderStatus
     fills: tuple[Fill, ...] = ()
+    # When the broker accepted the order. Optional (defaults None) so existing constructions
+    # (the paper simulator, tests) are unaffected. SyncOrders sorts by it ASCENDING so a SELL is
+    # never applied before its BUY on a newest-first order list (review F7); None-valued orders
+    # keep their list order (Python's sort is stable) — paper is already insertion-ordered.
+    submitted_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

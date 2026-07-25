@@ -42,6 +42,14 @@ _STATUS_MAP = {
 }
 
 
+# Alpaca caps one /v2/orders page at 500. Local order history grows without bound, so a single
+# 500-order page eventually stops covering it and every older order reads back as broker='missing'
+# drift — false drift that buries real drift and bricks the readiness `reconciliation_clean` check
+# (review F18). We page through the FULL history with the `after` cursor instead.
+_ORDER_PAGE_LIMIT = 500
+_MAX_ORDER_PAGES = 200  # safety bound: 100k orders — far beyond any personal-account lifetime
+
+
 class AlpacaBrokerError(Exception):
     pass
 
@@ -116,13 +124,45 @@ class AlpacaBroker:
             raise
 
     async def list_orders(self) -> Sequence[BrokerOrder]:
-        response = await self._client.get(
-            f"{self._base_url}/v2/orders",
-            headers=self._headers,
-            params={"status": "all", "limit": 500},
-        )
-        response.raise_for_status()
-        return [_to_order(item) for item in response.json()]
+        """Every order in the account's history, paged past the 500-order limit (review F18).
+
+        Walks pages oldest-first with the `after` (submitted_at, exclusive) cursor, advancing by
+        the last order's raw timestamp until a short page ends the history. Deduplicates by
+        client_order_id (belt-and-suspenders against a boundary overlap) and bounds the walk so a
+        pathological cursor can never loop forever.
+        """
+        orders: list[BrokerOrder] = []
+        seen: set[str] = set()
+        after: str | None = None
+        for _ in range(_MAX_ORDER_PAGES):
+            params: dict[str, Any] = {
+                "status": "all",
+                "limit": _ORDER_PAGE_LIMIT,
+                "direction": "asc",
+            }
+            if after is not None:
+                params["after"] = after
+            response = await self._client.get(
+                f"{self._base_url}/v2/orders", headers=self._headers, params=params
+            )
+            response.raise_for_status()
+            items = response.json()
+            for item in items:
+                order = _to_order(item)
+                if order.client_order_id in seen:
+                    continue
+                seen.add(order.client_order_id)
+                orders.append(order)
+            if len(items) < _ORDER_PAGE_LIMIT:
+                break
+            # Advance the cursor by the last order's RAW submitted_at (never the reparsed value,
+            # which can lose sub-microsecond precision). A cursor that fails to advance ends the
+            # walk rather than spinning.
+            last_raw = items[-1].get("submitted_at") or items[-1].get("created_at")
+            if not last_raw or last_raw == after:
+                break
+            after = str(last_raw)
+        return orders
 
     async def list_positions(self) -> Sequence[BrokerPosition]:
         response = await self._client.get(f"{self._base_url}/v2/positions", headers=self._headers)
@@ -175,6 +215,7 @@ def _to_order(data: dict[str, Any]) -> BrokerOrder:
                 filled_at=_parse_time(data.get("filled_at") or data.get("updated_at")),
             ),
         )
+    submitted_raw = data.get("submitted_at") or data.get("created_at")
     return BrokerOrder(
         client_order_id=str(data["client_order_id"]),
         broker_order_id=str(data["id"]),
@@ -184,6 +225,7 @@ def _to_order(data: dict[str, Any]) -> BrokerOrder:
         order_type=OrderType(str(data.get("type", "market"))),
         status=status,
         fills=fills,
+        submitted_at=_parse_time(submitted_raw) if submitted_raw else None,
     )
 
 

@@ -139,6 +139,39 @@ money is not.
 | `WATCH_THRESHOLD` | `40` | Optional (default `40`) |
 | `CORROBORATION_WINDOW_DAYS` | `21` | Optional (default `21`) |
 
+### Authentication (REQUIRED once a real broker is wired and the URL is reachable)
+
+The mutating endpoints (`POST /proposals/execute`, `/kill-switch`, `/cycle/mode`,
+`/sleeves/{id}/mode`, `/signals`, `/ingest`, `/reconcile`, `/orders/*`) and the sensitive reads
+(`/capital`, `/events`, `/positions/live`, `/ws/events`) are guarded by `API_KEY`.
+
+| Secret | Example | Required? |
+| --- | --- | --- |
+| `API_KEY` | `openssl rand -hex 32` (token-safe chars only — see below) | **Yes** once a real Alpaca account is wired and the app is internet-reachable |
+| `ALLOW_UNAUTHENTICATED` | `true` | Optional (default `false`) — escape hatch only |
+
+- **Unset (the default):** those endpoints are **OPEN**. Fine for the local in-memory dev app,
+  but on a public URL it exposes the kill switch, the cycle-mode arm/disarm, and manual order
+  execution to anyone. To fail closed, **the app REFUSES TO START when a real Alpaca broker
+  (paper or live) is wired and `API_KEY` is unset** — set `API_KEY`, or (only for a deployment
+  reachable solely on a private network) set `ALLOW_UNAUTHENTICATED=true` to accept the risk
+  deliberately.
+- **Set:** callers must present it via `Authorization: Bearer <key>` **or** the `X-API-Key`
+  header; a mismatch is `401`. Genuinely public reads (`/sleeves`, `/conviction`, `/signals/feed`,
+  `/proposals`, health) stay open. **Rotate** the key by generating a new value and updating the
+  secret (the OWNER's action; the app picks it up on the next deploy).
+- **Character set — matters.** Browsers cannot set headers on a WebSocket, so `/ws/events` takes
+  the key as a `Sec-WebSocket-Protocol` token (`new WebSocket(url, ["api-key", key])`). That value
+  must be an HTTP token: letters, digits, and `!#$%&'*+-.^_`|~` only. A key containing `+`, `/`,
+  `=`, a comma, or whitespace (i.e. standard base64) is rejected by the server's header parser
+  before the app runs — HTTP auth keeps working while the browser event stream silently fails.
+  `openssl rand -hex 32` is safe; the app logs a startup WARNING if the configured key is not.
+- Store it **only** as a secret. Never commit a real key.
+
+> **`MODE_DEFAULT` cannot be `live`.** Boot is always paper — setting `MODE_DEFAULT=live` fails
+> config validation at startup (it would bypass the readiness gate). Enable live per sleeve via
+> `POST /sleeves/{id}/mode` after `ALLOW_LIVE` and the readiness preflight pass.
+
 > Any of the "optional, literal default" flags above (`ENABLE_ALPACA_PAPER`, `USASPENDING_ENABLED`,
 > `ENABLE_CONGRESS_ROSTER`, etc.) can be left as the workflow's literal default **or** overridden
 > by adding a same-named secret. The workflow reads `${{ secrets.NAME || 'default' }}`.
@@ -176,6 +209,16 @@ Each cycle (`python -m trading.jobs.cycle`) performs one pass, then exits:
    `TRADE_THRESHOLD` / `WATCH_THRESHOLD`.
 3. **Place paper orders** — for anything clearing the trade threshold, submits orders to your
    Alpaca **paper** account (when `ENABLE_ALPACA_PAPER` is on).
+4. **Sync fills + reconcile** — the real Alpaca venue fills **asynchronously** after submission
+   (an order placed pre-open fills at the open, after this run has already exited), so the cron
+   now runs `SyncOrders` + a pool `Reconcile` at the **end of every cycle** (review F14). Each run
+   records the **prior** run's fills into the event log (cumulative-increment model, so partials
+   that later complete are captured) and reconciles the projection against the one broker book;
+   identical drift is recorded once, not re-appended every run. This is best-effort — a broker
+   hiccup here is logged and never fails the ingest/evaluate cycle that already committed. No new
+   secret is required. For the always-on **web service** the equivalent is the 30s poller
+   (`ORDER_SYNC_INTERVAL_SECONDS>0`) and/or the real-time stream (`ENABLE_TRADE_UPDATES_STREAM`);
+   the poller and stream are mutually safe — a fill is recorded exactly once (compare-and-set).
 
 All state — the append-only event log and the read-model projections (positions, order statuses,
 portfolio snapshots) — **persists in Postgres**, so each run builds on the last. The in-memory

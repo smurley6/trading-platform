@@ -29,11 +29,19 @@ _SETTINGS = Settings(
 class _FakeLabeler:
     def __init__(self) -> None:
         self.calls: list[tuple[str, bool]] = []
+        self.exclude_tickers_calls: list[frozenset[str] | None] = []
 
     async def execute(
-        self, *, label_run_id: str, dry_run: bool, signals: object | None = None
+        self,
+        *,
+        label_run_id: str,
+        dry_run: bool,
+        signals: object | None = None,
+        exclude_tickers: frozenset[str] | None = None,
     ) -> LabelReport:
         self.calls.append((label_run_id, dry_run))
+        self.exclude_tickers_calls.append(exclude_tickers)
+        excluded = len(exclude_tickers) if exclude_tickers else 0
         return LabelReport(
             label_run_id=label_run_id,
             as_of=_AS_OF,
@@ -42,6 +50,7 @@ class _FakeLabeler:
             ok=7,
             unresolvable=2,
             committed=not dry_run,
+            excluded=excluded,
         )
 
 
@@ -123,3 +132,45 @@ def test_main_confirm_without_real_adapter_returns_one(monkeypatch: pytest.Monke
 def test_main_unknown_flag_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
     # argparse exits 2 on a usage error; the entrypoint normalizes it to 1.
     assert label_outcomes.main(["--bogus"]) == 1
+
+
+# --- --exclude-tickers (Task 04c: excludes the 44 leaked sec_form4 NAN signals) ------------------
+
+
+def test_parse_exclude_tickers_absent_is_none() -> None:
+    # Empty/absent flag = unchanged behavior: None, not an empty frozenset.
+    assert label_outcomes._parse_exclude_tickers([]) is None
+
+
+def test_parse_exclude_tickers_flattens_comma_joined_and_repeated_and_upper_normalizes() -> None:
+    # Comma-joined in one occurrence, repeated flag, mixed case -> one upper-cased frozenset.
+    result = label_outcomes._parse_exclude_tickers(["nan,xyz", "abc"])
+    assert result == frozenset({"NAN", "XYZ", "ABC"})
+
+
+def test_main_threads_exclude_tickers_to_labeler(monkeypatch: pytest.MonkeyPatch) -> None:
+    labeler = _FakeLabeler()
+    _patch(monkeypatch, labeler=labeler, real_prices=False)
+    assert label_outcomes.main(["--exclude-tickers", "nan"]) == 0
+    assert labeler.exclude_tickers_calls == [frozenset({"NAN"})]
+
+
+def test_main_without_exclude_tickers_passes_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    labeler = _FakeLabeler()
+    _patch(monkeypatch, labeler=labeler, real_prices=False)
+    assert label_outcomes.main([]) == 0
+    assert labeler.exclude_tickers_calls == [None]
+
+
+async def test_dry_run_report_shows_excluded_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    labeler = _FakeLabeler()
+    _patch(monkeypatch, labeler=labeler, real_prices=False)
+
+    rc = await label_outcomes.run_labeling(confirm=False, exclude_tickers=frozenset({"NAN"}))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "exclude_tickers: NAN" in out
+    assert "excluded:      1" in out

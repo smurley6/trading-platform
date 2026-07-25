@@ -111,3 +111,42 @@ def test_mixed_holes_are_only_the_sources_without_real(make_signal: SignalFactor
     assert SignalSource.STATEMENT not in report.empty_sources
     assert SignalSource.CONTRACT in report.empty_sources
     assert SignalSource.DISCLOSED_TRADE in report.empty_sources
+
+
+def test_backfilled_is_counted_separately_from_synthetic(make_signal: SignalFactory) -> None:
+    # task-08: BACKFILLED must NEVER be absorbed into total_synthetic — it is real,
+    # historically reconstructed data that must survive a purge, unlike SYNTHETIC.
+    signals = [
+        make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.REAL),
+        make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.BACKFILLED),
+        make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.BACKFILLED),
+        make_signal(source_type=SignalSource.CONTRACT, provenance=Provenance.SYNTHETIC),
+    ]
+
+    report = coverage_report(signals)
+    by_source = _by_source(report)
+
+    assert report.total_real == 1
+    assert report.total_backfilled == 2
+    assert report.total_synthetic == 1
+    statement = by_source[SignalSource.STATEMENT]
+    assert statement.real_count == 1
+    assert statement.backfilled_count == 2
+    assert statement.synthetic_count == 0
+
+
+def test_backfilled_only_source_has_no_last_real_at_and_is_a_hole(
+    make_signal: SignalFactory,
+) -> None:
+    # A source with only backfilled data is still a "hole" for REAL purposes (no live data yet),
+    # even though the backfilled data itself is real and must not be purged.
+    report = coverage_report(
+        [make_signal(source_type=SignalSource.DISCLOSED_TRADE, provenance=Provenance.BACKFILLED)]
+    )
+    disclosed = _by_source(report)[SignalSource.DISCLOSED_TRADE]
+
+    assert disclosed.real_count == 0
+    assert disclosed.backfilled_count == 1
+    assert disclosed.synthetic_count == 0
+    assert disclosed.last_real_at is None
+    assert SignalSource.DISCLOSED_TRADE in report.empty_sources

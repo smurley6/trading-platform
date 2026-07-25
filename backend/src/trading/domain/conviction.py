@@ -33,7 +33,7 @@ and a per-signal contribution list (signal id -> decayed weighted contribution).
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 
 from trading.domain.signals import Signal, SignalSource
@@ -129,7 +129,9 @@ class ConvictionResult:
         decayed_weighted_sum: Weighted sum *with* time decay applied. Equals
             ``raw_weighted_sum`` when decay is disabled.
         corroboration_factor: The corroboration multiplier actually applied.
-        distinct_source_types: Distinct source types observed among contributing signals.
+        distinct_source_types: Distinct source types observed among contributing signals
+            with positive ``source_reliability`` — benched (zero-reliability) sources
+            corroborate nothing.
         contributions: Per-signal decayed weighted contribution
             (``decay_weight · sentiment · politician_weight · source_reliability``),
             keyed by signal id, in input order. Sums to ``decayed_weighted_sum``.
@@ -262,7 +264,11 @@ def compute_conviction(
         decayed_weighted_sum += contribution
         contributions[s.id] = contribution
 
-    distinct_sources = {s.source_type for s in relevant}
+    # Benched sources (source_reliability == 0, Task 10) are fully inert: they already
+    # contribute nothing to the weighted sums, and they must not corroborate either —
+    # otherwise a zero-weight signal sharing the ticker would still lift the multiplier
+    # applied to the *other* sources' scores.
+    distinct_sources = {s.source_type for s in relevant if s.source_reliability > 0.0}
     corroboration = _corroboration_factor(len(distinct_sources), params)
     score = min(100.0, max(0.0, decayed_weighted_sum * corroboration * params.scale))
 
@@ -286,3 +292,113 @@ def compute_conviction(
         contributions=contributions,
         reference_time=reference if params.decay_enabled else None,
     )
+
+
+# Default same-owner stream window: repeated Form 4 filings by one filer on one ticker within this
+# many days are the SAME ongoing stream and collapse to a single corroboration vote (task-11).
+_DEFAULT_FORM4_STREAM_WINDOW_DAYS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class Form4Vote:
+    """One Form 4 corroboration vote — a filer's *stream* on a ticker, not a single filing.
+
+    Repeated filings from the same filer stream (same ticker + normalized ``owner`` within a
+    rolling stream window) are not independent evidence: they must count as ONE vote so
+    conviction reflects distinct owners, not filing rows (task-11, Phase-7 buy-edge analysis).
+
+    This is a pure value object; extracting/normalizing ``owner`` from a signal's ``raw_payload``
+    is the application layer's job (the domain never sees payloads). ``created_at`` is the
+    representative filing's acceptance datetime (the point-in-time public moment), and
+    ``signal_id`` lets the application map a surviving vote back to the signal it keeps for
+    scoring.
+
+    Attributes:
+        ticker: Issuer trading symbol (never ``None`` — unresolved filings do not vote).
+        owner: Reporting owner name, already normalized (upper-cased, whitespace-collapsed).
+        created_at: Acceptance datetime of this filing.
+        signal_id: Id of the signal this vote stands for.
+    """
+
+    ticker: str
+    owner: str
+    created_at: datetime
+    signal_id: str
+
+    @property
+    def filing_day(self) -> date:
+        """The (ticker, owner, filing-day) key's day component: the acceptance date."""
+        return self.created_at.date()
+
+
+def group_form4_vote_streams(
+    votes: Sequence[Form4Vote],
+    *,
+    stream_window_days: int | None = _DEFAULT_FORM4_STREAM_WINDOW_DAYS,
+) -> list[list[Form4Vote]]:
+    """Partition Form 4 votes into filer streams, preserving each stream's full membership (pure).
+
+    Grouping is keyed on ``(ticker, normalized owner)``. Within each key the filings are walked in
+    chronological order and split into *streams*: a filing joins the current stream when it lands
+    within ``stream_window_days`` of that stream's most-recent filing — a TRAILING ``(t-W, t]``
+    window that never looks forward — otherwise it opens a new stream.
+
+    ``stream_window_days=None`` means NO gap splitting: every filing of one ``(ticker, owner)`` is a
+    single stream, regardless of the gaps between filings (the whole filer-on-name relationship is
+    ONE unit). This is the coarser *episode* unit the task-13 evaluator measures the buy edge over
+    — distinct from the 30-day live-scan dedupe (``dedupe_form4_votes``, task-11) that this helper
+    also backs.
+
+    Each returned stream lists its member votes in chronological ``(created_at, signal_id)`` order,
+    so ``stream[0]`` is the stream's earliest (representative) filing. Streams are returned ordered
+    by ``(ticker, owner, earliest created_at, signal_id)``. Distinct owners always yield distinct
+    streams, even on the same day.
+    """
+    if stream_window_days is not None and stream_window_days < 0:
+        raise ValueError("stream_window_days must be non-negative")
+
+    ordered = sorted(votes, key=lambda v: (v.ticker, v.owner, v.created_at, v.signal_id))
+    window = None if stream_window_days is None else timedelta(days=stream_window_days)
+
+    streams: list[list[Form4Vote]] = []
+    current_key: tuple[str, str] | None = None
+    stream_last: datetime | None = None
+    for vote in ordered:
+        key = (vote.ticker, vote.owner)
+        in_stream = key == current_key and (
+            window is None or (stream_last is not None and vote.created_at - stream_last <= window)
+        )
+        if in_stream:
+            # Same ongoing stream: extend the trailing window; the earliest filing stays the rep.
+            stream_last = vote.created_at
+            streams[-1].append(vote)
+            continue
+        current_key = key
+        stream_last = vote.created_at
+        streams.append([vote])
+    return streams
+
+
+def dedupe_form4_votes(
+    votes: Sequence[Form4Vote],
+    *,
+    stream_window_days: int = _DEFAULT_FORM4_STREAM_WINDOW_DAYS,
+) -> list[Form4Vote]:
+    """Collapse repeated Form 4 filings from one filer stream into a single vote (pure).
+
+    Grouping is keyed on ``(ticker, normalized owner)``. Within each key the filings are walked
+    in chronological order and partitioned into *streams*: a filing joins the current stream when
+    it lands within ``stream_window_days`` of that stream's most-recent filing — a TRAILING
+    ``(t-W, t]`` window that never looks forward — otherwise it opens a new stream. Each stream
+    yields exactly one vote, represented by its EARLIEST filing, so the result is independent of
+    how many later filings the same owner piles on (adding lots 3..N changes nothing). Distinct
+    owners always yield distinct votes, even on the same day.
+
+    Returns one representative vote per stream, ordered deterministically by
+    ``(ticker, owner, created_at, signal_id)`` — a thin wrapper over
+    :func:`group_form4_vote_streams` (same partitioning, keeping each stream's earliest filing).
+    """
+    return [
+        stream[0]
+        for stream in group_form4_vote_streams(votes, stream_window_days=stream_window_days)
+    ]
