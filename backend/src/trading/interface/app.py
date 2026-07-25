@@ -561,17 +561,21 @@ def create_app(deps: AppDeps) -> FastAPI:
     @app.websocket("/ws/events")
     async def stream_events(websocket: WebSocket) -> None:
         # The event firehose exposes every signal, order, fill, and decision — a sensitive read
-        # (review F24). When a key is configured, require it (via Authorization: Bearer / X-API-Key)
-        # before accepting; a rejected socket is closed with 1008 (policy violation), not accepted.
-        if not auth.is_authorized(
-            websocket.headers.get("authorization"), websocket.headers.get("x-api-key")
-        ):
+        # (review F24). When a key is configured, require it BEFORE accepting, via either the
+        # Authorization: Bearer / X-API-Key headers (service clients) or — because the browser
+        # WebSocket constructor cannot set request headers — the Sec-WebSocket-Protocol offer
+        # ["api-key", "<key>"] (task-22). A rejected socket is closed with 1008 (policy violation)
+        # and never accepted, so no unauthenticated client can be sent an event frame.
+        authorized, subprotocol = auth.authorize_websocket(websocket)
+        if not authorized:
             await websocket.close(code=1008)
             return
         if deps.event_bus is None:
             await websocket.close(code=1011)
             return
-        await websocket.accept()
+        # Echoing back one of the OFFERED subprotocols is mandatory: a browser fails the handshake
+        # otherwise. It is the sentinel, never the key (that would leak it into a response header).
+        await websocket.accept(subprotocol=subprotocol)
         queue = deps.event_bus.subscribe()
         try:
             while True:
