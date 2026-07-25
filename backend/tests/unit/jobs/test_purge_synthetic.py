@@ -333,3 +333,55 @@ def test_main_returns_one_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(purge_synthetic, "build_dependencies", _boom)
     assert purge_synthetic.main([]) == 1
+
+
+async def test_confirm_retries_and_keeps_events_appended_during_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FixedClock,
+    make_signal: SignalFactory,
+) -> None:
+    """F21: an event the live service appends DURING the rebuild must not be silently dropped.
+
+    The rebuild TRUNCATEs and replays a snapshot; if the log grows mid-pass the newly appended
+    event's rows would vanish. The confirm path re-reads the log after each rebuild and RETRIES
+    with the fuller snapshot until it converges, so the concurrently-appended signal survives.
+    """
+    inner_store = InMemoryEventStore(clock)
+    read_model = InMemoryReadModel()
+    # Seed the log directly (plain store; the BEFORE report reads it via signals_from_events).
+    real = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.REAL)
+    synthetic = make_signal(source_type=SignalSource.STATEMENT, provenance=Provenance.SYNTHETIC)
+    await record_signals(
+        event_store=inner_store, clock=clock, signals=[real, synthetic], correlation_id="seed"
+    )
+
+    # A REAL signal that the "live service" appends WHILE the first rebuild pass is running.
+    concurrent = make_signal(source_type=SignalSource.CONTRACT, provenance=Provenance.REAL)
+    original_rebuild = read_model.rebuild
+    injected = {"done": False}
+
+    async def rebuild_with_growth(events: Sequence[StoredEvent]) -> None:
+        if not injected["done"]:
+            injected["done"] = True
+            await record_signals(
+                event_store=inner_store,
+                clock=clock,
+                signals=[concurrent],
+                correlation_id="concurrent-append",
+            )
+        await original_rebuild(events)
+
+    monkeypatch.setattr(read_model, "rebuild", rebuild_with_growth)
+    _patch_build(monkeypatch, inner_store, read_model)
+
+    rc = await purge_synthetic.run_purge(confirm=True)
+
+    assert rc == 0
+    assert injected["done"]  # the growth WAS injected mid-rebuild
+    after_ids = {s.id for s in await read_model.all_signals()}
+    # The concurrently-appended event was NOT dropped by the truncate+replay: it only survives
+    # because the confirm path detected the grown log and retried with the fuller snapshot (a
+    # single non-retrying rebuild would have rebuilt from the 2-event snapshot and lost it).
+    assert concurrent.id in after_ids
+    assert real.id in after_ids
+    assert synthetic.id not in after_ids  # still purged

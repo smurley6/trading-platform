@@ -81,3 +81,11 @@ class QuoteStreamPort(Protocol):
     async def add_symbols(self, symbols: Sequence[str]) -> None:
         """Ensure `symbols` are part of the upstream subscription (idempotent)."""
         ...
+
+    async def remove_symbols(self, symbols: Sequence[str]) -> None:
+        """Drop one client's contribution to `symbols` on disconnect (review F23).
+
+        Symbols still referenced by another client, or part of the platform's own base
+        subscription, stay subscribed; the rest are unsubscribed from the shared upstream.
+        """
+        ...

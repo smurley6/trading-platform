@@ -81,3 +81,37 @@ def test_drawdown_circuit_breaker() -> None:
 def test_unusable_price_rejects() -> None:
     assessment = _gate().evaluate(OrderSide.BUY, Decimal("1"), _context(price="0"))
     assert assessment.verdict is RiskVerdict.REJECTED
+
+
+def _context_bp(remaining: str | None, price: str = "100") -> RiskContext:
+    return RiskContext(
+        sleeve_equity=Decimal("10000"),
+        peak_equity=Decimal("10000"),
+        current_position_value=Decimal("0"),
+        price=Decimal(price),
+        remaining_buying_power=None if remaining is None else Decimal(remaining),
+    )
+
+
+def test_buying_power_none_is_unknown_and_leaves_the_guard_off() -> None:
+    # F17: None = UNKNOWN reserve (simulator / back-compat) -> the pool guard does not apply.
+    assessment = _gate().evaluate(OrderSide.BUY, Decimal("1"), _context_bp(None))
+    assert assessment.verdict is RiskVerdict.APPROVED
+    assert assessment.approved_quantity == Decimal("1")
+
+
+def test_buying_power_zero_is_exhausted_and_rejects_cleanly() -> None:
+    # F17: a fully-invested account (buying_power == 0) is a REAL exhausted reserve, NOT the
+    # "unknown" sentinel. The BUY floors to zero -> a clean REJECT, so nothing reaches the broker
+    # (no 403, no loop-aborting error).
+    assessment = _gate().evaluate(OrderSide.BUY, Decimal("1"), _context_bp("0"))
+    assert assessment.verdict is RiskVerdict.REJECTED
+    assert assessment.approved_quantity == Decimal("0")
+
+
+def test_buying_power_positive_caps_the_buy() -> None:
+    # A known, positive reserve caps the BUY to what the pool can afford (250 / 100 = 2.5 shares).
+    assessment = _gate().evaluate(OrderSide.BUY, Decimal("5"), _context_bp("250"))
+    assert assessment.verdict is RiskVerdict.MODIFIED
+    assert assessment.approved_quantity == Decimal("2.5")
+    assert "buying power" in assessment.reason

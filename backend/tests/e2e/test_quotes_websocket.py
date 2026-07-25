@@ -33,6 +33,7 @@ class FakeQuoteStream:
         self._enabled = enabled
         self._subscribers: set[asyncio.Queue[Quote]] = set()
         self.added: list[list[str]] = []
+        self.removed: list[list[str]] = []
 
     @property
     def enabled(self) -> bool:
@@ -48,6 +49,9 @@ class FakeQuoteStream:
 
     async def add_symbols(self, symbols: Sequence[str]) -> None:
         self.added.append([s.upper() for s in symbols])
+
+    async def remove_symbols(self, symbols: Sequence[str]) -> None:
+        self.removed.append([s.upper() for s in symbols])
 
     def push(self, quote: Quote) -> None:
         for queue in self._subscribers:
@@ -127,3 +131,28 @@ def test_quotes_ws_client_subscribe_reaches_stream() -> None:
         frame = ws.receive_json()
         assert frame["symbol"] == "LMT"
     assert ["LMT", "NVDA"] in stream.added
+
+
+def test_quotes_ws_removes_client_symbols_on_disconnect() -> None:
+    """F23: a client's subscribed symbols are removed from the shared stream when it disconnects.
+
+    Otherwise an anonymous client's (possibly junk) symbols persist on the ONE shared upstream
+    socket and re-poison reconnects.
+    """
+    stream = FakeQuoteStream(enabled=True)
+    app = create_app(_deps(FixedClock(), stream=stream, watchlist=["AAPL"]))
+    with TestClient(app) as client, client.websocket_connect("/ws/quotes") as ws:
+        ws.receive_json()  # status
+        ws.send_json({"action": "subscribe", "symbols": ["lmt", "nvda"]})
+        stream.push(
+            Quote(
+                symbol="LMT",
+                bid=Decimal("450.00"),
+                ask=Decimal("450.20"),
+                last=Decimal("450.10"),
+                as_of=_AS_OF,
+            )
+        )
+        assert ws.receive_json()["symbol"] == "LMT"
+    # Disconnecting removes exactly what this client added (not the platform's tracked seed).
+    assert ["LMT", "NVDA"] in stream.removed

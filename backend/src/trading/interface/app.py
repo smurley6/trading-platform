@@ -605,14 +605,21 @@ def create_app(deps: AppDeps) -> FastAPI:
         # subscribe requests. Mirrors /ws/events (per-connection queue, clean disconnect).
         await stream.add_symbols(await _tracked_symbols(deps))
         queue = stream.subscribe()
+        # Symbols THIS connection asked to add, so they can be removed from the shared upstream
+        # socket when it disconnects (review F23) — an anonymous client must not leave junk symbols
+        # on the one shared feed. The stream refcounts, so a symbol another client still wants (or
+        # a platform-tracked one) survives.
+        client_added: set[str] = set()
         push = asyncio.ensure_future(_push_quotes(websocket, queue))
-        recv = asyncio.ensure_future(_handle_quote_requests(websocket, stream))
+        recv = asyncio.ensure_future(_handle_quote_requests(websocket, stream, client_added))
         try:
             await asyncio.wait({push, recv}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             for task in (push, recv):
                 task.cancel()
             stream.unsubscribe(queue)
+            if client_added:
+                await stream.remove_symbols(sorted(client_added))
 
     return app
 
@@ -638,13 +645,20 @@ async def _push_quotes(websocket: WebSocket, queue: "asyncio.Queue[Quote]") -> N
         )
 
 
-async def _handle_quote_requests(websocket: WebSocket, stream: QuoteStreamPort) -> None:
+async def _handle_quote_requests(
+    websocket: WebSocket, stream: QuoteStreamPort, client_added: set[str]
+) -> None:
     while True:
         message = await websocket.receive_json()
         if isinstance(message, dict) and message.get("action") == "subscribe":
             requested = message.get("symbols")
             if isinstance(requested, list):
-                await stream.add_symbols([str(s) for s in requested])
+                symbols = [str(s) for s in requested]
+                # Record what this connection requested so it can be removed on disconnect. The
+                # stream validates/caps/refcounts; removing the same set later is balanced because
+                # the stream normalizes identically on add and remove (review F23).
+                client_added.update(symbols)
+                await stream.add_symbols(symbols)
 
 
 def _parse_symbols(raw: str | None) -> list[str]:

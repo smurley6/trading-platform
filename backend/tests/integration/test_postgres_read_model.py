@@ -318,3 +318,75 @@ async def test_rebuild_repopulates_from_the_log() -> None:
         assert await read_model.all_signals() == []
     finally:
         await engine.dispose()
+
+
+def _fill_event_own_stream(
+    *, sleeve_id: str, symbol: str, side: str, price: str, qty: str
+) -> DomainEvent:
+    """A fill on its OWN order stream so concurrent appends do not serialize on stream-seq
+    allocation — the rm_positions row is then the only contention point (review F19)."""
+    coid = f"ord-{uuid4()}"
+    return DomainEvent(
+        stream_id=f"order-{coid}",
+        event_type=EventType.ORDER_FILLED,
+        payload={
+            "client_order_id": coid,
+            "sleeve_id": sleeve_id,
+            "symbol": symbol,
+            "side": side,
+            "price": price,
+            "quantity": qty,
+            "fees": "0",
+            "filled_at": _WHEN.isoformat(),
+        },
+        occurred_at=_WHEN,
+        correlation_id="c1",
+    )
+
+
+async def test_concurrent_fills_do_not_lose_position_increments() -> None:
+    """F19: concurrent fills for the same (sleeve, symbol) must not lose increments.
+
+    Each fill's projection update is a read-modify-write on the rm_positions row. Under READ
+    COMMITTED, concurrent appends from different order streams would otherwise both read the same
+    base quantity and clobber one increment. SELECT ... FOR UPDATE serializes them, so the final
+    quantity is the exact sum.
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from trading.infrastructure.persistence.postgres import PostgresEventStore
+    from trading.infrastructure.persistence.postgres_read_model import PostgresReadModel
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    read_model = PostgresReadModel(engine)
+    store = PostgresEventStore(engine, on_append=read_model.apply)
+    sleeve = f"sleeve-{uuid4()}"
+    try:
+        await read_model.rebuild([])
+        # Seed an existing position so FOR UPDATE has a row to lock and the base is non-zero.
+        await store.append(
+            _fill_event_own_stream(
+                sleeve_id=sleeve, symbol="AAPL", side="buy", price="100", qty="5"
+            )
+        )
+
+        # Fire many concurrent +1 BUY fills (distinct order streams) at the SAME position row.
+        n = 16
+        await asyncio.gather(
+            *(
+                store.append(
+                    _fill_event_own_stream(
+                        sleeve_id=sleeve, symbol="AAPL", side="buy", price="100", qty="1"
+                    )
+                )
+                for _ in range(n)
+            )
+        )
+
+        held = {(p.sleeve_id, p.symbol): p for p in await read_model.held_positions()}
+        # 5 seed + 16 concurrent = 21, no lost updates.
+        assert held[(sleeve, "AAPL")].quantity == Decimal("5") + Decimal(n)
+    finally:
+        await engine.dispose()

@@ -1,5 +1,9 @@
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+
+import httpx
+import pytest
 
 from tests.conftest import FixedClock, SignalFactory
 from trading.application.ingest_signals import IngestSignals
@@ -176,3 +180,45 @@ async def test_recorded_signals_round_trip_through_projection(
     assert len(reconstructed) == 1
     assert reconstructed[0].ticker == "AAPL"
     assert reconstructed[0].sentiment == 0.7
+
+
+class KeyLeakingSource:
+    """A source whose fetch raises an httpx error embedding an API key in the URL (review F22)."""
+
+    _URL = "https://api.fda.gov/drug/drugsfda.json?search=foo&api_key=SUPER-SECRET-KEY"
+
+    @property
+    def name(self) -> str:
+        return "fda_approvals"
+
+    async def fetch_signals(self, since: datetime) -> Sequence[Signal]:
+        request = httpx.Request("GET", self._URL)
+        response = httpx.Response(429, request=request, text="Too Many Requests")
+        raise httpx.HTTPStatusError(
+            f"Client error '429 Too Many Requests' for url '{self._URL}'\nFor more information...",
+            request=request,
+            response=response,
+        )
+
+
+async def test_source_error_log_redacts_the_api_key(
+    clock: FixedClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F22: a logged 429 from a key-in-URL source must NOT contain the key."""
+    event_store = InMemoryEventStore(clock)
+    ingest = IngestSignals(
+        sources=[KeyLeakingSource()],
+        event_store=event_store,
+        clock=clock,
+        lookback_start=clock.now() - timedelta(days=1),
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = await ingest.execute()
+
+    assert result.failed_sources == ("fda_approvals",)
+    combined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SUPER-SECRET-KEY" not in combined
+    assert combined  # something WAS logged (the failure is still diagnosable)
+    assert "REDACTED" in combined
+    assert "fda_approvals" in combined

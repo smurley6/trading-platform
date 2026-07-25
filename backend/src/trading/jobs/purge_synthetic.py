@@ -31,6 +31,15 @@ WHAT THIS TOUCHES (and what it deliberately does NOT):
     log level you would compact/rewrite the event log (an offline migration) — out of scope
     here and intentionally not attempted against the append-only store.
 
+OPERATOR REQUIREMENT — STOP THE SERVICE FIRST (``--confirm`` only). The rebuild TRUNCATEs every
+``rm_*`` table and replays a log snapshot; any event the live app appends between the snapshot and
+the rebuild's commit would have its read-model rows wiped and not replayed, vanishing from
+projections until a future full rebuild (review F21). The hard guarantee is to stop the web/cron
+service before running ``--confirm``. As a belt-and-suspenders BACKSTOP the confirm path re-reads
+the log after each rebuild and RETRIES if it grew during the pass, refusing to exit 0 on an
+unconverged (still-growing) log — but this only narrows the window; it does not replace stopping
+the service.
+
 USAGE:
 
   * Default is DRY-RUN: prints the current coverage (counts per source) and exactly what WOULD
@@ -60,6 +69,12 @@ from trading.main import build_dependencies
 from trading.observability import configure_logging
 
 logger = logging.getLogger(__name__)
+
+# Belt-and-suspenders backstop for the read-model rebuild racing a live appender (review F21):
+# rebuild, then re-read the log; if it grew during the pass, retry with the fuller snapshot so the
+# concurrently-appended events are not silently dropped from the projection. Bounded so a service
+# that is genuinely never stopped fails loudly instead of looping forever.
+_MAX_REBUILD_ATTEMPTS = 5
 
 
 @runtime_checkable
@@ -166,7 +181,35 @@ async def run_purge(*, confirm: bool) -> int:
         # Rebuild the read side from the log with SYNTHETIC signal events filtered out. The
         # append-only event log is left fully intact (system of record); REAL and BACKFILLED
         # signal.received events are both replayed unchanged into the rebuilt read side.
-        await read_model.rebuild(_filtered_events(events))
+        #
+        # Race backstop (review F21): rebuild TRUNCATEs the rm_* tables and replays a snapshot, so
+        # an event the live service appends mid-rebuild would lose its read-model rows. Re-read the
+        # log after each rebuild; if it grew during the pass, the projection is now missing those
+        # events — retry with the fuller snapshot. Converges only when no append lands during a
+        # whole pass (i.e. the service is quiescent), and refuses to exit 0 otherwise. This narrows
+        # the window; the DURABLE guarantee is still to STOP THE SERVICE before --confirm.
+        snapshot = events
+        for attempt in range(1, _MAX_REBUILD_ATTEMPTS + 1):
+            await read_model.rebuild(_filtered_events(snapshot))
+            after_log = list(await deps.event_store.read_all())
+            if len(after_log) == len(snapshot):
+                break
+            logger.warning(
+                "event log grew during rebuild (%d -> %d events, attempt %d/%d); the service is "
+                "still appending — retrying with the fuller snapshot. STOP THE SERVICE and re-run "
+                "for a race-free purge.",
+                len(snapshot),
+                len(after_log),
+                attempt,
+                _MAX_REBUILD_ATTEMPTS,
+            )
+            snapshot = after_log
+        else:
+            raise RuntimeError(
+                "purge could not converge: the event log kept growing during every rebuild attempt "
+                f"({_MAX_REBUILD_ATTEMPTS} tries). STOP THE web/cron SERVICE, then re-run "
+                "--confirm — the read side was rebuilt but may not reflect the newest events."
+            )
 
         after = list(await deps.read_model.all_signals())
         after_report = coverage_report(after)

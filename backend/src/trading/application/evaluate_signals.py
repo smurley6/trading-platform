@@ -16,7 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from trading.application.data_integrity import ensure_real_signals, tradeable_signals
-from trading.application.place_order import PlaceOrder, PlaceOrderRequest
+from trading.application.place_order import OrderSubmissionError, PlaceOrder, PlaceOrderRequest
 from trading.application.ports.broker import BrokerOrder, BrokerPort
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
@@ -261,17 +261,30 @@ class EvaluateSignals:
             # cycle-date) mints the SAME client_order_id, so the broker's own idempotency
             # (paper: dict dedupe; Alpaca: 422 -> fetch existing) collapses it to one order.
             client_order_id = f"ord-{self._sleeve.id}-{target.symbol}-{side.value}-{cycle_date}"
-            broker_order = await self._place_order.execute(
-                PlaceOrderRequest(
-                    sleeve_id=self._sleeve.id,
-                    decision_id=decision.id,
-                    client_order_id=client_order_id,
-                    symbol=target.symbol,
-                    side=side,
-                    quantity=assessment.approved_quantity,
-                    correlation_id=correlation_id,
+            # Isolate each placement (review F17): a single broker rejection (e.g. Alpaca 403
+            # insufficient buying power) must NOT abort the remaining decisions — those include
+            # risk-reducing SELLs and the closing portfolio snapshot. PlaceOrder already durably
+            # records the ORDER_INTENT + ORDER_SUBMIT_FAILED before raising, so the failure is on
+            # the audit trail; here we log and move on to the next proposal.
+            try:
+                broker_order = await self._place_order.execute(
+                    PlaceOrderRequest(
+                        sleeve_id=self._sleeve.id,
+                        decision_id=decision.id,
+                        client_order_id=client_order_id,
+                        symbol=target.symbol,
+                        side=side,
+                        quantity=assessment.approved_quantity,
+                        correlation_id=correlation_id,
+                    )
                 )
-            )
+            except OrderSubmissionError:
+                logger.warning(
+                    "order placement failed for %s; continuing with remaining decisions",
+                    target.symbol,
+                    extra={"correlation_id": correlation_id},
+                )
+                continue
             orders.append(broker_order)
 
         await self._snapshot(correlation_id)

@@ -40,7 +40,7 @@ from trading.application.sync_orders import SyncOrders
 from trading.config import Settings
 from trading.domain.conviction import ConvictionThresholds
 from trading.domain.sectors import Sector
-from trading.domain.sleeves import Sleeve, SleeveStatus
+from trading.domain.sleeves import Sleeve, SleeveStatus, TradingMode
 from trading.infrastructure.backtest_env import InMemoryBacktestEnvFactory
 from trading.infrastructure.brokers.alpaca import AlpacaBroker
 from trading.infrastructure.brokers.disabled_trade_updates import DisabledTradeUpdatesStream
@@ -440,18 +440,43 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
         if sleeve_id == "sleeve-political":
             political_evaluator = evaluator
 
-    # Reconciliation is POOL-LEVEL. The shared book is one account, so the local projection is
-    # summed across ALL sleeves (sleeve_id=None) and diffed against that one book — a per-sleeve
-    # diff would flag every OTHER algo's holdings as spurious drift. One reconciler serves the
-    # /reconcile endpoint + scheduler, and is keyed to every sleeve so the per-sleeve live-readiness
-    # preflight reuses the same authoritative account check.
-    pool_reconcile = Reconcile(
-        broker=shared_paper, event_store=event_store, clock=clock, sleeve_id=None
+    # Reconciliation is PER VENUE, split by sleeve mode (review F15). Each real account in use gets
+    # its own reconciler whose local projection is aggregated over exactly the sleeves currently
+    # routing to it: the PAPER reconciler sums the paper-mode sleeves against the shared paper book,
+    # and (only when a live account is wired) the LIVE reconciler sums the live-mode sleeves against
+    # the live book. Within one venue this stays POOL-LEVEL across its sleeves (a per-sleeve diff on
+    # a shared book would flag other algos' holdings as spurious drift). Before this split, once any
+    # sleeve went live its holdings were diffed against the PAPER book — perpetual false drift — and
+    # the live account was never reconciled. The callables are re-evaluated each run, so a runtime
+    # paper→live switch moves a sleeve to the correct venue with no rewiring.
+    all_sleeve_ids = [sleeve_id for sleeve_id, _s, _st in sleeve_specs]
+
+    def _sleeves_in_mode(target: TradingMode) -> list[str]:
+        return [sid for sid in all_sleeve_ids if registry.mode(sid) is target]
+
+    paper_reconcile = Reconcile(
+        broker=shared_paper,
+        event_store=event_store,
+        clock=clock,
+        sleeve_ids=lambda: _sleeves_in_mode(TradingMode.PAPER),
+        venue=None,  # None => records are byte-identical to the historical pool reconciler
     )
-    reconcilers_by_id: dict[str, Reconcile] = {
-        sleeve_id: pool_reconcile for sleeve_id, _s, _st in sleeve_specs
-    }
-    reconcilers = [pool_reconcile]
+    reconcilers = [paper_reconcile]
+    # Live-readiness reconciles the venue a sleeve would ENTER: the live book when one is wired
+    # (so a drifted live account blocks going live and the live account is genuinely checked),
+    # else the paper reconciler (readiness fails on the live-broker check anyway).
+    readiness_reconcile = paper_reconcile
+    if live_broker is not None:
+        live_reconcile = Reconcile(
+            broker=live_broker,
+            event_store=event_store,
+            clock=clock,
+            sleeve_ids=lambda: _sleeves_in_mode(TradingMode.LIVE),
+            venue="live",
+        )
+        reconcilers.append(live_reconcile)
+        readiness_reconcile = live_reconcile
+    reconcilers_by_id: dict[str, Reconcile] = dict.fromkeys(all_sleeve_ids, readiness_reconcile)
     order_syncs = list(order_syncs_by_id.values())
 
     # Real-time trade-updates stream (FR-REC/FR-EXE): the push complement to the 30s polling
@@ -496,7 +521,6 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
         brokers=brokers_by_id,
         event_store=event_store,
         clock=clock,
-        default_sleeve_id="sleeve-political",
     )
 
     live_ceilings = RiskLimits(

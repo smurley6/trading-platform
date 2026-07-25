@@ -234,3 +234,65 @@ async def test_news_source_cannot_be_backfilled(clock: FixedClock) -> None:
     store = InMemoryEventStore(clock)
     with pytest.raises(BackfillError):
         BackfillSignals(source=source, event_store=store, seen=InMemoryBackfillSeen(), clock=clock)
+
+
+class _CrashAfter:
+    """EventStore wrapper that raises after N successful appends, simulating a mid-run crash.
+
+    Delegates to a real InMemoryEventStore so events appended BEFORE the crash persist (exactly
+    like a process that died partway through the backfill loop). `crash_at=None` disables it.
+    """
+
+    def __init__(self, inner: InMemoryEventStore, crash_at: int | None) -> None:
+        self._inner = inner
+        self.crash_at = crash_at
+        self._appends = 0
+
+    async def append(self, event: object, *, expected_version: int | None = None) -> object:
+        self._appends += 1
+        if self.crash_at is not None and self._appends >= self.crash_at:
+            raise RuntimeError("simulated crash mid-backfill")
+        return await self._inner.append(event, expected_version=expected_version)  # type: ignore[arg-type]
+
+    async def read_stream(self, stream_id: str) -> object:
+        return await self._inner.read_stream(stream_id)
+
+    async def read_by_correlation(self, correlation_id: str) -> object:
+        return await self._inner.read_by_correlation(correlation_id)
+
+    async def read_all(self, limit: int | None = None) -> object:
+        return await self._inner.read_all(limit)
+
+
+async def test_midrun_crash_then_rerun_does_not_duplicate(clock: FixedClock) -> None:
+    """F20: a crash after some appends must not leave appended-but-unmarked events that a re-run
+    re-appends. Because each signal is marked seen IMMEDIATELY after its own append, the re-run
+    skips the already-recorded ones and the corpus is not duplicated."""
+    batch = [
+        _hist_signal(signal_id=f"s{i}", source_uid=f"u{i}", disclosed_at=_DISCLOSED_A)
+        for i in range(4)
+    ]
+    source = _FakeHistoricalSource("sec_form4", batch)
+    inner = InMemoryEventStore(clock)
+    seen = InMemoryBackfillSeen()  # the DURABLE dedupe table, shared across the crash and re-run
+    crashing = _CrashAfter(inner, crash_at=3)  # dies on the 3rd append
+
+    # Run 1: crashes partway (2 signals appended + marked, then the 3rd append raises).
+    backfill_1 = BackfillSignals(source=source, event_store=crashing, seen=seen, clock=clock)  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError):
+        await backfill_1.execute(
+            start=_DISCLOSED_A, end=_DISCLOSED_B, correlation_id="run-1", dry_run=False
+        )
+
+    # Re-run over the SAME window with the SAME durable seen-set (crash disabled).
+    crashing.crash_at = None
+    backfill_2 = BackfillSignals(source=source, event_store=crashing, seen=seen, clock=clock)  # type: ignore[arg-type]
+    await backfill_2.execute(
+        start=_DISCLOSED_A, end=_DISCLOSED_B, correlation_id="run-2", dry_run=False
+    )
+
+    # Every distinct signal is recorded EXACTLY ONCE — no duplication from the crash+rerun.
+    recorded = signals_from_events(await inner.read_all())
+    ids = [s.id for s in recorded]
+    assert sorted(ids) == ["s0", "s1", "s2", "s3"]
+    assert len(ids) == len(set(ids))

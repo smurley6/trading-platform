@@ -15,6 +15,7 @@ new table or migration and mirrors the kill-switch/peak-equity replay-at-startup
 """
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,22 @@ from trading.domain.provenance import Provenance
 from trading.domain.signals import Signal
 
 logger = logging.getLogger(__name__)
+
+# Some data-source adapters (congress_bills, fda_approvals, federal_register, congress_trades)
+# authenticate with an API key passed as a URL query parameter, because their upstreams
+# (api.data.gov / openFDA / FMP) accept the key only that way. On a routine 429/5xx, httpx raises
+# an HTTPStatusError whose message embeds the FULL request URL — key and all. Logging that verbatim
+# would persist the secret in Render's logs (review F22). We redact key-bearing query params from
+# any message BEFORE it reaches a log record, and never log the raw traceback (which carries the
+# same URL). The owner still rotates any key that a prior deploy may already have leaked.
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"(?i)([?&](?:api_?key|apikey|key|secret|token|password|access_token)=)[^&\s\"'>]+"
+)
+
+
+def _redact_secrets(message: str) -> str:
+    """Redact key-bearing URL query-parameter VALUES from a log message (review F22)."""
+    return _SECRET_QUERY_PARAM_RE.sub(r"\1REDACTED", message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,9 +111,15 @@ class IngestSignals:
         for source in self._sources:
             try:
                 fetched = await source.fetch_signals(self._cursors[source.name])
-            except Exception:
-                logger.exception(
-                    "data source failed; isolating and continuing",
+            except Exception as exc:
+                # Redact any key-bearing URL and do NOT attach the raw traceback (exc_info): an
+                # httpx error message embeds the full request URL including a query-param API key
+                # (review F22). The redacted message keeps the failure diagnosable (status, host,
+                # path) without persisting the secret.
+                logger.error(
+                    "data source '%s' failed; isolating and continuing: %s",
+                    source.name,
+                    _redact_secrets(f"{type(exc).__name__}: {exc}"),
                     extra={"correlation_id": correlation_id},
                 )
                 failed.append(source.name)

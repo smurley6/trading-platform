@@ -22,6 +22,7 @@ is cancel-safe: cancelling the background task closes the socket and returns cle
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -33,6 +34,29 @@ logger = logging.getLogger(__name__)
 
 _SUBSCRIBER_QUEUE_SIZE = 1000
 _STREAM_URL = "wss://stream.data.alpaca.markets/v2/iex"
+
+# There is ONE shared upstream Alpaca socket behind /ws/quotes, so any anonymous client's
+# subscription requests are forwarded onto it (review F23). Validate and CAP what is forwarded so a
+# client cannot flood the shared socket with hundreds of junk symbols (which would trip the IEX
+# symbol-limit error frame). A valid ticker is a short uppercase code (optionally class/dot suffix).
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+_MAX_SUBSCRIBED_SYMBOLS = 200
+
+# Alpaca stream error-frame codes that mean the SESSION cannot proceed (bad/absent auth). Only
+# these are fatal; every other error frame (e.g. 405 symbol-limit exceeded, 409 insufficient
+# subscription, 400 invalid syntax from a junk symbol) is logged and the stream keeps running so a
+# single bad subscription request cannot permanently kill the shared quote feed (review F23).
+_FATAL_AUTH_ERROR_CODES = {401, 402, 404}
+
+
+def _valid_symbols(symbols: Sequence[str]) -> list[str]:
+    """Normalize to upper-case and keep only well-formed tickers (review F23)."""
+    out: list[str] = []
+    for raw in symbols:
+        symbol = raw.strip().upper()
+        if symbol and _SYMBOL_RE.match(symbol):
+            out.append(symbol)
+    return out
 
 
 class AlpacaQuoteStreamError(Exception):
@@ -80,7 +104,14 @@ class AlpacaQuoteStream:
         self._connect = connect
         self._max_backoff = max_backoff_seconds
         self._sleep = sleep
-        self._symbols: set[str] = {s.strip().upper() for s in symbols if s.strip()}
+        # `_seed` = the platform's own permanent subscription (constructor watchlist); never
+        # unsubscribed on a client disconnect. `_symbols` = everything currently subscribed
+        # upstream (seed + client-added). `_refcounts` tracks how many live client subscriptions
+        # reference each NON-seed symbol, so a symbol is unsubscribed only when its last client
+        # goes away (review F23).
+        self._seed: set[str] = set(_valid_symbols(symbols))
+        self._symbols: set[str] = set(self._seed)
+        self._refcounts: dict[str, int] = {}
         self._subscribers: set[asyncio.Queue[Quote]] = set()
         self._ws: _WebSocket | None = None
         self._lock = asyncio.Lock()
@@ -98,14 +129,59 @@ class AlpacaQuoteStream:
         self._subscribers.discard(queue)
 
     async def add_symbols(self, symbols: Sequence[str]) -> None:
-        new = {s.strip().upper() for s in symbols if s.strip()} - self._symbols
-        if not new:
+        """Subscribe `symbols` (validated, capped, refcounted) on the shared upstream socket.
+
+        Each valid non-seed symbol's client refcount is incremented so a later `remove_symbols`
+        with the same set is balanced. Only symbols genuinely NEW to the upstream subscription
+        trigger a subscribe frame, and never beyond the total-symbol cap (review F23).
+        """
+        to_subscribe: list[str] = []
+        for symbol in _valid_symbols(symbols):
+            if symbol in self._seed:
+                continue  # permanent base subscription: no refcount, never removed
+            self._refcounts[symbol] = self._refcounts.get(symbol, 0) + 1
+            if symbol not in self._symbols:
+                if len(self._symbols) >= _MAX_SUBSCRIBED_SYMBOLS:
+                    logger.warning(
+                        "quote stream at symbol cap (%d); not subscribing %s",
+                        _MAX_SUBSCRIBED_SYMBOLS,
+                        symbol,
+                    )
+                    continue
+                self._symbols.add(symbol)
+                to_subscribe.append(symbol)
+        if not to_subscribe:
             return
-        self._symbols |= new
         async with self._lock:
             ws = self._ws
             if ws is not None:
-                await ws.send(_subscribe_payload(sorted(new)))
+                await ws.send(_subscribe_payload(sorted(to_subscribe)))
+
+    async def remove_symbols(self, symbols: Sequence[str]) -> None:
+        """Drop one client's contribution to `symbols`, unsubscribing any that no client wants.
+
+        Called when a `/ws/quotes` client disconnects so its (possibly junk) symbols do not
+        persist on the shared socket and re-poison reconnects (review F23). A seed symbol or one
+        still referenced by another client stays subscribed.
+        """
+        to_unsubscribe: list[str] = []
+        for symbol in _valid_symbols(symbols):
+            if symbol in self._seed:
+                continue
+            count = self._refcounts.get(symbol, 0)
+            if count <= 1:
+                self._refcounts.pop(symbol, None)
+                if symbol in self._symbols:
+                    self._symbols.discard(symbol)
+                    to_unsubscribe.append(symbol)
+            else:
+                self._refcounts[symbol] = count - 1
+        if not to_unsubscribe:
+            return
+        async with self._lock:
+            ws = self._ws
+            if ws is not None:
+                await ws.send(_unsubscribe_payload(sorted(to_unsubscribe)))
 
     async def run(self) -> None:
         """Connect → auth → subscribe → consume, reconnecting with backoff until cancelled.
@@ -150,13 +226,22 @@ class AlpacaQuoteStream:
 
     async def _read_quotes(self, ws: _WebSocket) -> AsyncIterator[Quote]:
         """Drive the wire protocol, yielding mapped `Quote`s. Sends the subscribe frame once
-        auth is acknowledged. Raises `AlpacaQuoteStreamError` on an auth/error frame."""
+        auth is acknowledged. Raises `AlpacaQuoteStreamError` only on a fatal AUTH error frame;
+        other error frames are logged and skipped so the shared feed survives (review F23)."""
         while True:
             raw = await ws.recv()
             for frame in _decode_frames(raw):
                 kind = frame.get("T")
                 if kind == "error":
-                    raise AlpacaQuoteStreamError(f"stream error frame: {frame.get('msg', frame)}")
+                    code = frame.get("code")
+                    if isinstance(code, int) and code in _FATAL_AUTH_ERROR_CODES:
+                        raise AlpacaQuoteStreamError(
+                            f"stream auth error frame: {frame.get('msg', frame)}"
+                        )
+                    # Non-auth error (e.g. a client's junk symbol tripped the IEX symbol limit):
+                    # log and keep consuming instead of tearing down the shared feed (review F23).
+                    logger.warning("non-fatal quote stream error frame: %s", frame)
+                    continue
                 if kind == "success" and frame.get("msg") == "authenticated":
                     if self._symbols:
                         await ws.send(_subscribe_payload(sorted(self._symbols)))
@@ -195,6 +280,10 @@ def _auth_payload(key_id: str, secret_key: str) -> str:
 
 def _subscribe_payload(symbols: Sequence[str]) -> str:
     return json.dumps({"action": "subscribe", "quotes": list(symbols)})
+
+
+def _unsubscribe_payload(symbols: Sequence[str]) -> str:
+    return json.dumps({"action": "unsubscribe", "quotes": list(symbols)})
 
 
 def _decode_frames(raw: str | bytes) -> list[dict[str, Any]]:
