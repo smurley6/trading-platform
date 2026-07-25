@@ -236,6 +236,16 @@ def build_dependencies(settings: Settings) -> AppDeps:
         )
         live_aclosers.append(paper_client.aclose)
 
+    # Anti-placeholder data-integrity switch (computed here because it also governs the market
+    # -data seam below). Engages whenever a REAL Alpaca account is wired (paper or live) or on an
+    # explicit REQUIRE_REAL_DATA opt-in. Under it, a real account must never trade or mark against
+    # synthetic prices — enforced at BOTH wiring time (the startup guard below) and decision time
+    # (the market-data seam is wired with NO static fallback, so a missing/non-positive live quote
+    # raises NoRealQuoteError and the decision path skips that symbol — review F4).
+    require_real_data = (
+        settings.require_real_data or settings.enable_alpaca_paper or settings.allow_live
+    )
+
     # Live quote feed (live stock tracking + live P&L). OFF by construction: built only when
     # enabled AND data credentials resolve (Alpaca data accepts paper or live keys); else the
     # disabled feed keeps `python -m trading.main` network-silent. Reused for /quotes,
@@ -252,9 +262,12 @@ def build_dependencies(settings: Settings) -> AppDeps:
             base_url=settings.alpaca_data_base_url,
         )
         live_aclosers.append(data_client.aclose)
-        # Route the decision/fill price seam through the live feed (real prices), keeping the
-        # static dev prices as the fallback for symbols the feed cannot price.
-        market_data = FeedBackedMarketData(quote_feed, market_data)
+        # Route the decision/fill price seam through the live feed (real prices). In dev mode the
+        # static dev prices remain the fallback for symbols the feed cannot price; under
+        # require_real_data the fallback is NOT wired (fallback=None), so a symbol with no
+        # live/positive quote raises NoRealQuoteError and is skipped at decision time instead of
+        # being sized against a synthetic price (review F4).
+        market_data = FeedBackedMarketData(quote_feed, None if require_real_data else market_data)
 
     # Real-time quote stream behind /ws/quotes. Same switch as the REST feed: built only when
     # enabled AND data creds resolve; otherwise the disabled stream opens no socket. Seeded with
@@ -318,13 +331,11 @@ def build_dependencies(settings: Settings) -> AppDeps:
     )
 
     # --- Anti-placeholder data-integrity gate (no fake/placeholder data in real trades) -------
-    # Engages automatically whenever a REAL Alpaca account is wired (paper or live), or on an
-    # explicit REQUIRE_REAL_DATA opt-in. When on: synthetic signals are dropped at ingestion,
-    # a real-broker evaluation aborts on any non-REAL signal, and — here — startup is refused if a
-    # real broker would trade/mark against synthetic prices. Default off keeps dev/tests unchanged.
-    require_real_data = (
-        settings.require_real_data or settings.enable_alpaca_paper or settings.allow_live
-    )
+    # `require_real_data` was computed above (it also governs the market-data seam). When on:
+    # synthetic signals are dropped at ingestion, a real-broker evaluation aborts on any non-REAL
+    # signal, the market-data seam refuses to substitute a synthetic price (NoRealQuoteError →
+    # symbol skipped at decision time), and — here — startup is refused if a real broker would have
+    # no live feed at all. Default off keeps dev/tests unchanged.
     real_market_data = bool(
         settings.enable_live_quotes and settings.data_key_id() and settings.data_secret_key()
     )

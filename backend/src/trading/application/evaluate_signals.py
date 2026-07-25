@@ -18,7 +18,7 @@ from trading.application.place_order import PlaceOrder, PlaceOrderRequest
 from trading.application.ports.broker import BrokerOrder, BrokerPort
 from trading.application.ports.clock import ClockPort
 from trading.application.ports.event_store import EventStorePort
-from trading.application.ports.market_data import MarketDataPort, Quote
+from trading.application.ports.market_data import MarketDataPort, NoRealQuoteError, Quote
 from trading.application.risk import RiskContext, RiskGate
 from trading.domain.decisions import Decision, RiskVerdict
 from trading.domain.events import DomainEvent, EventType
@@ -120,7 +120,19 @@ class EvaluateSignals:
             side = OrderSide.BUY if delta > 0 else OrderSide.SELL
             quantity = abs(delta)
 
-            quote = await self._market_data.get_quote(target.symbol)
+            try:
+                quote = await self._market_data.get_quote(target.symbol)
+            except NoRealQuoteError:
+                # Fail closed (review F4): with a real account, no live price means NO trade for
+                # this symbol — never a guessed one. Skip before any decision/market_context event
+                # is recorded, so the audit trail never carries a synthetic price. Other symbols
+                # with valid quotes still evaluate.
+                logger.warning(
+                    "skipping %s: no real market price available; no order placed",
+                    target.symbol,
+                    extra={"correlation_id": correlation_id},
+                )
+                continue
             decision = Decision(
                 id=str(uuid4()),
                 strategy_id=self._strategy.strategy_id,

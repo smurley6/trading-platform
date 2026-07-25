@@ -27,6 +27,21 @@ class Quote:
     as_of: datetime
 
 
+class NoRealQuoteError(LookupError):
+    """No REAL market price is available for a symbol and none may be substituted.
+
+    Part of the `MarketDataPort` contract: when a real account is in play
+    (`require_real_data`), an adapter that cannot obtain a live, positive quote MUST raise
+    this rather than fall back to a static/synthetic price — a real order must never be
+    risk-sized or marked against a guessed price (review F4). Callers on the decision path
+    catch it and SKIP that symbol (no decision, no order); other symbols proceed.
+    """
+
+    def __init__(self, symbol: str) -> None:
+        super().__init__(f"no real market price available for symbol '{symbol}'")
+        self.symbol = symbol
+
+
 class MarketDataPort(Protocol):
     async def get_quote(self, symbol: str) -> Quote: ...
 
