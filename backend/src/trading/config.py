@@ -9,6 +9,10 @@ from typing import Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from trading.domain.form4_edge import (
+    DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS,
+    DEFAULT_FORM4_EXPECTED_EDGE_H1,
+)
 from trading.domain.sleeves import TradingMode
 
 
@@ -67,6 +71,18 @@ class Settings(BaseSettings):
     conviction_min_sources_for_full_corroboration: int = 1
     conviction_max_corroboration_factor: float | None = None
     conviction_scale: float = 25.0
+
+    # Form 4 buy edge calibration (task-13, docs/RESEARCH-PLAN.md §2-§3). Anchored on the EPISODE-
+    # level Phase-7 read (label run a38d3848), NOT the inflated label-level pooled numbers. Neither
+    # value touches TRADE/WATCH thresholds or sizing multipliers on its own — they are the honest
+    # constants sizing/gate code must anchor on, each with the OLD value recoverable here:
+    #   * `form4_expected_edge_h1`: the per-trade edge at h=1 = ex-LUV per-episode mean +0.41%.
+    #     Recover the OLD label-level pooled anchor (+1.0%) with FORM4_EXPECTED_EDGE_H1=0.01.
+    #   * `form4_buy_decay_half_life_days`: post-acceptance decay half-life (days) — weight
+    #     concentrates in days 0-5 (edge at h=1; h=20 hit 46% / median negative). Recover the OLD
+    #     flat (no-decay) holding with FORM4_BUY_DECAY_HALF_LIFE_DAYS=0.
+    form4_expected_edge_h1: float = DEFAULT_FORM4_EXPECTED_EDGE_H1
+    form4_buy_decay_half_life_days: float = DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS
 
     # Scheduled-cycle trade mode (FR-EXE). Governs BOTH the daily cron and the in-process
     # web-service scheduler (when INGEST_INTERVAL_SECONDS > 0). Default 'manual' is the SAFE

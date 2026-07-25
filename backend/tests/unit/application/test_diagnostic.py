@@ -7,12 +7,15 @@ split, prior-vs-measured, and unresolvable-reason breakdown.
 """
 
 import math
+import statistics
 from datetime import UTC, datetime
 from typing import Literal
 
 from trading.application.diagnostic import (
     build_report,
+    clustered_standard_error,
     conviction_bucket_for_score,
+    form4_episode_stats,
     monthly_histogram,
     point_in_time_conviction_buckets,
     prior_vs_measured,
@@ -468,3 +471,213 @@ def test_build_report_assembles_all_sections() -> None:
     assert len(report.horizon_benchmark_stats) == 1
     assert report.unresolvable_reasons == {"insufficient_forward_bars": 1}
     assert any(r.source == "sec_form4" for r in report.prior_vs_measured)
+
+
+# --- Episode-level Form 4 buy edge (task-13) --------------------------------------------------
+
+
+def _form4_buy(
+    signal_id: str,
+    *,
+    ticker: str,
+    owner: str,
+    created_at: datetime,
+) -> Signal:
+    """A Form 4 open-market PURCHASE signal (owner in raw_payload, positive sentiment)."""
+    return Signal(
+        id=signal_id,
+        created_at=created_at,
+        source_type=SignalSource.DISCLOSED_TRADE,
+        ticker=ticker,
+        politician_id=None,
+        sentiment=0.5,
+        politician_weight=1.0,
+        source_reliability=0.60,
+        raw_payload={"owner": owner},
+        provenance=Provenance.BACKFILLED,
+    )
+
+
+def test_clustered_se_is_two_cluster_not_sqrt_n_labels() -> None:
+    """Acceptance test 2: ticker-clustered CR0 SE reflects the CLUSTER count, not the label count.
+
+    Two tickers, all-``+a`` labels on one and all-``-a`` on the other: the CR0 SE clustered by
+    ticker is |a-(-a)|/(2*sqrt(2)) and is INVARIANT to how many labels each ticker carries, whereas
+    a naive iid ``stdev/sqrt(n)`` shrinks as labels pile up. That invariance is the whole point of
+    clustering — 200 correlated same-ticker rows are ~2 independent draws, not 200.
+    """
+    a = 0.02
+
+    def se_for(n_per_ticker: int) -> float:
+        by_ticker = {"AAA": [a] * n_per_ticker, "BBB": [-a] * n_per_ticker}
+        se = clustered_standard_error(by_ticker)
+        assert se is not None
+        return se
+
+    se_small = se_for(10)
+    se_large = se_for(200)
+    # Hand-computed CR0 SE for the equal-split, all-identical case: |a-b| / (2*sqrt(2)).
+    expected = (2 * a) / (2 * math.sqrt(2))
+    assert math.isclose(se_small, expected, abs_tol=1e-12)
+    # INVARIANT to label count (a sqrt(n) estimator would fall by ~1/sqrt(20)).
+    assert math.isclose(se_small, se_large, abs_tol=1e-12)
+    # ...and far larger than the naive iid SE, which shrinks with n.
+    flat = [a] * 200 + [-a] * 200
+    naive = statistics.stdev(flat) / math.sqrt(len(flat))
+    assert se_large > 5 * naive
+
+
+def test_clustered_se_empty_is_none_and_single_obs_is_zero() -> None:
+    assert clustered_standard_error({}) is None
+    assert clustered_standard_error({"AAA": [0.05]}) == 0.0
+
+
+def test_form4_episode_stats_label_level_inflated_vs_episode_level() -> None:
+    """Acceptance test 1: the Phase-7 shape — one 25-filing 100%-hit LUV stream + 10 mixed episodes.
+
+    Label-level hit is inflated by the 25 stacked LUV rows; the episode table reports the DEFLATED
+    per-episode hit over ``n_episodes``, not ``n_labels``.
+    """
+    day = _dt("2025-03-03")
+    signals: list[Signal] = []
+    labels: list[OutcomeLabel] = []
+
+    # One LUV stream: 25 same-day filings from ONE owner, every one a hit (+0.02) -> ONE episode.
+    for i in range(25):
+        sid = f"sec-form4-luv-{i:02d}"
+        signals.append(_form4_buy(sid, ticker="LUV", owner="LUV OWNER", created_at=day))
+        labels.append(_label(signal_id=sid, horizon_days=1, abnormal_return=0.02, ticker="LUV"))
+
+    # 10 mixed episodes on distinct tickers/owners: 5 hits (+0.01), 5 misses (-0.01).
+    for i in range(10):
+        sid = f"sec-form4-mix-{i:02d}"
+        ticker = f"T{i:02d}"
+        ar = 0.01 if i < 5 else -0.01
+        signals.append(_form4_buy(sid, ticker=ticker, owner=f"OWNER {i}", created_at=day))
+        labels.append(_label(signal_id=sid, horizon_days=1, abnormal_return=ar, ticker=ticker))
+
+    rows = {(r.variant, r.horizon_days): r for r in form4_episode_stats(signals, labels)}
+    with_luv = rows[("with_luv", 1)]
+    ex_luv = rows[("ex_luv", 1)]
+
+    # Episode-level reports EPISODES, not labels: 11 with LUV, 10 without.
+    assert with_luv.n_episodes == 11
+    assert with_luv.n_labels == 35
+    assert ex_luv.n_episodes == 10
+    assert ex_luv.n_labels == 10
+
+    # Label-level hit is INFLATED (30/35) vs the honest per-episode hit (6/11) by construction.
+    assert with_luv.label_hit_rate is not None and math.isclose(with_luv.label_hit_rate, 30 / 35)
+    assert with_luv.episode_hit_rate is not None and math.isclose(with_luv.episode_hit_rate, 6 / 11)
+    assert with_luv.label_hit_rate > with_luv.episode_hit_rate
+
+    # ex-LUV episode outcome = mean member AR per episode; 5 of 10 positive.
+    assert ex_luv.episode_hit_rate is not None and math.isclose(ex_luv.episode_hit_rate, 0.5)
+    assert ex_luv.episode_mean is not None and math.isclose(ex_luv.episode_mean, 0.0, abs_tol=1e-12)
+
+
+def test_form4_episode_stats_reports_both_variants_and_marks_low_n() -> None:
+    """Acceptance test 4: with-LUV AND ex-LUV rows, and thin cells (n<30) flagged low_n."""
+    day = _dt("2025-03-03")
+    signals = [
+        _form4_buy("sec-form4-a", ticker="LUV", owner="OWNER A", created_at=day),
+        _form4_buy("sec-form4-b", ticker="LMT", owner="OWNER B", created_at=day),
+    ]
+    labels = [
+        _label(signal_id="sec-form4-a", horizon_days=1, abnormal_return=0.03, ticker="LUV"),
+        _label(signal_id="sec-form4-b", horizon_days=1, abnormal_return=0.01, ticker="LMT"),
+    ]
+    rows = form4_episode_stats(signals, labels)
+    variants = {r.variant for r in rows if r.horizon_days == 1}
+    assert variants == {"with_luv", "ex_luv"}
+    # Both cells are far under 30 episodes -> low_n flagged everywhere.
+    assert all(r.low_n for r in rows)
+    ex_luv = next(r for r in rows if r.variant == "ex_luv")
+    assert ex_luv.n_episodes == 1  # LUV excluded, only LMT remains
+    assert ex_luv.n_tickers == 1
+
+
+def test_form4_episode_stats_averages_member_returns_per_episode() -> None:
+    # A single (ticker, owner) stream with two members averages their abnormal returns.
+    day = _dt("2025-03-03")
+    signals = [
+        _form4_buy("sec-form4-1", ticker="LMT", owner="JANE DOE", created_at=day),
+        _form4_buy("sec-form4-2", ticker="LMT", owner="JANE DOE", created_at=_dt("2025-06-06")),
+    ]
+    labels = [
+        _label(signal_id="sec-form4-1", horizon_days=1, abnormal_return=0.10, ticker="LMT"),
+        _label(signal_id="sec-form4-2", horizon_days=1, abnormal_return=0.20, ticker="LMT"),
+    ]
+    ex_luv = next(
+        r
+        for r in form4_episode_stats(signals, labels)
+        if r.variant == "ex_luv" and r.horizon_days == 1
+    )
+    # Distant gap (95 days) still ONE episode (episode = whole (ticker, owner) relationship).
+    assert ex_luv.n_episodes == 1
+    assert ex_luv.n_labels == 2
+    assert ex_luv.episode_mean is not None and math.isclose(ex_luv.episode_mean, 0.15)
+
+
+def test_form4_episode_stats_ignores_non_form4_and_sells() -> None:
+    day = _dt("2025-03-03")
+    sell = _form4_buy("sec-form4-sell", ticker="LMT", owner="X", created_at=day)
+    sell = Signal(  # rebuild as a SELL (negative sentiment) — must be excluded
+        id=sell.id,
+        created_at=sell.created_at,
+        source_type=sell.source_type,
+        ticker=sell.ticker,
+        politician_id=None,
+        sentiment=-0.5,
+        politician_weight=1.0,
+        source_reliability=0.0,
+        raw_payload={"owner": "X"},
+        provenance=Provenance.BACKFILLED,
+    )
+    news = _signal(signal_id="news-1", created_at=day, ticker="LMT", sentiment=0.5)
+    labels = [
+        _label(signal_id="sec-form4-sell", horizon_days=1, abnormal_return=0.05, ticker="LMT"),
+        _label(signal_id="news-1", horizon_days=1, abnormal_return=0.05, ticker="LMT"),
+    ]
+    # No Form 4 BUY signals -> no episode rows at all.
+    assert form4_episode_stats([sell, news], labels) == ()
+
+
+def test_build_report_includes_episode_stats_and_calibration_constants() -> None:
+    thresholds = ConvictionThresholds(trade=70.0, watch=40.0)
+    day = _dt("2025-03-03")
+    signals = [_form4_buy("sec-form4-1", ticker="LMT", owner="JANE DOE", created_at=day)]
+    labels = [_label(signal_id="sec-form4-1", horizon_days=1, abnormal_return=0.05, ticker="LMT")]
+    report = build_report(
+        label_run_id="run-1",
+        as_of=_dt("2025-04-01"),
+        signals=signals,
+        labels=labels,
+        window_days=21,
+        thresholds=thresholds,
+    )
+    assert {r.variant for r in report.form4_episode_stats} == {"with_luv", "ex_luv"}
+    assert report.form4_expected_edge_h1 == 0.004  # new episode anchor
+    assert report.form4_buy_decay_half_life_days == 3.0
+    # Decay curve sampled at the study horizons, monotone non-increasing, t+20 << t+1.
+    curve = report.form4_buy_decay_curve
+    assert set(curve) == {1, 5, 20}
+    assert curve[20] < 0.25 * curve[1]
+
+
+def test_build_report_expected_edge_and_decay_are_overridable() -> None:
+    # OLD values recoverable via the build_report params the job threads config through.
+    thresholds = ConvictionThresholds(trade=70.0, watch=40.0)
+    report = build_report(
+        label_run_id="run-1",
+        as_of=_dt("2025-04-01"),
+        signals=[],
+        labels=[],
+        window_days=21,
+        thresholds=thresholds,
+        expected_edge_h1=0.01,
+        decay_half_life_days=0.0,
+    )
+    assert report.form4_expected_edge_h1 == 0.01
+    # half-life 0 -> flat holding (weight 1.0 at every horizon).
+    assert set(report.form4_buy_decay_curve.values()) == {1.0}

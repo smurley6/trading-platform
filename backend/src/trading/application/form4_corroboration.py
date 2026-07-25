@@ -77,6 +77,13 @@ def _votes(signals: Sequence[Signal]) -> list[Form4Vote]:
     ]
 
 
+def form4_buy_votes(signals: Sequence[Signal]) -> list[Form4Vote]:
+    """Public: one :class:`Form4Vote` per ticker-resolved Form 4 *buy* signal (sells/non-Form-4
+    excluded, unresolved tickers excluded). The read-only episode/edge evaluator (task-13) uses this
+    to build episodes without re-deriving the ``raw_payload`` (owner) parsing that lives here."""
+    return _votes(signals)
+
+
 def collapse_form4_signals(signals: Sequence[Signal]) -> list[Signal]:
     """Collapse repeated Form 4 buy filings so each distinct filer stream contributes one signal.
 

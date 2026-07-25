@@ -36,7 +36,12 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from trading.application.diagnostic import DiagnosticReport, ReturnStats, build_report
+from trading.application.diagnostic import (
+    DiagnosticReport,
+    EpisodeHorizonStats,
+    ReturnStats,
+    build_report,
+)
 from trading.config import Settings
 from trading.domain.events import DomainEvent, EventType
 from trading.interface.app import AppDeps
@@ -56,6 +61,7 @@ _SECTIONS: tuple[str, ...] = (
     "horizon_conviction_stats",
     "prior_vs_measured",
     "unresolvable_reasons",
+    "form4_episode_stats",
 )
 
 
@@ -174,7 +180,51 @@ def _format_table(report: DiagnosticReport) -> str:
     if not report.unresolvable_reasons:
         lines.append("  (no unresolvable labels)")
 
+    lines.append("")
+    lines.append("-- 7. Form 4 buy edge: episode-level vs label-level (task-13) --")
+    curve = " ".join(
+        f"{day}d={weight:.3f}" for day, weight in sorted(report.form4_buy_decay_curve.items())
+    )
+    lines.append(
+        f"  anchored expected edge (h=1): {report.form4_expected_edge_h1:+.4f} "
+        f"(episode ex-LUV mean; OLD label-level +0.0100 via FORM4_EXPECTED_EDGE_H1=0.01)"
+    )
+    lines.append(
+        f"  buy decay half-life: {report.form4_buy_decay_half_life_days:g}d  weights [{curve}]  "
+        f"(0 recovers the OLD flat holding via FORM4_BUY_DECAY_HALF_LIFE_DAYS=0)"
+    )
+    lines.append(
+        "  primary cell = ex_luv per-EPISODE h=1 (pre-registered); label-level shown alongside."
+    )
+    for episode_row in report.form4_episode_stats:
+        lines.append(_format_episode_stats(episode_row))
+    if not report.form4_episode_stats:
+        lines.append("  (no Form 4 buy labels)")
+
     return "\n".join(lines)
+
+
+def _format_episode_stats(row: EpisodeHorizonStats) -> str:
+    """One episode-vs-label line: episode counts/stats then the pooled label-level counterpart."""
+
+    def _pct(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.1%}"
+
+    def _num(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:+.4f}"
+
+    def _se(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.4f}"
+
+    low = " LOW-N" if row.low_n else ""
+    return (
+        f"  {row.variant:<8} h={row.horizon_days:<3} "
+        f"EPISODE n_ep={row.n_episodes:<4} n_tick={row.n_tickers:<4} "
+        f"hit={_pct(row.episode_hit_rate):<7} mean={_num(row.episode_mean):<9} "
+        f"med={_num(row.episode_median):<9} se={_se(row.episode_clustered_se):<7} | "
+        f"LABEL n={row.n_labels:<5} hit={_pct(row.label_hit_rate):<7} "
+        f"mean={_num(row.label_mean):<9} se={_se(row.label_clustered_se):<7}{low}"
+    )
 
 
 def _format_stats(stats: ReturnStats) -> str:
@@ -224,6 +274,8 @@ async def run_diagnostic(*, run_id: str | None, out: str | None) -> int:
             labels=labels,
             window_days=deps.conviction_window_days,
             thresholds=deps.conviction_thresholds,
+            expected_edge_h1=settings.form4_expected_edge_h1,
+            decay_half_life_days=settings.form4_buy_decay_half_life_days,
         )
 
         payload = _report_to_json(report)

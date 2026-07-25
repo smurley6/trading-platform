@@ -331,6 +331,54 @@ class Form4Vote:
         return self.created_at.date()
 
 
+def group_form4_vote_streams(
+    votes: Sequence[Form4Vote],
+    *,
+    stream_window_days: int | None = _DEFAULT_FORM4_STREAM_WINDOW_DAYS,
+) -> list[list[Form4Vote]]:
+    """Partition Form 4 votes into filer streams, preserving each stream's full membership (pure).
+
+    Grouping is keyed on ``(ticker, normalized owner)``. Within each key the filings are walked in
+    chronological order and split into *streams*: a filing joins the current stream when it lands
+    within ``stream_window_days`` of that stream's most-recent filing — a TRAILING ``(t-W, t]``
+    window that never looks forward — otherwise it opens a new stream.
+
+    ``stream_window_days=None`` means NO gap splitting: every filing of one ``(ticker, owner)`` is a
+    single stream, regardless of the gaps between filings (the whole filer-on-name relationship is
+    ONE unit). This is the coarser *episode* unit the task-13 evaluator measures the buy edge over
+    — distinct from the 30-day live-scan dedupe (``dedupe_form4_votes``, task-11) that this helper
+    also backs.
+
+    Each returned stream lists its member votes in chronological ``(created_at, signal_id)`` order,
+    so ``stream[0]`` is the stream's earliest (representative) filing. Streams are returned ordered
+    by ``(ticker, owner, earliest created_at, signal_id)``. Distinct owners always yield distinct
+    streams, even on the same day.
+    """
+    if stream_window_days is not None and stream_window_days < 0:
+        raise ValueError("stream_window_days must be non-negative")
+
+    ordered = sorted(votes, key=lambda v: (v.ticker, v.owner, v.created_at, v.signal_id))
+    window = None if stream_window_days is None else timedelta(days=stream_window_days)
+
+    streams: list[list[Form4Vote]] = []
+    current_key: tuple[str, str] | None = None
+    stream_last: datetime | None = None
+    for vote in ordered:
+        key = (vote.ticker, vote.owner)
+        in_stream = key == current_key and (
+            window is None or (stream_last is not None and vote.created_at - stream_last <= window)
+        )
+        if in_stream:
+            # Same ongoing stream: extend the trailing window; the earliest filing stays the rep.
+            stream_last = vote.created_at
+            streams[-1].append(vote)
+            continue
+        current_key = key
+        stream_last = vote.created_at
+        streams.append([vote])
+    return streams
+
+
 def dedupe_form4_votes(
     votes: Sequence[Form4Vote],
     *,
@@ -347,29 +395,10 @@ def dedupe_form4_votes(
     owners always yield distinct votes, even on the same day.
 
     Returns one representative vote per stream, ordered deterministically by
-    ``(ticker, owner, created_at, signal_id)``.
+    ``(ticker, owner, created_at, signal_id)`` — a thin wrapper over
+    :func:`group_form4_vote_streams` (same partitioning, keeping each stream's earliest filing).
     """
-    if stream_window_days < 0:
-        raise ValueError("stream_window_days must be non-negative")
-
-    ordered = sorted(votes, key=lambda v: (v.ticker, v.owner, v.created_at, v.signal_id))
-    window = timedelta(days=stream_window_days)
-
-    kept: list[Form4Vote] = []
-    current_key: tuple[str, str] | None = None
-    stream_last: datetime | None = None
-    for vote in ordered:
-        key = (vote.ticker, vote.owner)
-        in_stream = (
-            key == current_key
-            and stream_last is not None
-            and vote.created_at - stream_last <= window
-        )
-        if in_stream:
-            # Same ongoing stream: extend the trailing window; the earliest filing stays the rep.
-            stream_last = vote.created_at
-            continue
-        current_key = key
-        stream_last = vote.created_at
-        kept.append(vote)
-    return kept
+    return [
+        stream[0]
+        for stream in group_form4_vote_streams(votes, stream_window_days=stream_window_days)
+    ]

@@ -19,14 +19,26 @@ computation, the job/use-case class does the I/O). Stats use only the stdlib ``s
 module (no numpy/pandas — this module stays dependency-free by design).
 """
 
+import math
 import statistics
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from trading.application.form4_corroboration import form4_buy_votes
 from trading.application.ports.outcome_labels import OutcomeLabel
-from trading.domain.conviction import ConvictionParams, ConvictionThresholds, compute_conviction
+from trading.domain.conviction import (
+    ConvictionParams,
+    ConvictionThresholds,
+    compute_conviction,
+    group_form4_vote_streams,
+)
+from trading.domain.form4_edge import (
+    DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS,
+    DEFAULT_FORM4_EXPECTED_EDGE_H1,
+    form4_buy_decay_weight,
+)
 from trading.domain.signals import Signal
 
 # --- Source key derivation (clarification 3) ---------------------------------------------------
@@ -386,6 +398,162 @@ def unresolvable_reason_breakdown(labels: Sequence[OutcomeLabel]) -> dict[str, i
     return dict(sorted(counts.items()))
 
 
+# --- Episode-level Form 4 buy edge (task-13, docs/RESEARCH-PLAN.md §2-§3) ------------------------
+
+# The mega-ticker whose same-day insider stacking inflated the pooled label-level buy edge (194
+# same-day LUV rows across 2 owners in the Phase-7 analysis). The evaluator reports BOTH a with-LUV
+# and an ex-LUV variant so the LUV distortion is always visible; the PRE-REGISTERED primary cell is
+# ex-LUV per-episode h=1 (docs/RESEARCH-PLAN.md — "No new splits count as confirmation").
+FORM4_EPISODE_EXCLUDED_TICKER = "LUV"
+
+# Episode cells thinner than this are flagged low_n: too few independent clusters/episodes for the
+# cluster-robust read to be trustworthy.
+_MIN_EPISODE_CELL_N = 30
+
+
+def _hit_rate(values: Sequence[float]) -> float | None:
+    return (sum(1 for v in values if v > 0) / len(values)) if values else None
+
+
+def _mean_or_none(values: Sequence[float]) -> float | None:
+    return statistics.mean(values) if values else None
+
+
+def _median_or_none(values: Sequence[float]) -> float | None:
+    return statistics.median(values) if values else None
+
+
+def clustered_standard_error(values_by_cluster: Mapping[str, Sequence[float]]) -> float | None:
+    """CR0 cluster-robust standard error of the sample mean, clustered by the mapping's keys.
+
+    Regressing the outcome on a constant makes the point estimate the sample mean; the CR0 sandwich
+    variance of that mean is ``(1 / n^2) * sum_g (sum_{i in g} (x_i - xbar))^2`` -- the sum over
+    clusters ``g`` of the SQUARED cluster residual totals, with NO small-sample (``G/(G-1)``)
+    correction (that is what makes it CR0). Unlike the iid ``sigma / sqrt(n)`` estimator it does NOT
+    shrink toward zero as correlated observations pile into a handful of clusters -- 194 same-ticker
+    Form 4 rows count as roughly one independent draw, not 194 -- which is exactly why the honest
+    report clusters by ticker. Returns ``None`` for an empty input; ``0.0`` when every cluster's
+    residual total is 0 (e.g. a single observation, whose residual is 0).
+    """
+    values = [v for group in values_by_cluster.values() for v in group]
+    n = len(values)
+    if n == 0:
+        return None
+    mean = sum(values) / n
+    meat = sum(sum(v - mean for v in group) ** 2 for group in values_by_cluster.values())
+    return math.sqrt(meat) / n
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeHorizonStats:
+    """Form 4 buy edge at one horizon, per-EPISODE reported ALONGSIDE label-level (task-13).
+
+    An *episode* is one ``(ticker, normalized owner)`` filer-on-name relationship — every Form 4
+    buy that owner filed on that ticker — collapsed to a single unit whose outcome is the MEAN of
+    its member abnormal returns at the horizon. Collapsing to episodes removes the same-day /
+    same-filer stacking that inflates the naive pooled label-level number (Phase 7: LUV's 194
+    same-day rows drove the with-LUV label hit to 80% while the honest per-episode hit is ~62%).
+
+    Every cell carries a ticker-clustered (CR0) SE and the honest unit counts at BOTH levels
+    (``n_episodes`` / ``n_tickers`` for the episode read, ``n_labels`` for the pooled read), and
+    ``low_n`` flags an episode cell with fewer than 30 episodes.
+    """
+
+    horizon_days: int
+    variant: str  # "with_luv" | "ex_luv"
+    # Pooled label-level (one row per member label — the inflated, naive number).
+    n_labels: int
+    label_hit_rate: float | None
+    label_mean: float | None
+    label_median: float | None
+    label_clustered_se: float | None
+    # Episode-level ((ticker, owner) unit; outcome = mean member abnormal return).
+    n_episodes: int
+    n_tickers: int
+    episode_hit_rate: float | None
+    episode_mean: float | None
+    episode_median: float | None
+    episode_clustered_se: float | None
+    low_n: bool  # n_episodes < _MIN_EPISODE_CELL_N
+
+
+def form4_episode_stats(
+    signals: Sequence[Signal],
+    labels: Sequence[OutcomeLabel],
+    *,
+    excluded_ticker: str = FORM4_EPISODE_EXCLUDED_TICKER,
+) -> tuple[EpisodeHorizonStats, ...]:
+    """Per (horizon x {with-LUV, ex-LUV}): the Form 4 buy edge at episode AND label level (task-13).
+
+    Read-only over ``signals`` (for the ``(ticker, owner)`` episode grouping — the owner lives in
+    ``raw_payload``, parsed by :func:`form4_buy_votes`) and ``labels`` (the abnormal returns).
+
+    An episode is one ``(ticker, owner)`` filer stream with NO gap splitting (the whole filer-on-
+    name relationship is one edge unit — this is the definition the pinned Phase-7 run measured,
+    reusing :func:`group_form4_vote_streams` with ``stream_window_days=None``). An episode
+    contributes to horizon ``h`` when it has at least one ``ok`` member label at ``h``; its outcome
+    is the MEAN of its member abnormal returns at ``h``. The label-level row pools those same member
+    labels one-per-label (the inflated number). Both levels cluster by ticker for the CR0 SE.
+    """
+    votes = form4_buy_votes(signals)
+    streams = group_form4_vote_streams(votes, stream_window_days=None)
+    buy_signal_ids = {vote.signal_id for vote in votes}
+
+    # ok abnormal returns keyed by (signal_id, horizon), Form 4 buys only.
+    ars_by_signal_horizon: dict[tuple[str, int], list[float]] = defaultdict(list)
+    horizons: set[int] = set()
+    for label in labels:
+        if label.status != "ok" or label.abnormal_return is None:
+            continue
+        if label.signal_id not in buy_signal_ids:
+            continue
+        ars_by_signal_horizon[(label.signal_id, label.horizon_days)].append(label.abnormal_return)
+        horizons.add(label.horizon_days)
+
+    rows: list[EpisodeHorizonStats] = []
+    for horizon in sorted(horizons):
+        for variant, drop_luv in (("with_luv", False), ("ex_luv", True)):
+            episode_means: list[float] = []
+            episode_by_ticker: dict[str, list[float]] = defaultdict(list)
+            label_values: list[float] = []
+            label_by_ticker: dict[str, list[float]] = defaultdict(list)
+            for stream in streams:
+                ticker = stream[0].ticker
+                if drop_luv and ticker == excluded_ticker:
+                    continue
+                member_ars = [
+                    ar
+                    for vote in stream
+                    for ar in ars_by_signal_horizon.get((vote.signal_id, horizon), ())
+                ]
+                if not member_ars:
+                    continue
+                episode_outcome = statistics.mean(member_ars)
+                episode_means.append(episode_outcome)
+                episode_by_ticker[ticker].append(episode_outcome)
+                label_values.extend(member_ars)
+                label_by_ticker[ticker].extend(member_ars)
+            rows.append(
+                EpisodeHorizonStats(
+                    horizon_days=horizon,
+                    variant=variant,
+                    n_labels=len(label_values),
+                    label_hit_rate=_hit_rate(label_values),
+                    label_mean=_mean_or_none(label_values),
+                    label_median=_median_or_none(label_values),
+                    label_clustered_se=clustered_standard_error(label_by_ticker),
+                    n_episodes=len(episode_means),
+                    n_tickers=len(episode_by_ticker),
+                    episode_hit_rate=_hit_rate(episode_means),
+                    episode_mean=_mean_or_none(episode_means),
+                    episode_median=_median_or_none(episode_means),
+                    episode_clustered_se=clustered_standard_error(episode_by_ticker),
+                    low_n=len(episode_means) < _MIN_EPISODE_CELL_N,
+                )
+            )
+    return tuple(rows)
+
+
 # --- Whole-report assembly -----------------------------------------------------------------------
 
 
@@ -403,6 +571,12 @@ class DiagnosticReport:
     horizon_conviction_stats: tuple[HorizonConvictionStats, ...] = field(default_factory=tuple)
     prior_vs_measured: tuple[PriorVsMeasured, ...] = field(default_factory=tuple)
     unresolvable_reasons: dict[str, int] = field(default_factory=dict)
+    # Task-13 episode-level Form 4 buy edge + the calibration constants the report anchors on.
+    form4_episode_stats: tuple[EpisodeHorizonStats, ...] = field(default_factory=tuple)
+    form4_expected_edge_h1: float = DEFAULT_FORM4_EXPECTED_EDGE_H1
+    form4_buy_decay_half_life_days: float = DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS
+    # Decay weight sampled at the study horizons (day -> weight), from the anchored half-life.
+    form4_buy_decay_curve: dict[int, float] = field(default_factory=dict)
 
 
 def build_report(
@@ -414,12 +588,23 @@ def build_report(
     window_days: int,
     thresholds: ConvictionThresholds,
     params: ConvictionParams | None = None,
+    expected_edge_h1: float = DEFAULT_FORM4_EXPECTED_EDGE_H1,
+    decay_half_life_days: float = DEFAULT_FORM4_BUY_DECAY_HALF_LIFE_DAYS,
 ) -> DiagnosticReport:
-    """Assemble every report section (pure; no I/O) from a signals batch + a label-run batch."""
+    """Assemble every report section (pure; no I/O) from a signals batch + a label-run batch.
+
+    ``expected_edge_h1`` / ``decay_half_life_days`` are the task-13 Form 4 buy calibration constants
+    the report anchors on (defaults = the new episode-level values; the job threads the config
+    overrides through, so the OLD values stay recoverable without a code change).
+    """
     signal_source = {s.id: source_key_for_signal_id(s.id) for s in signals}
     conviction_buckets = point_in_time_conviction_buckets(
         signals, window_days=window_days, thresholds=thresholds, params=params
     )
+    decay_curve = {
+        day: form4_buy_decay_weight(float(day), half_life_days=decay_half_life_days)
+        for day in (1, 5, 20)
+    }
     return DiagnosticReport(
         label_run_id=label_run_id,
         as_of=as_of,
@@ -433,4 +618,8 @@ def build_report(
         ),
         prior_vs_measured=prior_vs_measured(labels, signal_source),
         unresolvable_reasons=unresolvable_reason_breakdown(labels),
+        form4_episode_stats=form4_episode_stats(signals, labels),
+        form4_expected_edge_h1=expected_edge_h1,
+        form4_buy_decay_half_life_days=decay_half_life_days,
+        form4_buy_decay_curve=decay_curve,
     )

@@ -9,7 +9,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from trading.domain.conviction import Form4Vote, dedupe_form4_votes
+from trading.domain.conviction import (
+    Form4Vote,
+    dedupe_form4_votes,
+    group_form4_vote_streams,
+)
 
 # The LUV 2024-10-02 replay anchor (194 same-day filings, 2 owners).
 DAY = datetime(2024, 10, 2, 13, 30, tzinfo=UTC)
@@ -102,3 +106,56 @@ def test_negative_stream_window_is_rejected() -> None:
 
 def test_filing_day_is_the_acceptance_date() -> None:
     assert _vote("ALPHA", "a").filing_day == DAY.date()
+
+
+# --- group_form4_vote_streams (task-13: full stream membership for episode aggregation) --------
+
+
+def test_group_streams_dedupe_is_the_earliest_of_each_stream() -> None:
+    # dedupe_form4_votes MUST equal "take stream[0] of each group_form4_vote_streams stream" —
+    # they share one partitioning implementation (task-13 reuse of the task-11 primitive).
+    votes = [
+        _vote("ALPHA", "a", at=DAY),
+        _vote("ALPHA", "b", at=DAY + timedelta(days=20)),
+        _vote("ALPHA", "c", at=DAY + timedelta(days=100)),
+        _vote("BETA", "z", ticker="TSLA"),
+    ]
+    streams = group_form4_vote_streams(votes)
+    reps = [s[0] for s in streams]
+    assert [v.signal_id for v in reps] == [v.signal_id for v in dedupe_form4_votes(votes)]
+
+
+def test_group_streams_preserves_all_members_in_chronological_order() -> None:
+    votes = [
+        _vote("ALPHA", "c", at=DAY + timedelta(days=20)),
+        _vote("ALPHA", "a", at=DAY),
+        _vote("ALPHA", "b", at=DAY + timedelta(days=10)),
+    ]
+    streams = group_form4_vote_streams(votes)
+    assert len(streams) == 1
+    assert [v.signal_id for v in streams[0]] == ["a", "b", "c"]
+
+
+def test_group_streams_none_window_ignores_gaps_one_episode_per_ticker_owner() -> None:
+    # stream_window_days=None: the WHOLE filer-on-name relationship is one episode regardless of
+    # gaps (the task-13 episode unit) — 30-day splitting would make this two streams.
+    votes = [
+        _vote("ALPHA", "a", at=DAY),
+        _vote("ALPHA", "b", at=DAY + timedelta(days=400)),
+    ]
+    assert len(group_form4_vote_streams(votes, stream_window_days=30)) == 2
+    none_streams = group_form4_vote_streams(votes, stream_window_days=None)
+    assert len(none_streams) == 1
+    assert [v.signal_id for v in none_streams[0]] == ["a", "b"]
+
+
+def test_group_streams_distinct_owners_never_merge_even_with_none_window() -> None:
+    votes = [_vote("ALPHA", "a"), _vote("BETA", "b")]
+    streams = group_form4_vote_streams(votes, stream_window_days=None)
+    assert {s[0].owner for s in streams} == {"ALPHA", "BETA"}
+    assert all(len(s) == 1 for s in streams)
+
+
+def test_group_streams_negative_window_rejected() -> None:
+    with pytest.raises(ValueError, match="stream_window_days"):
+        group_form4_vote_streams([], stream_window_days=-1)

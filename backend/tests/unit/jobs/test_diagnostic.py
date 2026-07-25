@@ -228,6 +228,7 @@ async def test_prints_human_readable_table(
     assert "-- 4. Abnormal return by source x horizon x conviction bucket --" in out
     assert "-- 5. Prior vs measured reliability --" in out
     assert "-- 6. Unresolvable-label reasons --" in out
+    assert "-- 7. Form 4 buy edge: episode-level vs label-level (task-13) --" in out
 
 
 async def test_appends_exactly_one_user_action_audit_event(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,6 +255,7 @@ async def test_appends_exactly_one_user_action_audit_event(monkeypatch: pytest.M
         "horizon_conviction_stats",
         "prior_vs_measured",
         "unresolvable_reasons",
+        "form4_episode_stats",
     }
 
 
@@ -290,3 +292,60 @@ def test_main_no_run_found_returns_one(monkeypatch: pytest.MonkeyPatch) -> None:
 
     asyncio.run(_seed())
     assert diagnostic.main([]) == 1
+
+
+def _form4_buy(signal_id: str, *, ticker: str, owner: str) -> Signal:
+    return Signal(
+        id=signal_id,
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        source_type=SignalSource.DISCLOSED_TRADE,
+        ticker=ticker,
+        politician_id=None,
+        sentiment=0.5,
+        politician_weight=1.0,
+        source_reliability=0.60,
+        raw_payload={"owner": owner},
+        provenance=Provenance.BACKFILLED,
+    )
+
+
+def _form4_label(run_id: str, signal_id: str, *, ticker: str, ar: float) -> OutcomeLabel:
+    return OutcomeLabel(
+        signal_id=signal_id,
+        ticker=ticker,
+        horizon_days=1,
+        abnormal_return=ar,
+        benchmark=f"sector:{ticker}",
+        status="ok",
+        reason=None,
+        label_run_id=run_id,
+    )
+
+
+async def test_episode_section_renders_and_json_carries_episode_stats(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    signals = [
+        _form4_buy("sec-form4-luv", ticker="LUV", owner="LUV OWNER"),
+        _form4_buy("sec-form4-lmt", ticker="LMT", owner="OTHER OWNER"),
+    ]
+    labels = [
+        _form4_label("run-a", "sec-form4-luv", ticker="LUV", ar=0.02),
+        _form4_label("run-a", "sec-form4-lmt", ticker="LMT", ar=0.01),
+    ]
+    await _seeded_deps(monkeypatch, signals=signals, labels_by_run={"run-a": labels})
+
+    rc = await diagnostic.run_diagnostic(run_id="run-a", out=None)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Section 7 renders both variants; thin cells are flagged LOW-N; the anchor + decay are shown.
+    assert "-- 7. Form 4 buy edge: episode-level vs label-level (task-13) --" in out
+    assert "with_luv" in out and "ex_luv" in out
+    assert "LOW-N" in out
+    assert "anchored expected edge (h=1): +0.0040" in out
+    assert "buy decay half-life: 3d" in out
+    # JSON payload carries the machine-readable episode rows.
+    payload = json.loads(out.split("\n\n", 1)[0])
+    variants = {row["variant"] for row in payload["form4_episode_stats"]}
+    assert variants == {"with_luv", "ex_luv"}
