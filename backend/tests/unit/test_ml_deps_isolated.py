@@ -77,3 +77,20 @@ def test_rl_env_needs_only_gymnasium_and_numpy() -> None:
 
     assert {"trading.rl.env", "gymnasium", "numpy"} <= loaded
     assert {"torch", "stable_baselines3"} & loaded == set()
+
+
+def test_rl_baselines_and_metrics_are_pure() -> None:
+    # task-rl-07: the baseline policies and the evaluation metrics are PURE half too (a policy
+    # that ignores the observation needs no numpy; reports and the demo bundle need no gymnasium).
+    _, loaded = _loaded_modules_after("import trading.rl.baselines, trading.rl.metrics")
+
+    assert {"trading.rl.baselines", "trading.rl.metrics"} <= loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+
+
+def test_rl_scoring_needs_only_gymnasium_and_numpy() -> None:
+    # task-rl-07: scoring drives the env, so it loads gymnasium + numpy — never torch / SB3.
+    _, loaded = _loaded_modules_after("import trading.rl.scoring")
+
+    assert {"trading.rl.scoring", "trading.rl.env", "gymnasium", "numpy"} <= loaded
+    assert {"torch", "stable_baselines3"} & loaded == set()

@@ -1044,6 +1044,14 @@ backtest equity curve is itself a bug detector.
 
 ### 5.2 Baselines — four, all as `Strategy`, sharing the agent's action set and `position_size`
 
+> **2026-10-21 retarget (task-rl-07, as built):** the platform `Strategy` path below was cut with
+> task-rl-11. The four baselines are env POLICY CALLABLES in `backend/src/trading/rl/baselines.py`
+> (pure stdlib; `(observation, history) -> HOLD/BUY/SELL`), replayed by `rl/scoring.py::rollout`
+> through the identical env as the agent. `random_policy(trade_probability)` exposes the trade
+> propensity (default 1/3 == uniform) for turnover matching; SMA(20,50) reads the trailing 50 closes
+> the observation was built from (the observation itself carries only SMA_10/SMA_50). The table
+> below is historical; no `strategies/rl_baselines.py` exists.
+
 `backend/src/trading/strategies/rl_baselines.py` (imports only `trading.domain` +
 `trading.strategies`; zero torch):
 
@@ -1094,6 +1102,16 @@ Straight off `domain/metrics.py` (pure stdlib, already present — do **not** re
 `total_return_pct`, `cagr_pct`, `sharpe_ratio` (rf=0, population stdev, `DEFAULT_ANNUALIZATION =
 252.0`), `sortino_ratio`, `return_volatility`, `max_drawdown_pct`, `period_returns`, `round_trips`
 (FIFO) → `trade_stats` (win_rate, profit_factor), `buy_and_hold_curve`, `benchmark_total_return_pct`.
+
+> **2026-10-21 (task-rl-07, as built):** the three `domain/metrics.py` additions below were NOT
+> made — they take platform `Trade` fills (price × quantity) that only the cut `Strategy`/`Backtest`
+> path produces, and the env deliberately exposes no price level. Turnover, exposure, action entropy,
+> `break_even_cost_bps` (vs always-flat) and the random null band live in the pure
+  **REDEFINITION (task-rl-07):** §5.4 originally defined break-even against the RANDOM policy;
+  as built it is against ALWAYS-FLAT (final equity exactly 1.0 at any cost). Deliberate: random
+  is a cost-dependent distribution, not a fixed yardstick. rl-10 and rl-12 inherit THIS definition.
+> `rl/metrics.py`, computed from the env's info dicts; Sharpe / Sortino / max drawdown / CAGR /
+> total return reuse the existing `domain/metrics.py` functions unchanged.
 
 Three new pure functions in `domain/metrics.py` (inside the 80% coverage denominator → they need
 unit tests):
