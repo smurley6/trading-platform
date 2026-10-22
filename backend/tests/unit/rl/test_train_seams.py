@@ -170,6 +170,14 @@ def test_manifest_has_exactly_the_required_keys_and_round_trips_as_strict_json()
     assert hyper["vec_normalize"] is False
     assert "changes EVERY run" in parsed["seeding"]["hashes"]
     assert parsed["env"]["cost_one_way_bps"] == 1.0
+    # task-rl-09 review: the FULL feature spec is recorded, so the export never assumes the scales.
+    assert parsed["env"]["feature_scales"] == {
+        "daily_vol": 0.01,
+        "sma10_gap": 0.02,
+        "sma50_gap": 0.05,
+        "trend_gap": 0.03,
+        "unrealized": 0.05,
+    }
     assert parsed["train_bars"]["n_bars"] == 400
     assert parsed["train_bars"]["episode_start_bounds"] == [49, 400 - 1 - 252]
     assert parsed["seeding"]["torch_num_threads"] == 1

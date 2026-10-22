@@ -464,6 +464,9 @@ def build_manifest(
             "random_start": env_config.random_start,
             "feature_window": env_config.spec.window,
             "feature_names": list(env_config.spec.names),
+            # The FULL observation spec the policy trained on (task-rl-09 review): the exported
+            # policy must reproduce these scales, so they are recorded, never assumed.
+            "feature_scales": env_config.spec.to_dict()["scales"],
         },
         "train_bars": {
             "n_bars": len(bars),

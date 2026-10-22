@@ -114,3 +114,34 @@ def test_rl_train_imports_sb3_and_torch_lazily() -> None:
 
     assert {"trading.rl.train", "gymnasium", "numpy"} <= loaded
     assert {"torch", "stable_baselines3"} & loaded == set()
+
+
+def test_strategy_and_policy_store_import_closure_is_torch_free() -> None:
+    # task-rl-09: the DEPLOYABLE inference path — the stdlib MLP and its JSON store — must load
+    # with zero optional deps: no torch / SB3 / gymnasium, and not even numpy.
+    _, loaded = _loaded_modules_after(
+        "import trading.infrastructure.rl.policy_store, trading.domain.rl_policy"
+    )
+
+    assert {"trading.infrastructure.rl.policy_store", "trading.domain.rl_policy"} <= loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert {m for m in loaded if m == "trading.rl" or m.startswith("trading.rl.")} == set()
+
+
+def test_rl_export_job_import_graph_has_no_ml_modules() -> None:
+    # task-rl-09: like rl_train, the export job imports trading.rl.export only INSIDE run_export
+    # (after its guards), so loading the module pulls in no ML and no numpy.
+    _, loaded = _loaded_modules_after("import trading.jobs.rl_export")
+
+    assert "trading.jobs.rl_export" in loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert "trading.rl.export" not in loaded
+
+
+def test_rl_export_imports_sb3_and_torch_lazily() -> None:
+    # task-rl-09: export.py is an SB3 consumer, but imports stable-baselines3 / torch only inside
+    # the functions that need them (like train.py).
+    _, loaded = _loaded_modules_after("import trading.rl.export")
+
+    assert {"trading.rl.export", "gymnasium", "numpy"} <= loaded
+    assert {"torch", "stable_baselines3"} & loaded == set()
