@@ -16,6 +16,10 @@ build/
 .env.*
 !.env.example
 
+# Offline RL training output (task-rl-08). Exhibit artifacts are committed deliberately
+# at task-rl-12 bundle time with `git add -f`; a training run must never dirty the tree.
+backend/artifacts/
+
 # Node
 node_modules/
 frontend/dist/

@@ -94,3 +94,23 @@ def test_rl_scoring_needs_only_gymnasium_and_numpy() -> None:
 
     assert {"trading.rl.scoring", "trading.rl.env", "gymnasium", "numpy"} <= loaded
     assert {"torch", "stable_baselines3"} & loaded == set()
+
+
+def test_rl_train_job_import_graph_has_no_ml_modules() -> None:
+    # task-rl-08: the training job imports trading.rl.train only INSIDE run_training (after its
+    # guards), so loading the module pulls in no ML at all and a missing [rl] extra is reported
+    # with a clear message instead of an ImportError at import time.
+    _, loaded = _loaded_modules_after("import trading.jobs.rl_train")
+
+    assert "trading.jobs.rl_train" in loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert "trading.rl.train" not in loaded
+
+
+def test_rl_train_imports_sb3_and_torch_lazily() -> None:
+    # task-rl-08: train.py is the SB3 consumer, but imports stable-baselines3 / torch only inside
+    # train_ppo / load_model, so its manifest + bridge seams are testable without the [rl] extra.
+    _, loaded = _loaded_modules_after("import trading.rl.train")
+
+    assert {"trading.rl.train", "gymnasium", "numpy"} <= loaded
+    assert {"torch", "stable_baselines3"} & loaded == set()
