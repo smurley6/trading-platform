@@ -164,3 +164,22 @@ def test_rl_evaluation_use_case_is_stdlib_only() -> None:
     assert "trading.application.rl_evaluation" in loaded
     assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
     assert {m for m in loaded if m == "trading.rl" or m.startswith("trading.rl.")} == set()
+
+
+def test_rl_bundle_is_stdlib_only() -> None:
+    # task-rl-12: the bundle assembly (stdlib replay, equity accounting, stitching, formats) is the
+    # PURE half of trading.rl: no numpy, gymnasium or torch.
+    _, loaded = _loaded_modules_after("import trading.rl.bundle")
+
+    assert "trading.rl.bundle" in loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+
+
+def test_rl_bundle_job_import_graph_has_no_ml_modules() -> None:
+    # task-rl-12: the bundle job imports the env replay (trading.rl.scoring: gymnasium + numpy)
+    # only INSIDE build(), so loading the module pulls in no ML and no numpy.
+    _, loaded = _loaded_modules_after("import trading.jobs.rl_bundle")
+
+    assert {"trading.jobs.rl_bundle", "trading.rl.bundle"} <= loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert {"trading.rl.scoring", "trading.rl.env", "trading.rl.export"} & loaded == set()

@@ -1,0 +1,551 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RL demo bundle (demo.json)",
+  "description": "The ONE static JSON the stevenmurley.com /demo page loads (task-rl-12; written by `python -m trading.jobs.rl_bundle`, assembled by backend/src/trading/rl/bundle.py). The website repo vendors this file. Schema version 1. Float formats (see meta.float_formats): f32-b64 = float32 arrays as little-endian, byte-plane-shuffled, padded base64 (lossless); f32 = shortest decimal that parses back to the same float32 (lossless; apply Math.fround); sig11 / sig6 = rounded to 11 / 6 significant digits; exact = float64 shortest repr. The writer is deterministic: equal inputs give byte-identical bundles. PRICE-LABEL GUARDRAIL: `bars[].close` are dividend-adjusted (Alpaca adjustment=all) closes; wherever the page shows them as prices it MUST label them with meta.price_label, never as \"SPY's price\" (see meta.adjustment / meta.dataset_generated_at).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "meta", "bars", "features", "policy", "replay", "curves", "eval_table"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "rl.demo.bundle"},
+    "meta": {"$ref": "#/$defs/meta"},
+    "bars": {
+      "description": "Every bar of the frozen dataset, full span: {date, close}. The closes are adjustment=all (dividend back-adjusted): RATIOS of closes are point-in-time total returns; LEVELS before later dividends are NOT as-traded prices (the 2018-10-22 close is 243.99 here; SPY's as-traded close was ~$275). Use them only as ratios (features, equity) and label any displayed level with meta.price_label (program doc §4.2 'Bar adjustment').",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["date", "close"],
+        "properties": {
+          "date": {"$ref": "#/$defs/isoDate"},
+          "close": {"type": "number", "exclusiveMinimum": 0, "description": "exact float64 close (adjustment=all; consume only as a ratio)"}
+        }
+      }
+    },
+    "features": {"$ref": "#/$defs/features"},
+    "policy": {"$ref": "#/$defs/policy"},
+    "replay": {"$ref": "#/$defs/replay"},
+    "curves": {"$ref": "#/$defs/curves"},
+    "eval_table": {"$ref": "#/$defs/evalTable"}
+  },
+  "$defs": {
+    "isoDate": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "isoDateOrNull": {"type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "isoDateTime": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonNegInt": {"type": "integer", "minimum": 0},
+    "numberOrNull": {"type": ["number", "null"]},
+    "actionName": {"enum": ["hold", "buy", "sell"]},
+    "probs": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number", "minimum": 0, "maximum": 1}
+    },
+    "f32b64": {
+      "type": "string",
+      "description": "f32-b64: n float32 values, little-endian, byte-plane shuffled (value i's byte j at offset j*n+i), standard padded base64 (RFC 4648)",
+      "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+    },
+    "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "span": {
+      "description": "A half-open bar window [bars[0], bars[1]) with its first/last session dates (null when empty).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bars", "first_session", "last_session"],
+      "properties": {
+        "bars": {"type": "array", "prefixItems": [{"$ref": "#/$defs/nonNegInt"}, {"$ref": "#/$defs/nonNegInt"}], "minItems": 2, "maxItems": 2},
+        "first_session": {"$ref": "#/$defs/isoDateOrNull"},
+        "last_session": {"$ref": "#/$defs/isoDateOrNull"}
+      }
+    },
+    "fold": {
+      "description": "One rolling walk-forward fold (application.rl_evaluation.make_folds): train < val < purge (>= the 50-bar observation window) < test. test_last_mark_session is the close that marks the fold's last test step (== the next fold's first test decision).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "purge_bars", "train", "val", "purge", "test", "test_last_mark_session"],
+      "properties": {
+        "index": {"$ref": "#/$defs/nonNegInt"},
+        "purge_bars": {"$ref": "#/$defs/nonNegInt"},
+        "train": {"$ref": "#/$defs/span"},
+        "val": {"$ref": "#/$defs/span"},
+        "purge": {"$ref": "#/$defs/span"},
+        "test": {"$ref": "#/$defs/span"},
+        "test_last_mark_session": {"$ref": "#/$defs/isoDate"}
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generated_at", "generated_at_source", "git_commit", "git_dirty", "symbol", "adjustment",
+        "dataset_generated_at", "price_basis", "price_label", "dataset", "eval_report_sha256",
+        "exhibit_seed", "exhibit_label", "exhibit_rank", "seeds", "cost_bps_grid", "folds", "policy_sha256s",
+        "policies_shipped", "library_versions", "execution", "float_formats", "schema"
+      ],
+      "properties": {
+        "generated_at": {"$ref": "#/$defs/isoDateTime", "description": "Deterministic: the evaluation report's as_of unless the job's --generated-at overrode it (generated_at_source says which)."},
+        "generated_at_source": {"type": "string"},
+        "git_commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "git_dirty": {"type": ["boolean", "null"]},
+        "symbol": {"type": "string", "minLength": 1},
+        "adjustment": {
+          "type": "string",
+          "description": "COPIED VERBATIM from the spy_daily.json header (header.adjustment). 'all' = split- and dividend-adjusted (total-return) closes. PRICE-LABEL GUARDRAIL (binding on the W1 page): wherever `bars` are shown as prices (chart axis, tooltip, scrubber readout) they MUST be labeled \"dividend-adjusted (total-return) closes as served by Alpaca on <meta.dataset_generated_at>; may reflect later corrections\" (meta.price_label) — never as \"SPY's price\". Absolute levels before later dividends are back-adjusted, not as-traded."
+        },
+        "dataset_generated_at": {
+          "$ref": "#/$defs/isoDateTime",
+          "description": "COPIED VERBATIM from the spy_daily.json header (header.generated_at): the instant Alpaca served these adjusted closes. The price label names this date because adjustment=all levels are current-vintage as of it (later dividends/corrections re-scale earlier levels). PRICE-LABEL GUARDRAIL: see meta.adjustment."
+        },
+        "price_basis": {"type": "string", "description": "header.price_basis, verbatim."},
+        "price_label": {"type": "string", "description": "The exact label the page must attach to any displayed close: 'dividend-adjusted (total-return) closes as served by Alpaca on <dataset_generated_at>; may reflect later corrections'."},
+        "dataset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "n_bars", "first_session", "last_session", "source_adapter"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "n_bars": {"type": "integer", "minimum": 1},
+            "first_session": {"$ref": "#/$defs/isoDate"},
+            "last_session": {"$ref": "#/$defs/isoDate"},
+            "source_adapter": {"type": "string"}
+          }
+        },
+        "eval_report_sha256": {"$ref": "#/$defs/sha256"},
+        "exhibit_seed": {"$ref": "#/$defs/nonNegInt", "description": "EXHIBIT-SEED HONESTY RULE: the replay and the agent curve show ONE training seed's per-fold policies; every headline statistic is eval_table's >= 5-seed, fold-clustered distribution."},
+        "exhibit_label": {"type": "string", "description": "Plain-language standing of the exhibit seed (e.g. 'best of 5 seeds on this span') + 'illustration, not the result'. The page shows it next to the agent line."},
+        "exhibit_rank": {
+          "description": "Where the exhibit seed stands among ALL agent seeds, per cost, from the evaluation report's own rows: every seed's stitched final equity (product of its per-fold final equities) and mean per-fold sharpe; rank 1 = best.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["exhibit_seed", "n_seeds", "best_by_final_equity_at_every_cost", "by", "per_cost"],
+          "properties": {
+            "exhibit_seed": {"$ref": "#/$defs/nonNegInt"},
+            "n_seeds": {"type": "integer", "minimum": 1},
+            "best_by_final_equity_at_every_cost": {"type": "boolean"},
+            "by": {"type": "string"},
+            "per_cost": {
+              "type": "object",
+              "propertyNames": {"pattern": "^[0-9]+(\\.[0-9]+)?$"},
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["exhibit_rank_by_final_equity", "exhibit_rank_by_mean_fold_sharpe", "seeds"],
+                "properties": {
+                  "exhibit_rank_by_final_equity": {"type": "integer", "minimum": 1},
+                  "exhibit_rank_by_mean_fold_sharpe": {"type": "integer", "minimum": 1},
+                  "seeds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["seed", "stitched_final_equity", "mean_fold_sharpe"],
+                      "properties": {
+                        "seed": {"$ref": "#/$defs/nonNegInt"},
+                        "stitched_final_equity": {"type": "number"},
+                        "mean_fold_sharpe": {"type": "number"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "seeds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent", "exhibit", "random"],
+          "properties": {
+            "agent": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nonNegInt"}},
+            "exhibit": {"$ref": "#/$defs/nonNegInt"},
+            "random": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/nonNegInt"}}
+          }
+        },
+        "cost_bps_grid": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 0}},
+        "folds": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/fold"}},
+        "policy_sha256s": {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}, "description": "artifact path (relative to the models root, as the evaluation report keys it) -> sha256 of the exact evaluated policy file"},
+        "policies_shipped": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "of_folds", "precision"],
+          "properties": {
+            "count": {"type": "integer", "minimum": 1},
+            "of_folds": {"type": "integer", "minimum": 1},
+            "precision": {"type": "string"}
+          }
+        },
+        "library_versions": {"$ref": "#/$defs/stringMap"},
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["execution_lag", "initial_equity", "position_sizes", "fill", "equity_step", "legality", "fold_reset", "cost_model"],
+          "properties": {
+            "execution_lag": {"const": 0},
+            "initial_equity": {"const": 1.0},
+            "position_sizes": {"type": "array", "items": {"type": "number"}},
+            "fill": {"type": "string"},
+            "equity_step": {"type": "string"},
+            "legality": {"type": "string"},
+            "fold_reset": {"type": "string"},
+            "cost_model": {"type": "string"}
+          }
+        },
+        "float_formats": {"$ref": "#/$defs/stringMap"},
+        "schema": {"type": "string"}
+      }
+    },
+    "features": {
+      "description": "The observation spec, mirroring backend/src/trading/domain/rl_features.py exactly (FeatureSpec.to_dict + lookbacks + formulas). The TS mirror rebuilds each observation from bars with these, clips to [obs_low, obs_high] and rounds to float32.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["window", "names", "scales", "obs_low", "obs_high", "observation_dtype", "lookbacks", "definitions", "arithmetic", "first_decision_index", "source"],
+      "properties": {
+        "window": {"type": "integer", "minimum": 1},
+        "names": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "scales": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["daily_vol", "sma10_gap", "sma50_gap", "trend_gap", "unrealized"],
+          "properties": {
+            "daily_vol": {"type": "number", "exclusiveMinimum": 0},
+            "sma10_gap": {"type": "number", "exclusiveMinimum": 0},
+            "sma50_gap": {"type": "number", "exclusiveMinimum": 0},
+            "trend_gap": {"type": "number", "exclusiveMinimum": 0},
+            "unrealized": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "obs_low": {"type": "number"},
+        "obs_high": {"type": "number"},
+        "observation_dtype": {"const": "float32"},
+        "lookbacks": {"type": "array", "items": {"$ref": "#/$defs/nonNegInt"}},
+        "definitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "formula", "lookback"],
+            "properties": {
+              "name": {"type": "string"},
+              "formula": {"type": "string"},
+              "lookback": {"$ref": "#/$defs/nonNegInt"}
+            }
+          }
+        },
+        "arithmetic": {"type": "array", "items": {"type": "string"}},
+        "first_decision_index": {"$ref": "#/$defs/nonNegInt"},
+        "source": {"type": "string"}
+      }
+    },
+    "layer": {
+      "description": "One dense layer: activation(weight @ x + bias); weight is row-major [out][in]; both f32-b64.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation", "in", "out", "weight", "bias"],
+      "properties": {
+        "activation": {"enum": ["tanh", "relu", "identity"]},
+        "in": {"type": "integer", "minimum": 1},
+        "out": {"type": "integer", "minimum": 1},
+        "weight": {"$ref": "#/$defs/f32b64"},
+        "bias": {"$ref": "#/$defs/f32b64"}
+      }
+    },
+    "policy": {
+      "description": "The exhibit seed's per-fold policies (all folds when policies_shipped.count == of_folds): fold k's policy decides ONLY fold k's test window. Each was trained on exactly its fold's train window and is the byte-identical file the evaluation replayed (meta.policy_sha256s).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["architecture", "weights_format", "policies", "parity_vectors", "parity_semantics"],
+      "properties": {
+        "architecture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["obs_dim", "hidden", "hidden_activations", "n_actions", "actions", "forward"],
+          "properties": {
+            "obs_dim": {"type": "integer", "minimum": 1},
+            "hidden": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+            "hidden_activations": {"type": "array", "items": {"enum": ["tanh", "relu", "identity"]}},
+            "n_actions": {"const": 3},
+            "actions": {"type": "array", "prefixItems": [{"const": "hold"}, {"const": "buy"}, {"const": "sell"}], "minItems": 3, "maxItems": 3},
+            "forward": {"type": "string"}
+          }
+        },
+        "weights_format": {"const": "f32-b64"},
+        "policies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fold_index", "policy_id", "artifact_sha256", "run_id", "training_library_versions", "train", "test", "hidden", "action_head"],
+            "properties": {
+              "fold_index": {"$ref": "#/$defs/nonNegInt"},
+              "policy_id": {"type": "string", "minLength": 1},
+              "artifact_sha256": {"$ref": "#/$defs/sha256"},
+              "run_id": {"type": "string"},
+              "training_library_versions": {"$ref": "#/$defs/stringMap"},
+              "train": {"$ref": "#/$defs/span"},
+              "test": {"$ref": "#/$defs/span"},
+              "hidden": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+              "action_head": {"$ref": "#/$defs/layer"}
+            }
+          }
+        },
+        "parity_vectors": {
+          "description": ">= 20 (observation -> logits, probs, argmax) triples computed by the Python reference (trading.domain.rl_policy) from the exact weights; >= 1 per shipped policy. The page verifies its TS forward pass against these at load time.",
+          "type": "array",
+          "minItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fold_index", "observation", "logits", "probs", "argmax"],
+            "properties": {
+              "fold_index": {"$ref": "#/$defs/nonNegInt"},
+              "observation": {"type": "array", "minItems": 1, "items": {"type": "number"}},
+              "logits": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}},
+              "probs": {"$ref": "#/$defs/probs"},
+              "argmax": {"type": "integer", "minimum": 0, "maximum": 2}
+            }
+          }
+        },
+        "parity_semantics": {"type": "string"}
+      }
+    },
+    "replay": {
+      "description": "Per-day records over the walk-forward TEST segments only, for the ONE exhibit seed (meta.exhibit_seed).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exhibit_seed", "records", "semantics"],
+      "properties": {
+        "exhibit_seed": {"$ref": "#/$defs/nonNegInt"},
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "fold_index", "action", "effective", "action_probs", "position"],
+            "properties": {
+              "date": {"$ref": "#/$defs/isoDate"},
+              "fold_index": {"$ref": "#/$defs/nonNegInt"},
+              "action": {"$ref": "#/$defs/actionName"},
+              "effective": {"$ref": "#/$defs/actionName"},
+              "action_probs": {"$ref": "#/$defs/probs"},
+              "position": {"enum": [0.0, 1.0]}
+            }
+          }
+        },
+        "semantics": {"type": "string"}
+      }
+    },
+    "series": {"type": "array", "minItems": 2, "items": {"type": "number", "exclusiveMinimum": 0}},
+    "costCurves": {
+      "description": "agent = the ONE exhibit seed; agent_seeds_min/max = the envelope of ALL agent seeds (shade it; the agent line is one of them); random_matched_* = the HEADLINE band, the turnover-matched random null GATE-LEARN is judged against; random_uniform_* = optional uniform random (trades more; NOT the GATE-LEARN null), absent when dropped for the size budget.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "agent_seeds_min", "agent_seeds_max", "buy_and_hold", "always_flat", "sma_cross_20_50", "random_matched_p25", "random_matched_p50", "random_matched_p75"],
+      "properties": {
+        "agent": {"$ref": "#/$defs/series"},
+        "agent_seeds_min": {"$ref": "#/$defs/series"},
+        "agent_seeds_max": {"$ref": "#/$defs/series"},
+        "buy_and_hold": {"$ref": "#/$defs/series"},
+        "always_flat": {"$ref": "#/$defs/series"},
+        "sma_cross_20_50": {"$ref": "#/$defs/series"},
+        "random_matched_p25": {"$ref": "#/$defs/series"},
+        "random_matched_p50": {"$ref": "#/$defs/series"},
+        "random_matched_p75": {"$ref": "#/$defs/series"},
+        "random_uniform_p25": {"$ref": "#/$defs/series"},
+        "random_uniform_p50": {"$ref": "#/$defs/series"},
+        "random_uniform_p75": {"$ref": "#/$defs/series"}
+      }
+    },
+    "band": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "gate_learn_null"],
+      "properties": {
+        "label": {"type": "string"},
+        "gate_learn_null": {"type": "boolean"}
+      }
+    },
+    "curves": {
+      "description": "Precomputed stitched equity (sig11) per cost level, OUT-OF-SAMPLE TEST SEGMENTS ONLY; train/val/purge appear only as flagged background spans with no values.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dates", "segments", "by_cost", "background", "series", "headline_band", "bands", "dropped", "semantics", "formats"],
+      "properties": {
+        "dates": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/isoDate"}},
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fold_index", "start", "end", "first_session", "last_mark_session"],
+            "properties": {
+              "fold_index": {"$ref": "#/$defs/nonNegInt"},
+              "start": {"$ref": "#/$defs/nonNegInt"},
+              "end": {"$ref": "#/$defs/nonNegInt"},
+              "first_session": {"$ref": "#/$defs/isoDate"},
+              "last_mark_session": {"$ref": "#/$defs/isoDate"}
+            }
+          }
+        },
+        "by_cost": {
+          "type": "object",
+          "description": "one-way cost in bps (formatted with %g) -> series",
+          "propertyNames": {"pattern": "^[0-9]+(\\.[0-9]+)?$"},
+          "additionalProperties": {"$ref": "#/$defs/costCurves"}
+        },
+        "background": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fold_index", "kind", "first_session", "last_session"],
+            "properties": {
+              "fold_index": {"$ref": "#/$defs/nonNegInt"},
+              "kind": {"enum": ["train", "val", "purge"]},
+              "first_session": {"$ref": "#/$defs/isoDate"},
+              "last_session": {"$ref": "#/$defs/isoDate"}
+            }
+          }
+        },
+        "series": {"$ref": "#/$defs/stringMap"},
+        "headline_band": {"const": "random_matched", "description": "The band the page draws by default: the turnover-matched random null (GATE-LEARN's)."},
+        "bands": {
+          "type": "object",
+          "required": ["random_matched"],
+          "additionalProperties": false,
+          "properties": {
+            "random_matched": {"$ref": "#/$defs/band"},
+            "random_uniform": {"$ref": "#/$defs/band"}
+          }
+        },
+        "dropped": {"type": "array", "items": {"type": "string"}},
+        "semantics": {"type": "string"},
+        "formats": {"$ref": "#/$defs/stringMap", "description": "series -> float format (sig11 for agent/baselines, which the page can recompute exactly; sig6 for display-only bands and the envelope)"}
+      }
+    },
+    "summaryRow": {
+      "description": "One rl-10 PolicySummary, copied verbatim from the report (+ sharpe_iqm_ci_source).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id", "cost_bps", "n_folds", "n_seeds", "n_results", "annualized_return_pct_iqm",
+        "sharpe_iqm", "sortino_iqm", "max_drawdown_pct_iqm", "annualized_turnover_iqm",
+        "win_rate_iqm", "exposure_fraction_iqm", "n_trades_iqm", "action_entropy_iqm",
+        "longest_holding_streak_iqm", "sharpe_mean", "sharpe_clustered_se", "sharpe_iqm_ci_low",
+        "sharpe_iqm_ci_high", "train_sharpe_iqm", "sharpe_iqm_ci_note", "sharpe_iqm_ci_source"
+      ],
+      "properties": {
+        "policy_id": {"type": "string"},
+        "cost_bps": {"type": "number"},
+        "n_folds": {"$ref": "#/$defs/nonNegInt"},
+        "n_seeds": {"$ref": "#/$defs/nonNegInt"},
+        "n_results": {"$ref": "#/$defs/nonNegInt"},
+        "annualized_return_pct_iqm": {"type": "number"},
+        "sharpe_iqm": {"type": "number"},
+        "sortino_iqm": {"type": "number"},
+        "max_drawdown_pct_iqm": {"type": "number"},
+        "annualized_turnover_iqm": {"type": "number"},
+        "win_rate_iqm": {"$ref": "#/$defs/numberOrNull"},
+        "exposure_fraction_iqm": {"type": "number"},
+        "n_trades_iqm": {"type": "number"},
+        "action_entropy_iqm": {"type": "number"},
+        "longest_holding_streak_iqm": {"type": "number"},
+        "sharpe_mean": {"type": "number"},
+        "sharpe_clustered_se": {"$ref": "#/$defs/numberOrNull"},
+        "sharpe_iqm_ci_low": {"$ref": "#/$defs/numberOrNull"},
+        "sharpe_iqm_ci_high": {"$ref": "#/$defs/numberOrNull"},
+        "train_sharpe_iqm": {"$ref": "#/$defs/numberOrNull"},
+        "sharpe_iqm_ci_note": {"type": "string"},
+        "sharpe_iqm_ci_source": {"enum": ["report", "recomputed", "unavailable"]}
+      }
+    },
+    "gate": {
+      "description": "One rl-10 GateVerdict, copied verbatim (+ verdict, the job's printed word).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "policy_id", "passed", "statistic", "standard_error", "t_critical", "ci_low", "ci_high", "p_value", "detail", "verdict"],
+      "properties": {
+        "name": {"enum": ["GATE-NOTDEGENERATE", "GATE-LEARN", "GATE-OVERFIT", "vs BUY-AND-HOLD"]},
+        "policy_id": {"type": "string"},
+        "passed": {"type": ["boolean", "null"]},
+        "statistic": {"$ref": "#/$defs/numberOrNull"},
+        "standard_error": {"$ref": "#/$defs/numberOrNull"},
+        "t_critical": {"$ref": "#/$defs/numberOrNull"},
+        "ci_low": {"$ref": "#/$defs/numberOrNull"},
+        "ci_high": {"$ref": "#/$defs/numberOrNull"},
+        "p_value": {"$ref": "#/$defs/numberOrNull"},
+        "detail": {"type": "string"},
+        "verdict": {"enum": ["PASS", "FAIL", "VOID", "OK", "WARN", "YES", "NO"]}
+      }
+    },
+    "evalTable": {
+      "description": "The §5.4 metrics of the recorded evaluation look (eval_table.source.look), transformed — never re-run. Headline statistics are the >= 5-seed, fold-clustered distribution. The page must render the honesty block: headline_verdict, gates, caveats (look count, holdout, gate-rule amendment), warnings and notes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source", "agent", "headline_verdict", "beats_buy_and_hold", "n_folds", "n_seeds", "low_n",
+        "cost_bps_grid", "gate_cost_bps", "break_even_cost_bps", "edge_over_flat_log_growth", "rows",
+        "gates", "parity", "evaluation_mode", "caveats", "warnings", "notes", "bundle_notes"
+      ],
+      "properties": {
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["report_sha256", "as_of", "look", "symbol", "dataset_sha256"],
+          "properties": {
+            "report_sha256": {"$ref": "#/$defs/sha256"},
+            "as_of": {"$ref": "#/$defs/isoDateTime"},
+            "look": {"type": "integer", "minimum": 1},
+            "symbol": {"type": "string"},
+            "dataset_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "agent": {"type": "string"},
+        "headline_verdict": {"enum": ["beats buy-and-hold: NO (CI includes 0)", "beats buy-and-hold: NO (CI excludes 0: the agent is worse)", "beats buy-and-hold: YES (CI excludes 0)"]},
+        "beats_buy_and_hold": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^beats buy-and-hold: "}},
+        "n_folds": {"type": "integer", "minimum": 1},
+        "n_seeds": {"type": "integer", "minimum": 1},
+        "low_n": {"type": "boolean"},
+        "cost_bps_grid": {"type": "array", "items": {"type": "number"}},
+        "gate_cost_bps": {"type": "number"},
+        "break_even_cost_bps": {"type": "object", "additionalProperties": {"$ref": "#/$defs/numberOrNull"}},
+        "edge_over_flat_log_growth": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "object", "additionalProperties": {"$ref": "#/$defs/numberOrNull"}}
+        },
+        "rows": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/summaryRow"}},
+        "gates": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/gate"}},
+        "parity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ties", "observations"],
+          "properties": {
+            "ties": {"$ref": "#/$defs/nonNegInt"},
+            "observations": {"$ref": "#/$defs/nonNegInt"}
+          }
+        },
+        "evaluation_mode": {"type": "string"},
+        "caveats": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["look_count", "n_configurations_source", "holdout", "gate_rule_amendment", "gate_rules_version"],
+          "properties": {
+            "look_count": {"type": "integer", "minimum": 1},
+            "n_configurations_source": {"type": "string"},
+            "holdout": {"type": ["string", "null"]},
+            "gate_rule_amendment": {"type": ["string", "null"]},
+            "gate_rules_version": {"type": "string"}
+          }
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "array", "items": {"type": "string"}},
+        "bundle_notes": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
