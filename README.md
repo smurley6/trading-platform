@@ -66,6 +66,28 @@ frontend/   React 18 + TypeScript SPA (see frontend/README.md)
   `ENABLE_HISTORICAL_DATA` + data credentials are set; otherwise the deterministic synthetic
   provider is used, keeping backtests offline and reproducible by default.
 
+## Reinforcement-learning sleeve (2026-10)
+
+`backend/src/trading/rl/` trains a PPO agent on SPY daily bars and evaluates it with a
+walk-forward protocol designed so that a null result can be trusted:
+
+- Frozen, dividend-adjusted dataset with a per-bar `known_at`; decisions at close t fill at
+  close t+1, so no decision ever sees its own fill price.
+- A leakage test suite with planted-leak negative controls, so every detector is proven able
+  to fail ([backend/tests/unit/rl/test_env_leakage.py](backend/tests/unit/rl/test_env_leakage.py)).
+- Per-fold retraining (21 folds x 5 seeds), fold-clustered standard errors with t(K-1), a
+  turnover-matched random null, and a durable ledger counting every look at test data.
+- A torch-free policy export: the trained network becomes a ~100 KB JSON that a pure-stdlib
+  forward pass (and a TypeScript port) reproduces to float precision. ML dependencies are an
+  optional `[rl]` extra, walled out of the application import graph by import-linter.
+
+The headline result is a null, reported as one: **the agent does not beat buy-and-hold**
+(IQM Sharpe 0.99 vs 1.34 at 2 bps transaction cost; the learning gate fails against the
+turnover-matched random null). The full program, decisions and amendments are in
+[docs/RL-SLEEVE-PROGRAM.md](docs/RL-SLEEVE-PROGRAM.md). An interactive replay of the evaluated
+agent runs in the browser at
+[stevenmurley.com/projects/trading-platform](https://stevenmurley.com/projects/trading-platform).
+
 ## Quick start (backend)
 
 ```bash

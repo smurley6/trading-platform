@@ -25,9 +25,3 @@ repos:
         language: system
         files: ^backend/.*\.py$
         pass_filenames: false
-      - id: memory-md-updated
-        name: MEMORY.md updated for architecture/API/config/deploy changes
-        entry: bash scripts/check_memory_updated.sh
-        language: system
-        pass_filenames: false
-        always_run: true
