@@ -7,6 +7,48 @@
 
 ---
 
+## ⚠ 2026-10-21 RETARGET — the website is the deliverable (read before the July sections)
+
+**The project's only requirement is now: a working RL demo displayable on stevenmurley.com.**
+Everything below this addendum stands except where amended here. Decisions locked with the owner
+on 2026-10-21:
+
+1. **Demo format: interactive replay + live mini-trainer, fully static.** The exported policy
+   (task-rl-09's torch-free MLP) runs IN THE VISITOR'S BROWSER (TypeScript forward pass) over the
+   real bar history — scrubber, cost toggle (0/2/5 bps, recomputed client-side), action
+   probabilities live. A second panel trains a tiny tabular Q-learner in-browser in seconds so
+   visitors can watch learning happen. No backend; the page is static JSON + JS on Vercel.
+2. **This repo goes PUBLIC.** The page links directly to the leakage suite, the env, and this
+   document. Prerequisites before the flip (owner actions): git-history secret scan (see
+   `docs/` scan report), push the branches, then flip visibility.
+3. **Scope cut: task-rl-11 and milestones M8–M11 are DELETED.** No sleeve wiring, no cycle
+   driver, no console attribution, no weekly cron. The platform sleeve demo served a meeting
+   that no longer exists; the website serves everyone.
+4. **Framing: lead with the honest null.** The page's headline is that the agent does NOT beat
+   buy-and-hold and that proving this honestly is the point. §0 and §5 are unchanged and remain
+   the heart of the project.
+
+**Revised milestone tail** (M0–M7 unchanged):
+
+| # | Milestone | Where | Demoable after? |
+|---|---|---|---|
+| **W0** | `task-rl-12` demo bundle job — one static `demo.json` (bars, exhibit replay, curves, eval table, policy weights + parity vectors) | this repo | bundle inspectable |
+| **W1** | `/demo` page rebuild — replay scrubber, cost toggle, in-browser policy inference with load-time parity self-check, honest eval table, methodology strip with GitHub links. Replaces the Math.random fake. | `~/Desktop/personal-website` (Next.js 16 / Vercel) | ✅ **the deliverable** |
+| **W2** | Live mini-trainer panel — in-browser tabular Q-learner on the same bars/discretized features/cost semantics, labeled a pedagogical toy distinct from the PPO exhibit | personal-website | ✅ wow factor |
+
+**Two honesty rules the page must obey:**
+- **Exhibit-seed rule:** the replay animates ONE designated seed's policy, labeled as such; every
+  headline statistic remains the ≥5-seed, fold-clustered distribution from §5.
+- **Mini-trainer rule:** the in-browser learner uses the same bar data and cost semantics as the
+  real pipeline (discretized), and the page says plainly it is a teaching toy, not the PPO agent.
+
+§8's terminal demo script is superseded by W1; it remains below as documentation of the offline
+pipeline's entry points.
+
+---
+
+---
+
 ## 0. Honest expectations (read this first)
 
 This sleeve is a **learning vehicle and an engineering demonstration**. The deliverable is a
