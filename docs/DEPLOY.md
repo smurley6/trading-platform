@@ -1,5 +1,12 @@
 # Deploy: FREE always-on trading cycle (GitHub Actions + managed Postgres)
 
+> **STATUS (2026-10-21): there is NO live deployment.** The Render project (web service,
+> cron, Postgres) was deleted on 2026-10-21, and the GitHub Actions workflow this document
+> describes was never created on this branch (`.github/workflows/cycle.yml` does not exist).
+> Treat this document as a recipe for standing the platform up again, not as a description of
+> running infrastructure. The only hosted artifact of this project is the static RL demo on
+> stevenmurley.com (see docs/RL-SLEEVE-PROGRAM.md), which needs none of the below.
+
 This guide stands up the trading platform with **zero hosting cost**: a scheduled
 [GitHub Actions](https://docs.github.com/actions) workflow runs the trading cycle every
 20 minutes, and a free managed Postgres holds all state between runs. No server to keep
