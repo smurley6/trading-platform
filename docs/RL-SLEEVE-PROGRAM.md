@@ -613,6 +613,17 @@ meant to be run primarily on the CPU" — no GPU needed. Validation:
 
 ### 4.2 PIT bar table — the load-bearing assumption
 
+> **AMENDED by the task-rl-03 review ruling (2026-10-21) — the sketch below is HISTORICAL where it
+> conflicts.** The knowledge-time rule has exactly ONE implementation:
+> `session_known_at` in `backend/src/trading/application/rl_dataset.py` (16:00 America/New_York on
+> the bar's NY date + 15 min, zone-aware, fail-closed on any stamp that is not 00:00 New York).
+> `rl/bars.py` contains NO `_SESSION_LENGTH` / `_SETTLE_BUFFER` constants, and
+> `BarTable.from_price_series(series, symbol)` takes NO `session_length=` / `settle_buffer=`
+> kwargs — they were removed as a second copy of the rule. The frozen artifact is read ONLY via
+> `rl_dataset_from_json` → `BarTable.from_dataset`, both of which consume the STORED `known_at` and
+> fail loudly if it differs from `session_known_at(session_ts)`. The "fixed `session_ts + 16h15m`"
+> below is the same rule restated for trading days, not a separate formula to implement.
+
 ```python
 # backend/src/trading/rl/bars.py — stdlib ONLY (no numpy, no gymnasium)
 _SESSION_LENGTH = timedelta(hours=16)      # 00:00 ET -> 16:00 ET close
@@ -776,21 +787,28 @@ two rewards on identical seeds and folds is the single most instructive tweak in
 
 ### 4.6 Cost model
 
+**AMENDED by the task-rl-02/03 review rulings (2026-10-21): the cost model is BASIS-POINTS-ONLY
+and scale-free.** A per-share or per-price parameterization would (a) consume a price LEVEL,
+violating §4.2's binding returns-only rule on dividend-adjusted closes, and (b) make the demo
+page's client-side equity recompute depend on share counts. As implemented:
+
 ```python
 # backend/src/trading/rl/costs.py — PURE stdlib. Importable by CI without the rl extra.
 @dataclass(frozen=True, slots=True)
 class CostModel:
-    half_spread_bps: float = 0.10          # $0.01 spread on a ~$650 SPY share ≈ 0.15 bps
-    slippage_bps: float = 0.65             # HONESTY BUFFER — see below
-    sec_fee_bps_on_sells: float = 0.206    # SEC §31: $20.60/$1M, effective 2026-04-04. CHANGES.
-    taf_per_share_on_sells: float = 0.000119   # FINRA TAF
-    commission_per_trade: float = 0.0      # Alpaca US equities are commission-free
-    def effective_price(self, *, side: Side, price: float) -> float: ...
-    def fees(self, *, side: Side, shares: float, price: float) -> float: ...
+    one_way_bps: float = 1.0   # flat, charged on |Δposition| of traded notional, both directions
+    def cost_fraction(self, *, position_before: float, position_after: float) -> float: ...
 
-ZERO_COST   = CostModel(0.0, 0.0, 0.0, 0.0, 0.0)   # ABLATION ONLY
-STRESS_COST = CostModel(slippage_bps=4.9)          # ~5 bps one-way robustness sweep
+ZERO_COST   = CostModel(0.0)      # ABLATION ONLY
+DEFAULT_COST = CostModel(1.0)
+STRESS_COST = CostModel(5.0)      # robustness sweep
+COST_BPS_GRID = (0, 2, 5)         # every headline metric reported at each
 ```
+
+The real measured components are DOCUMENTED as evidence the flat 1.0 bp default is conservative,
+not parameterized: half-spread ≈0.15 bp ($0.01 on a ~$650 share), SEC §31 ≈0.206 bp on sells
+($20.60/$1M, effective 2026-04-04 — changes over time), FINRA TAF ≈0.002 bp ($0.000119/share),
+commission 0 (Alpaca US equities).
 
 Measured SPY friction is ~0.4 bps round trip. The default (~1.0 bp one-way ≈ 2 bps round trip) is
 deliberately 3–5× that, because **neither simulator charges anything realistic**:
@@ -803,7 +821,8 @@ deliberately 3–5× that, because **neither simulator charges anything realisti
 - **The replay path is fully frictionless**: `infrastructure/market_data/historical.py:31` returns
   `Quote(symbol=symbol, bid=price, ask=price, last=price, ...)` — bid == ask == close.
 
-**Every rate is a dated `CostModel` default with a source comment, never an inline literal** — the
+**There is ONE rate — `CostModel.one_way_bps`.** The measured components above are dated EVIDENCE
+in the `rl/costs.py` module docstring, not parameters, and must stay dated because they change — the
 SEC §31 rate was $0.00/million through 2026-04-03 and $20.60/million from 2026-04-04.
 
 Cost arithmetic that justifies the default: 2 bps round-trip on a fully-invested notional costs
@@ -849,6 +868,18 @@ from day one.
 
 `EnvConfig` exposes `execution_lag: int = 0` as an additional knob; report results at lag 0 **and**
 lag 1. If the edge vanishes at lag 1, there was no edge.
+
+> **⚠ FLAGGED by the task-rl-03 PIT review (2026-10-21) — UNRESOLVED, binding on task-rl-05.** The
+> contract above is self-contradictory: it says the action "is filled at the close of session
+> *t+1*", while §4.5's `growth = 1 + position_t·(C_{t+1}/C_t − 1) − cost` credits the new position
+> with the return from `C_t` — a close the agent has ALREADY observed when it decides at *t*. Read
+> literally, §4.5 is decide-at-close/fill-at-the-same-close: a lookahead fill. The binding
+> requirement: **the price a trade fills at must never be known at decision time.**
+> `rl/rewards.py::net_of_cost_growth(close_prev, close_now, ...)` makes NO timing claim — it is
+> parameterized by whichever `(close_prev, close_now)` pair the env passes, with the position
+> change taking effect at the start of that period. task-rl-05 must therefore choose a PIT-safe
+> bar pairing / `execution_lag`, state it in the env docstring, and pin it with tests (including §4.8 Test C's "always-BUY reproduces
+> buy-and-hold" expectation, whose start index must be consistent with the chosen pairing).
 
 ### 4.8 Leakage guards — the test suite that makes this credible
 

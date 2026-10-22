@@ -57,3 +57,14 @@ def test_rl_dataset_job_import_graph_has_no_ml_modules() -> None:
     assert "trading.jobs.rl_dataset" in loaded
     assert _HEAVY_ML_MODULES & loaded == set()
     assert {m for m in loaded if m == "trading.rl" or m.startswith("trading.rl.")} == set()
+
+
+def test_rl_pure_half_loads_no_ml_or_numpy() -> None:
+    # task-rl-03: bars/costs/rewards are the PURE half of trading.rl (program doc §3.1) — they must
+    # import with zero optional deps, so not even numpy may load.
+    _, loaded = _loaded_modules_after(
+        "import trading.rl.bars, trading.rl.costs, trading.rl.rewards"
+    )
+
+    assert {"trading.rl.bars", "trading.rl.costs", "trading.rl.rewards"} <= loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()

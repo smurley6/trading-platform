@@ -4,7 +4,8 @@
 them into an ``RlDataset``: an ascending tuple of CLOSED bars, each carrying an EXPLICIT
 ``known_at`` — the moment that bar's close became public. ``rl_dataset_to_json`` renders it to
 deterministic bytes; ``python -m trading.jobs.rl_dataset`` freezes those bytes to disk, and every
-later RL milestone reads that file, never the network (docs/RL-SLEEVE-PROGRAM.md §4.2, §4.7).
+later RL milestone reads that file, never the network (docs/RL-SLEEVE-PROGRAM.md §4.2, §4.7) —
+always through ``rl_dataset_from_json`` (task-rl-03), the validating inverse of the writer.
 
 **The knowledge-time rule — the load-bearing assumption.** Alpaca stamps a daily bar ``t`` at the
 session's OPENING boundary — 00:00 America/New_York, i.e. ``04:00Z`` under EDT and ``05:00Z``
@@ -282,3 +283,97 @@ def rl_dataset_to_json(dataset: RlDataset) -> bytes:
     bars_block = ['  "bars": [', ",\n".join(rows), "  ]"] if rows else ['  "bars": []']
     lines = ["{", '  "header": ' + header.replace("\n", "\n  ") + ",", *bars_block, "}"]
     return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _parse_utc(value: object, *, what: str) -> datetime:
+    if not isinstance(value, str):
+        raise RlDatasetError(f"{what} must be an ISO-8601 string, got {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise RlDatasetError(f"{what} is not ISO-8601: {value!r}") from exc
+    _require_aware(parsed, what=what)
+    return parsed.astimezone(UTC)
+
+
+def _reject_constant(name: str) -> float:
+    raise RlDatasetError(f"non-finite JSON constant {name} is not allowed in an RL dataset")
+
+
+def rl_dataset_from_json(data: bytes) -> RlDataset:
+    """Parse bytes written by ``rl_dataset_to_json`` back into an ``RlDataset`` — the ONE reader
+    every RL consumer goes through (never ad-hoc ``json.loads`` of the artifact).
+
+    Fails closed (``RlDatasetError``) on anything it cannot vouch for: a different
+    ``schema_version``; a header ``known_at_rule`` or ``price_basis`` that is not this module's
+    current text; an ``n_bars`` that disagrees with the rows; and — the drift guard — any bar whose
+    STORED ``known_at`` is not exactly ``session_known_at(session_ts)``. The stored value is what
+    consumers use; recomputing it here only VALIDATES it, so the knowledge-time rule exists once
+    (``session_known_at``) and a rule change can never silently disagree with a frozen file.
+
+    Round trip: ``rl_dataset_to_json(rl_dataset_from_json(b)) == b`` for every file this module
+    wrote.
+    """
+    try:
+        doc = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RlDatasetError(f"RL dataset is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(doc, dict) or set(doc) != {"header", "bars"}:
+        raise RlDatasetError("RL dataset must be an object with exactly 'header' and 'bars'")
+    header, rows = doc["header"], doc["bars"]
+    if not isinstance(header, dict) or not isinstance(rows, list):
+        raise RlDatasetError("'header' must be an object and 'bars' a list")
+
+    if header.get("schema_version") != DATASET_SCHEMA_VERSION:
+        raise RlDatasetError(
+            f"schema_version {header.get('schema_version')!r} is not the supported "
+            f"{DATASET_SCHEMA_VERSION}; regenerate the dataset"
+        )
+    if header.get("known_at_rule") != KNOWN_AT_RULE:
+        raise RlDatasetError(
+            "header known_at_rule does not match this code's rule; the file was frozen under a "
+            f"different knowledge-time rule: {header.get('known_at_rule')!r}"
+        )
+    adjustment = header.get("adjustment")
+    if not isinstance(adjustment, str) or adjustment not in ALLOWED_ADJUSTMENTS:
+        raise RlDatasetError(
+            f"header adjustment {adjustment!r} is not one of {ALLOWED_ADJUSTMENTS}"
+        )
+    if header.get("price_basis") != PRICE_BASIS[adjustment]:
+        raise RlDatasetError(f"header price_basis does not match adjustment {adjustment!r}")
+    symbol, source_adapter = header.get("symbol"), header.get("source_adapter")
+    if not isinstance(symbol, str) or not symbol or not isinstance(source_adapter, str):
+        raise RlDatasetError("header symbol and source_adapter must be non-empty strings")
+    if header.get("n_bars") != len(rows):
+        raise RlDatasetError(f"header n_bars {header.get('n_bars')!r} != {len(rows)} bar rows")
+
+    bars: list[RlBar] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or set(row) != {"session_ts", "known_at", "close"}:
+            raise RlDatasetError(f"bar {index} must have exactly session_ts, known_at, close")
+        session_ts = _parse_utc(row["session_ts"], what=f"bar {index} session_ts")
+        known_at = _parse_utc(row["known_at"], what=f"bar {index} known_at")
+        expected = session_known_at(session_ts)
+        if known_at != expected:
+            raise RlDatasetError(
+                f"bar {index} ({session_ts.isoformat()}): stored known_at {known_at.isoformat()} "
+                f"!= rule {expected.isoformat()} — knowledge-time drift; regenerate the dataset"
+            )
+        close = row["close"]
+        if isinstance(close, bool) or not isinstance(close, int | float):
+            raise RlDatasetError(f"bar {index} close must be a number, got {close!r}")
+        try:
+            close_value = float(close)
+        except OverflowError as exc:  # a JSON integer too large for a float
+            raise RlDatasetError(f"bar {index} close {close} overflows a float") from exc
+        bars.append(RlBar(session_ts=session_ts, known_at=known_at, close=close_value))
+
+    return RlDataset(
+        symbol=symbol,
+        bars=tuple(bars),
+        adjustment=adjustment,
+        source_adapter=source_adapter,
+        start=_parse_utc(header.get("start"), what="header start"),
+        end=_parse_utc(header.get("end"), what="header end"),
+        generated_at=_parse_utc(header.get("generated_at"), what="header generated_at"),
+    )

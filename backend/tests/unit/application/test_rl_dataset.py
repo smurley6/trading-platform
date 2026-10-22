@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,6 +22,7 @@ from trading.application.rl_dataset import (
     RlBar,
     RlDataset,
     RlDatasetError,
+    rl_dataset_from_json,
     rl_dataset_to_json,
     session_known_at,
 )
@@ -316,3 +318,105 @@ def test_never_calls_price_series_price_at() -> None:
 def test_every_adjustment_mode_has_a_price_basis() -> None:
     # The header must always say what the close levels mean (never implicit).
     assert set(rl_dataset_module.PRICE_BASIS) == set(rl_dataset_module.ALLOWED_ADJUSTMENTS)
+
+
+# --- the reader (task-rl-03): the validating inverse of rl_dataset_to_json ---------------------
+
+_FROZEN = Path(__file__).parents[3] / "data" / "rl" / "spy_daily.json"
+
+
+def _doc(*bars: RlBar, adjustment: str = "all") -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(rl_dataset_to_json(_dataset(bars, adjustment=adjustment)))
+    return loaded
+
+
+def _encode(doc: dict[str, Any]) -> bytes:
+    return json.dumps(doc).encode("utf-8")
+
+
+def test_reader_round_trips_the_writer_bytes_exactly() -> None:
+    dataset = _dataset(
+        (_bar("2026-01-02T05:00:00Z", 600.1), _bar("2026-07-02T04:00:00Z", 601.25)),
+        adjustment="all",
+    )
+    data = rl_dataset_to_json(dataset)
+
+    parsed = rl_dataset_from_json(data)
+
+    assert parsed == dataset
+    assert rl_dataset_to_json(parsed) == data
+
+
+def test_reader_round_trips_the_frozen_artifact_byte_for_byte() -> None:
+    data = _FROZEN.read_bytes()
+
+    parsed = rl_dataset_from_json(data)
+
+    assert rl_dataset_to_json(parsed) == data
+    assert parsed.symbol == "SPY"
+    assert parsed.adjustment == "all"
+    assert len(parsed.bars) == json.loads(data)["header"]["n_bars"]
+
+
+def test_reader_fails_loudly_on_known_at_drift() -> None:
+    # The stored known_at is consumed, and VALIDATED against session_known_at: a file frozen under
+    # a different rule (here: one minute early, still after session_ts) must not load.
+    doc = _doc(_bar("2026-01-02T05:00:00Z"), _bar("2026-01-05T05:00:00Z"))
+    doc["bars"][1]["known_at"] = "2026-01-05T21:14:00Z"
+
+    with pytest.raises(RlDatasetError, match="knowledge-time drift"):
+        rl_dataset_from_json(_encode(doc))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("schema_version", 1, "schema_version"),
+        ("known_at_rule", "session_ts + 16h", "known_at_rule"),
+        ("price_basis", "levels are as-traded", "price_basis"),
+        ("adjustment", "split", "adjustment"),
+        ("n_bars", 7, "n_bars"),
+        ("symbol", "", "symbol"),
+        ("start", "2026-01-10T00:00:00", "timezone-aware"),
+    ],
+)
+def test_reader_rejects_a_header_it_cannot_vouch_for(field: str, value: object, match: str) -> None:
+    doc = _doc(_bar("2026-01-02T05:00:00Z"))
+    doc["header"][field] = value
+
+    with pytest.raises(RlDatasetError, match=match):
+        rl_dataset_from_json(_encode(doc))
+
+
+def test_reader_rejects_malformed_bars_and_documents() -> None:
+    with pytest.raises(RlDatasetError, match="valid UTF-8 JSON"):
+        rl_dataset_from_json(b"{not json")
+    with pytest.raises(RlDatasetError, match="exactly 'header' and 'bars'"):
+        rl_dataset_from_json(b'{"bars": []}')
+    with pytest.raises(RlDatasetError, match="non-finite"):
+        rl_dataset_from_json(
+            rl_dataset_to_json(_dataset((_bar("2026-01-02T05:00:00Z", 2.0),))).replace(
+                b'"close": 2.0', b'"close": NaN'
+            )
+        )
+
+    extra = _doc(_bar("2026-01-02T05:00:00Z"))
+    extra["bars"][0]["open"] = 1.0
+    with pytest.raises(RlDatasetError, match="exactly session_ts, known_at, close"):
+        rl_dataset_from_json(_encode(extra))
+
+    huge = rl_dataset_to_json(_dataset((_bar("2026-01-02T05:00:00Z", 2.0),))).replace(
+        b'"close": 2.0', b'"close": 1' + b"0" * 400
+    )
+    with pytest.raises(RlDatasetError, match="overflows a float"):
+        rl_dataset_from_json(huge)
+
+    textual = _doc(_bar("2026-01-02T05:00:00Z"))
+    textual["bars"][0]["close"] = "1.0"
+    with pytest.raises(RlDatasetError, match="must be a number"):
+        rl_dataset_from_json(_encode(textual))
+
+    end_of_bar = _doc(_bar("2026-01-02T05:00:00Z"))
+    end_of_bar["bars"][0]["session_ts"] = "2026-01-02T21:00:00Z"
+    with pytest.raises(RlDatasetError, match="00:00 session-open boundary"):
+        rl_dataset_from_json(_encode(end_of_bar))
