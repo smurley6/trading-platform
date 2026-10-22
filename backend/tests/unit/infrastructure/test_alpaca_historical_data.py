@@ -363,6 +363,41 @@ async def test_feed_setting_passed_through_as_query_param() -> None:
     assert captured["feed"] == "iex"
 
 
+# --- task-rl-02: optional corporate-action adjustment ------------------------------------------
+
+
+async def test_adjustment_param_absent_by_default() -> None:
+    # No behavior change for existing callers (labeler, backtest): no param => Alpaca's default.
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["has_adjustment"] = "adjustment" in request.url.params
+        return httpx.Response(200, json={"bars": {}, "next_page_token": None})
+
+    await _provider(handler).price_series(["AAPL"], _START, _END)
+    assert captured["has_adjustment"] is False
+
+
+async def test_adjustment_param_sent_when_set() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params.get("adjustment"))
+        # Two pages: the param must ride along on the page_token follow-up too.
+        token = "p2" if request.url.params.get("page_token") is None else None
+        return httpx.Response(200, json={"bars": {}, "next_page_token": token})
+
+    provider = AlpacaHistoricalData(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        key_id="k",
+        secret_key="s",
+        base_url="https://data.alpaca.markets",
+        adjustment="all",
+    )
+    await provider.price_series(["SPY"], _START, _END)
+    assert seen == ["all", "all"]
+
+
 # --- 429 rate-limit retry ---------------------------------------------------------------
 
 

@@ -658,12 +658,31 @@ UTC (05:00Z in EST / 04:00Z in EDT), a **fixed** 16h15m offset is correct in bot
   left-edge forward-look with no error and no warning. Slice by integer index.
 - The env must **never** treat `session_ts` as knowledge time.
 
-**Bar adjustment:** the adapter sends `{symbols, timeframe, start, end}` and never `adjustment`;
-Alpaca's default is **`raw`** (unadjusted), options `raw|split|dividend|spin-off|all`. SPY has had no
-split since 2005, so within a 2016+ window this is a dividend-only distortion (~1.3%/yr) that hits
-the agent and buy-and-hold **identically** — internally consistent, but total returns are understated
-for both. Either add an `adjustment` kwarg to `AlpacaHistoricalData` and pass `all` for the RL pull,
-or accept `raw` and state it in the report. **Do not leave it unstated.**
+**Bar adjustment — DECIDED (task-rl-02, 2026-10-21): the RL pull uses `adjustment=all`.**
+`AlpacaHistoricalData` takes an optional `adjustment` kwarg; when unset it sends no `adjustment` param
+and Alpaca applies its documented default **`raw`** (options `raw|split|dividend|spin-off|all`), so the
+labeler/backtest are unchanged. `python -m trading.jobs.rl_dataset` always passes it explicitly, and
+the frozen `data/rl/spy_daily.json` records it in its header (`adjustment`, `price_basis`) — never
+implicit. `raw` was rejected: SPY has had no split since 2005, but unadjusted closes drop on every
+ex-dividend date (~1.3%/yr), understating total return for the agent and buy-and-hold alike.
+
+What `all` does and does not give you:
+- **Ratios/returns of closes are PIT-correct** — `close[t] / close[t-1]` is the total return an
+  investor actually earned over that session, using only information public by `known_at[t]`.
+- **Absolute levels are NOT as-traded.** Every close before a later dividend is back-scaled by
+  dividends paid AFTER it, so the level series is current-vintage (as served on the freeze date,
+  including any later corrections). Example: the 2018-10-22 close is 243.99 in the file; SPY's
+  as-traded close that day was ~$275 (Alpaca `raw`: 275.03). A level therefore encodes knowledge of
+  future distributions.
+
+**BINDING RULE for every consumer of `spy_daily.json`** — features (`domain/rl_features.py`), reward
+(`rl/rewards.py`), baselines (`strategies/rl_baselines.py`), cost model (`rl/costs.py`) and the demo
+bundle (`rl/bundle.py`): **closes may be used ONLY as ratios of closes.** No absolute price level may
+drive any decision, reward, cost, threshold or displayed "price" claim. This is the §4.3 non-negotiable
+("**No raw price level**") applied to the whole pipeline, and it is enforced for the observation by
+task-rl-04's acceptance test 6, `test_no_raw_price_level_leaks_through` (scaling the entire series by
+2.0 leaves the price-derived features unchanged to 1e-12). Anything displayed to a human as a price
+must carry the adjustment caveat (task-rl-12).
 
 ### 4.3 Observation — `Box(low=-10.0, high=10.0, shape=(9,), dtype=np.float32)`
 

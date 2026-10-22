@@ -47,3 +47,13 @@ def test_trading_rl_package_is_inert() -> None:
     assert _HEAVY_ML_MODULES & after == set()
     # "imports nothing": the only modules the import adds are the package itself and its parent.
     assert after - before <= {"trading", "trading.rl"}
+
+
+def test_rl_dataset_job_import_graph_has_no_ml_modules() -> None:
+    # task-rl-02: the dataset freeze is listed as a forbidden-contract source despite its rl_
+    # prefix (pure fetch/serialize); prove it at runtime too.
+    _, loaded = _loaded_modules_after("import trading.jobs.rl_dataset")
+
+    assert "trading.jobs.rl_dataset" in loaded
+    assert _HEAVY_ML_MODULES & loaded == set()
+    assert {m for m in loaded if m == "trading.rl" or m.startswith("trading.rl.")} == set()

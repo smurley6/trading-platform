@@ -37,6 +37,7 @@ from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
+from trading.application.rl_dataset import BuildRlDataset
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
 from trading.application.sync_orders import SyncOrders
@@ -177,6 +178,9 @@ class AppDeps:
     outcome_labels: OutcomeLabelsPort | None = None
     label_outcomes: LabelOutcomes | None = None
     real_historical_prices: bool = False
+    # RL dataset freeze (task-rl-02): read by `python -m trading.jobs.rl_dataset` only (NO HTTP
+    # route). Its --confirm guard reuses `real_historical_prices` (never freeze synthetic bars).
+    rl_dataset: BuildRlDataset | None = None
 
 
 def create_app(deps: AppDeps) -> FastAPI:

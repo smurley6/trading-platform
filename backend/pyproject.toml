@@ -148,7 +148,7 @@ layers = [
 # siblings (trading.rl, trading.jobs, trading.main) unconstrained, so this makes the isolation
 # enforced rather than accidental. Requires include_external_packages to name torch & co.
 # trading.jobs as a WHOLE is deliberately absent from source_modules (jobs.rl_* MAY import
-# trading.rl); the NON-RL job entry points are listed individually so the deployed cron
+# trading.rl); the torch-free job entry points are listed individually so the deployed cron
 # path is a source in its own right, not merely covered through trading.main.
 [[tool.importlinter.contracts]]
 name = "Heavy ML deps never enter the app import graph"
@@ -165,5 +165,8 @@ source_modules = [
     "trading.jobs.label_outcomes",
     "trading.jobs.purge_synthetic",
     "trading.jobs.diagnostic",
+    # task-rl-02: the dataset freeze is a pure fetch/serialize job (no ML) despite its rl_ prefix,
+    # so it is held to the same wall as the other non-RL jobs.
+    "trading.jobs.rl_dataset",
 ]
 forbidden_modules = ["trading.rl", "torch", "stable_baselines3", "gymnasium", "numpy"]

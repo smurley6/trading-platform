@@ -37,6 +37,7 @@ from trading.application.proposals import ExecuteProposals, ScanProposals
 from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
+from trading.application.rl_dataset import BuildRlDataset
 from trading.application.safety_rehydration import SafetyState, rehydrate_safety_state
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
 from trading.application.sync_orders import SyncOrders
@@ -155,7 +156,12 @@ _DEV_PRICES = {
 }
 
 
-def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppDeps:
+def build_dependencies(
+    settings: Settings,
+    *,
+    serves_http: bool = False,
+    historical_adjustment: str | None = None,
+) -> AppDeps:
     clock = SystemClock()
 
     # Observability registry: backs /metrics and is bumped on each append (events/orders).
@@ -357,6 +363,7 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
             base_url=settings.alpaca_data_base_url,
             clock=clock,
             feed=settings.alpaca_data_feed,
+            adjustment=historical_adjustment,
         )
         live_aclosers.append(history_client.aclose)
         real_historical_prices = True
@@ -695,6 +702,15 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
         clock=clock,
     )
 
+    # RL dataset freeze (task-rl-02): wraps the SAME historical-prices port (positional read of one
+    # symbol's daily closes + an explicit PIT `known_at` per bar). Driven only by `python -m
+    # trading.jobs.rl_dataset` (no HTTP route), which passes `historical_adjustment` explicitly so
+    # the adapter sends Alpaca's `adjustment` param and the dataset RECORDS the mode. Every other
+    # caller leaves it None => no param => Alpaca's documented default, `raw` (unchanged).
+    rl_dataset = BuildRlDataset(
+        prices=historical_prices, clock=clock, adjustment=historical_adjustment or "raw"
+    )
+
     deps = AppDeps(
         event_store=event_store,
         read_model=read_model,
@@ -747,6 +763,7 @@ def build_dependencies(settings: Settings, *, serves_http: bool = False) -> AppD
         outcome_labels=outcome_labels,
         label_outcomes=label_outcomes,
         real_historical_prices=real_historical_prices,
+        rl_dataset=rl_dataset,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)

@@ -84,6 +84,7 @@ class AlpacaHistoricalData:
         timeframe: str = "1Day",
         clock: ClockPort | None = None,
         feed: str | None = None,
+        adjustment: str | None = None,
     ) -> None:
         self._client = client
         self._base_url = base_url.rstrip("/")
@@ -96,6 +97,11 @@ class AlpacaHistoricalData:
         # `feed` param is sent and Alpaca serves its default entitled feed. Do not default this
         # to "iex" — see the config.py comment on `alpaca_data_feed`.
         self._feed = feed
+        # Corporate-action adjustment (task-rl-02). Unset by default, so NO `adjustment` param is
+        # sent and Alpaca applies its documented default, `raw` (unadjusted) — existing callers
+        # (labeler, backtest) are unchanged. Only the RL dataset job sets it, explicitly, so the
+        # frozen dataset's adjustment mode is never implicit (docs/RL-SLEEVE-PROGRAM.md §4.2).
+        self._adjustment = adjustment
         # Optional injected clock so the end-clamp is deterministically testable (FixedClock in
         # unit tests). The composition root has a `SystemClock` in scope at construction time
         # (see `main.py`), so it is threaded through here rather than re-plumbed; if ever
@@ -149,6 +155,8 @@ class AlpacaHistoricalData:
             }
             if self._feed:
                 params["feed"] = self._feed
+            if self._adjustment:
+                params["adjustment"] = self._adjustment
             if page_token:
                 params["page_token"] = page_token
             payload = await self._fetch(params)
