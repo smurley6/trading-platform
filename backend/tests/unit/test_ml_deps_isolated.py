@@ -68,3 +68,12 @@ def test_rl_pure_half_loads_no_ml_or_numpy() -> None:
 
     assert {"trading.rl.bars", "trading.rl.costs", "trading.rl.rewards"} <= loaded
     assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+
+
+def test_rl_env_needs_only_gymnasium_and_numpy() -> None:
+    # task-rl-05: the env needs only gymnasium + numpy (both in [dev]), so the env and leakage
+    # tests run in the default pytest without the [rl] extra. It must never pull torch / SB3.
+    _, loaded = _loaded_modules_after("import trading.rl.env")
+
+    assert {"trading.rl.env", "gymnasium", "numpy"} <= loaded
+    assert {"torch", "stable_baselines3"} & loaded == set()

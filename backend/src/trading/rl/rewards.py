@@ -9,14 +9,16 @@ which bars bound it; its timing contract and ``execution_lag`` live in ``rl/env.
                                                                             position_after)
     reward = 100 * ln(max(growth, 1e-9))
 
-The position change ``position_before -> position_after`` takes effect at the START of the
-period bounded by ``(C_prev, C_now)``; its cost is charged ONCE, at that change, on the traded
-notional ``|position_after - position_before|`` x equity, at the same one-way rate for an entry
-(BUY) and an exit (SELL); ``position_after`` is then held over the period and earns
-``C_now / C_prev - 1``. WHICH bars bound the period — and how execution lag shifts them relative to
-the decision — is decided SOLELY by the env (task-rl-05), which must pick a point-in-time-safe
-pairing: the price a trade fills at must never be known at decision time (program doc §4.7). This
-module makes no timing claim.
+Arithmetically, ``position_after`` is the position held over the period bounded by
+``(C_prev, C_now)`` and earns ``C_now / C_prev - 1``; the cost of the change
+``position_before -> position_after`` is charged ONCE, on the traded notional
+``|position_after - position_before|`` x equity, at the same one-way rate for an entry (BUY) and an
+exit (SELL). This module makes NO timing claim: which bars bound a period, at which close a fill
+happens, and where its cost is booked are decided SOLELY by the env — see ``rl/env.py`` and the
+RESOLVED timing contract in program doc §4.7 (task-rl-05: a fill happens at a close never known at
+decision time, and the env books it at the END of the step that reveals that close, applying
+``cost_fraction`` to the equity marked there). Do not read either endpoint of the period as the
+fill time from this module.
 Costs live INSIDE the equity accounting — there is no ``-lambda * turnover`` shaping weight anyone
 can dial to zero; the only knob is ``CostModel``, a physical claim about the market.
 
@@ -27,8 +29,10 @@ cost model never sees a price, so multiplying every close by a constant changes 
 Why this reward: ``sum(reward) / 100 == ln(E_T / E_0)`` (auditable against buy-and-hold); the only
 ways to raise it are to be long when the market rises and flat when it falls; churn strictly loses;
 concave in wealth. ``DifferentialSharpe`` (Moody & Saffell 1998, eqs. 4-5) is experiment #2 behind
-the env's ``reward="dsr"`` flag; its ``(A, B)`` EMA state must be appended to the observation (the
-reward depends on it, so the process is otherwise not Markov).
+the env's ``reward="dsr"`` flag. Its reward depends on the hidden ``(A, B)`` EMA state, so the
+process is not Markov unless that state is observed; the env deliberately keeps its observation at
+the 9 shared features and exposes ``(A, B)`` via ``info["dsr_state"]`` only — a documented
+limitation of the DSR experiment (``rl/env.py``), not of the default reward.
 """
 
 import math
@@ -128,7 +132,8 @@ class DifferentialSharpe:
         return reward
 
     def observation(self) -> tuple[float, float]:
-        """The hidden EMA state ``(A, B)`` the reward depends on — append it to the observation."""
+        """The hidden EMA state ``(A, B)`` the reward depends on (the env exposes it via
+        ``info["dsr_state"]``; it is not part of the 9-feature observation)."""
         return self.a, self.b
 
     def reset(self) -> None:

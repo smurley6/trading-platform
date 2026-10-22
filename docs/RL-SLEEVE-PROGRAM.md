@@ -759,6 +759,14 @@ growth  = 1 + position_t · (C_{t+1}/C_t − 1) − cost_paid_fraction
 reward  = 100 · ln(max(growth, 1e-9))
 ```
 
+> **Timing — RESOLVED by task-rl-05 (2026-10-21; full contract in §4.7).** `position_t` above is the
+> position **already held** over `(C_t, C_{t+1}]` — the position after every fill at closes `≤ t`,
+> decided at `t−1−execution_lag` or earlier — **never** the position the agent requests at *t* (that
+> order fills at `C_{t+1+lag}`). `cost_paid_fraction` is the cost of a fill **at close `t+1`**
+> (if any), charged on the equity marked at `C_{t+1}`, so the env composes the two factors
+> multiplicatively: `growth = net_of_cost_growth(C_t, C_{t+1}, p, p) · (1 − cost_fraction)` (equal to
+> the additive form above up to the second-order `p·r·cost` term, ~1e-6/step).
+
 Costs are charged **inside the equity accounting**, not as a separate `−λ·turnover` term. That is the
 whole point: **there is no shaping weight anyone can dial to zero.** The only remaining knob is
 `CostModel`, which is a *physical claim about the market* and is therefore sweepable, not tunable.
@@ -869,17 +877,46 @@ from day one.
 `EnvConfig` exposes `execution_lag: int = 0` as an additional knob; report results at lag 0 **and**
 lag 1. If the edge vanishes at lag 1, there was no edge.
 
-> **⚠ FLAGGED by the task-rl-03 PIT review (2026-10-21) — UNRESOLVED, binding on task-rl-05.** The
-> contract above is self-contradictory: it says the action "is filled at the close of session
-> *t+1*", while §4.5's `growth = 1 + position_t·(C_{t+1}/C_t − 1) − cost` credits the new position
-> with the return from `C_t` — a close the agent has ALREADY observed when it decides at *t*. Read
-> literally, §4.5 is decide-at-close/fill-at-the-same-close: a lookahead fill. The binding
-> requirement: **the price a trade fills at must never be known at decision time.**
-> `rl/rewards.py::net_of_cost_growth(close_prev, close_now, ...)` makes NO timing claim — it is
-> parameterized by whichever `(close_prev, close_now)` pair the env passes, with the position
-> change taking effect at the start of that period. task-rl-05 must therefore choose a PIT-safe
-> bar pairing / `execution_lag`, state it in the env docstring, and pin it with tests (including §4.8 Test C's "always-BUY reproduces
-> buy-and-hold" expectation, whose start index must be consistent with the chosen pairing).
+> **✅ RESOLVED by task-rl-05 (2026-10-21) — supersedes the task-rl-03 PIT-review flag.** The flag:
+> the contract above said the action "is filled at the close of session *t+1*" while §4.5's
+> `growth = 1 + position_t·(C_{t+1}/C_t − 1) − cost` could be read as crediting the NEW position with
+> the return from `C_t` — a close already observed at decision time (a lookahead fill). Binding
+> requirement: **the price a trade fills at must never be known at decision time.** Resolution — the
+> quoted contract stands, read precisely as follows (`rl/env.py` module docstring; the ONE place in
+> code that owns the bar pairing is `rl.env.fill_index_for`):
+>
+> 1. **Decision time** = `bars[t].known_at` (`env.decision_at`). The observation reads
+>    `closes[: t+1]` + the position state only.
+> 2. **Fill time.** An accepted BUY/SELL decided at *t* fills at the close of bar
+>    `f = fill_index_for(t, execution_lag) = t + 1 + execution_lag` — at lag 0 the first close NOT
+>    known at decision time. `known_at` is strictly ascending, so `bars[f].known_at >
+>    bars[t].known_at` always. **`execution_lag` therefore counts sessions of delay ON TOP OF the
+>    mandatory one-session lag** (lag 0 = fill at `C_{t+1}`, lag 1 = fill at `C_{t+2}`); "report lag
+>    0 and lag 1" still applies, and lag 0 is already PIT-safe.
+> 3. **A step** at cursor *t* reads `bars[t+1]` once and books (a) the move `C_t → C_{t+1}` earned by
+>    the position ALREADY HELD (after fills at closes `≤ t`) via `net_of_cost_growth(C_t, C_{t+1}, p,
+>    p)`, then (b) any fill at close *t+1* (the order decided at `t − lag`), charged
+>    `CostModel.cost_fraction` of the equity marked at `C_{t+1}`. `reward = 100·ln(max(growth, 1e-9))`
+>    is "the portfolio log return over *t → t+1*" — of the position already held.
+> 4. **First earning period.** A position filled at `C_f` earns `C_f → C_{f+1}` (the step at cursor
+>    *f*) onward — never any move before its fill. An action's market return is first credited
+>    `1 + lag` steps after it is chosen; its cost lands in the step that reveals its fill close.
+> 5. **Position state** follows the ACTUAL fill: `held`/`info["position"]` at cursor *t* reflect only
+>    fills at closes `≤ t` (a pending order, `lag > 0`, is not held); `entry_close = C_f` with
+>    `f ≤ t`, never the decision bar's close; `held` iff an entry exists. State and reward agree on the
+>    fill price: at zero cost `C_t / entry_close == exp(Σ rewards since the fill / 100)` (pinned).
+>
+> At lag 0 the reward is a function of `(s_t, a_t, s_{t+1})` — Markov, with the cost credited in the
+> same step as the action. **Episode start** stays `lo = MAX_LOOKBACK = WARMUP_BARS − 1 = 49`: the
+> lag needs nothing earlier (episodes start flat with no pending order); `hi = len(bars) − 1 −
+> episode_length`. An episode's bar footprint is `[start − 49, start + episode_length]`. Orders
+> still pending at truncation are discarded unfilled. Ruin is detected from EQUITY (`equity ≤
+> ruin_fraction`; a growth `≤ 0` drives equity `≤ 0`), never from the reward's `1e-9` floor.
+> Pinned by `backend/tests/unit/rl/test_env.py` (fill pairing + knowledge time, earns-only-from-fill,
+> state/reward fill-price agreement, pending ≠ held, reward reads only `C_t`/`C_{t+1}`, observation
+> invariant to `C_{t+1}` and beyond, audit reads `≤ decision_at`, always-BUY from the first fill),
+> each confirmed to fail under a lookahead-credit / decision-bar-entry / `C_{t+1}`-in-observation
+> mutation.
 
 ### 4.8 Leakage guards — the test suite that makes this credible
 
@@ -900,6 +937,16 @@ def test_observation_is_invariant_to_every_future_bar(k: int, factor: float) -> 
     ...  # step clean and poisoned envs in lockstep; assert np.array_equal before every step;
          # break once cursor > k; assert not np.isnan(obs).any()
 ```
+> **Aligned with the §4.7 resolution (task-rl-05).** `BarTable` rejects non-finite closes, so a NaN
+> poison must be applied to the env's single float view of the closes, `env._closes` (both `_observe`
+> and `step` read closes only from it). The step taken AT cursor *k* legitimately reads `C_{k+1}` for
+> its reward (and `net_of_cost_growth` raises on a NaN close), so the lockstep compares observations
+> for every cursor `≤ k` and must stop BEFORE stepping from cursor *k* — not after the first step
+> past it. For **Test B**, `audit=True` makes `env._audit_reads` hold exactly the bars the CURRENT
+> observation read — the trailing `WARMUP_BARS` window ending at the cursor plus the open position's
+> entry (fill) bar, which may lie before that window — replaced on every observation, so it must be
+> checked against `env.decision_at` BEFORE stepping.
+
 `factor=nan` is the strongest probe: a single arithmetic touch of a future bar makes the observation
 NaN and both assertions fire. `3.0` / `0.25` catch touches that survive as finite numbers (a
 dataset-wide scaler, a centred rolling mean, a `.mean()` over the full array). One test covers a
@@ -923,9 +970,13 @@ def test_leakage_detector_actually_detects_leakage() -> None:
 must satisfy `known_at <= env.decision_at` (captured *before* stepping).
 
 **Test C — reward alignment / no free lunch.** On a deterministic series, always-BUY reproduces
-buy-and-hold to within 1e-9 at `cost_bps=0` (`exp(Σ reward/100) == close[T]/close[0]`). And: two
-series identical except `closes[t+1]` produce the **same observation** at *t* and **different
-rewards** — proving the lag exists in the direction we want (reward forward, observation backward).
+buy-and-hold to within 1e-9 at `cost_bps=0` **from the first FILL close** (aligned with the §4.7
+resolution, task-rl-05): `exp(Σ reward/100) == close[start + episode_length] / close[start + 1 +
+execution_lag]` — NOT `close[T]/close[start]`, which is what a lookahead fill at the decision close
+would earn. And: two series identical except `closes[t+1]` produce the **same observation** at *t*
+and **different rewards** at *t* — proving the lag exists in the direction we want (reward forward,
+observation backward). The probe must hold a position over `t → t+1` (e.g. always-BUY, past the
+first fill): while flat, the step's reward cannot depend on `C_{t+1}` (the cost is scale-free).
 
 **Test D — split hygiene** (`test_bars_pit.py`, stdlib only): embargo prevents window straddle;
 train/eval session sets are disjoint; `known_at` is after the session close under **both** DST regimes
