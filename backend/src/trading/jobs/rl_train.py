@@ -186,8 +186,12 @@ def _git_state() -> dict[str, Any]:
             check=True,
             timeout=10,
         ).stdout.strip()
+        # --untracked-files=no: dirty means a TRACKED file differs from HEAD. Untracked local
+        # dev tooling never enters the build, and every bundle/manifest input is
+        # content-hashed separately, so counting untracked files would pin dirty=true forever
+        # without adding provenance.
         status = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=here,
             capture_output=True,
             text=True,
