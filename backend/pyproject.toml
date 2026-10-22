@@ -32,6 +32,20 @@ dev = [
     "import-linter>=2.0",
     "pre-commit>=3.7",
     "types-PyYAML>=6",
+    # Light, py.typed halves of the RL stack (task-rl-01). gymnasium's wheel is <1 MB and pulls no
+    # torch; having it (and numpy) installed lets `class ...(gym.Env[...])` type-check under
+    # `mypy --strict` instead of tripping disallow_subclassing_any on an `Any` base.
+    "numpy>=1.26,<3",
+    "gymnasium>=1.3,<2",
+]
+# Heavy, OFFLINE-only RL training stack (task-rl-01). Never installed by CI or Render; only
+# `trading.rl` / `trading.jobs.rl_*` may import it (enforced by import-linter below).
+rl = [
+    "gymnasium>=1.3,<2",
+    "stable-baselines3>=2.9,<3",
+    "torch>=2.8,<3",
+    "numpy>=1.26,<3",
+    "tensorboard>=2.16",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -81,6 +95,21 @@ ignore_missing_imports = true
 module = "pdfplumber.*"
 ignore_missing_imports = true
 
+# The heavy [rl] extra is absent in CI/dev, so these resolve to Any there. gymnasium and numpy are
+# deliberately NOT listed: both ship py.typed and are installed via [dev].
+[[tool.mypy.overrides]]
+module = ["stable_baselines3.*", "torch.*"]
+ignore_missing_imports = true
+
+# strict enables warn_return_any; SB3/torch resolve to Any in CI where the rl extra is absent, so
+# these two modules (the ONLY ones that touch SB3) get a narrow relaxation. Config override, NEVER
+# an inline `# type: ignore` in trading/rl/** -- strict also sets warn_unused_ignores, so an ignore
+# that is REQUIRED without the extra becomes an ERROR once a developer installs it.
+[[tool.mypy.overrides]]
+module = ["trading.rl.train", "trading.rl.export"]
+warn_return_any = false
+disallow_untyped_calls = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -88,6 +117,7 @@ addopts = "-q"
 markers = [
     "integration: tests that hit real external boundaries (Postgres, Alpaca paper)",
     "live_smoke: tests that hit a real live external API (e.g. EDGAR); opt-in via RUN_LIVE_SMOKE",
+    "rl: tests requiring the optional [rl] extra (torch/stable-baselines3); skipped without it",
 ]
 
 [tool.coverage.run]
@@ -100,6 +130,7 @@ fail_under = 80
 
 [tool.importlinter]
 root_package = "trading"
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Hexagonal layering: dependencies point inward only"
@@ -111,3 +142,28 @@ layers = [
     "trading.strategies",
     "trading.domain",
 ]
+
+# task-rl-01: the heavy ML stack (and the trading.rl package that hosts it) must never be reachable
+# from anything the web service / cron cycle imports. The layers contract above leaves unlisted
+# siblings (trading.rl, trading.jobs, trading.main) unconstrained, so this makes the isolation
+# enforced rather than accidental. Requires include_external_packages to name torch & co.
+# trading.jobs as a WHOLE is deliberately absent from source_modules (jobs.rl_* MAY import
+# trading.rl); the NON-RL job entry points are listed individually so the deployed cron
+# path is a source in its own right, not merely covered through trading.main.
+[[tool.importlinter.contracts]]
+name = "Heavy ML deps never enter the app import graph"
+type = "forbidden"
+source_modules = [
+    "trading.domain",
+    "trading.application",
+    "trading.strategies",
+    "trading.interface",
+    "trading.infrastructure",
+    "trading.main",
+    "trading.jobs.cycle",
+    "trading.jobs.backfill",
+    "trading.jobs.label_outcomes",
+    "trading.jobs.purge_synthetic",
+    "trading.jobs.diagnostic",
+]
+forbidden_modules = ["trading.rl", "torch", "stable_baselines3", "gymnasium", "numpy"]
