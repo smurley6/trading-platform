@@ -33,8 +33,11 @@ from trading.rl.metrics import (
     exposure_fraction,
     frictionless_growth,
     iqm,
+    longest_holding_streak,
     matched_trade_probability,
     null_band,
+    position_correlation,
+    round_trip_win_rate,
     summarize,
 )
 
@@ -322,3 +325,51 @@ def test_matched_trade_probability_counts_accepted_orders_per_decision() -> None
     assert matched_trade_probability([a, b]) == 3 / 8
     with pytest.raises(ScoringError):
         matched_trade_probability([])
+
+
+# --- task-rl-10 additions: holding streak, round-trip win rate, position correlation ---
+
+
+def test_longest_holding_streak_counts_consecutive_held_steps() -> None:
+    # Held (positions before each step): 0 1 1 0 1 1 1 0 -> longest run 3.
+    positions = [0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+    result = _result([1.0] * 9, positions, [HOLD] * 8)
+    assert longest_holding_streak(result) == 3
+    assert longest_holding_streak(_result([1.0] * 4, [0.0] * 4, [HOLD] * 3)) == 0
+    # Buy-and-hold over n = 5 steps (lag 0): flat for the fill step, then held 4.
+    bh = _result([1.0] * 6, [0.0, 1.0, 1.0, 1.0, 1.0, 1.0], [BUY, HOLD, HOLD, HOLD, HOLD])
+    assert longest_holding_streak(bh) == 4
+
+
+def test_round_trip_win_rate_nets_both_legs_against_pre_entry_equity() -> None:
+    # Entry fill at bar 101 (mark 1), exit at 103 (mark 3): 1.00 -> 1.02 wins; entry at 104
+    # (mark 4, pre-entry equity 1.02), exit at 106 (mark 6) at 1.01 loses; a last entry stays open.
+    fills = (
+        _fill(101, 0.0, 1.0, 0.0),
+        _fill(103, 1.0, 0.0, 0.0),
+        _fill(104, 0.0, 1.0, 0.0),
+        _fill(106, 1.0, 0.0, 0.0),
+        _fill(107, 0.0, 1.0, 0.0),
+    )
+    equity = [1.0, 1.0, 1.01, 1.02, 1.02, 1.015, 1.01, 1.01]
+    positions = [0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    actions = [BUY, HOLD, SELL, BUY, HOLD, SELL, BUY]
+    result = _result(equity, positions, actions, fills=fills)
+    assert round_trip_win_rate(result) == pytest.approx(0.5)
+    assert round_trip_win_rate(_result([1.0] * 3, [0.0] * 3, [HOLD] * 2)) is None
+    stray = dataclasses.replace(result, fills=(_fill(250, 0.0, 1.0, 0.0),), n_trades=1)
+    with pytest.raises(ScoringError, match="no preceding equity mark"):
+        round_trip_win_rate(stray)
+
+
+def test_position_correlation_is_pearson_of_held_paths_or_none_when_constant() -> None:
+    bh = _result([1.0] * 6, [0.0, 1.0, 1.0, 1.0, 1.0, 1.0], [BUY] + [HOLD] * 4)
+    same = _result([1.0] * 6, [0.0, 1.0, 1.0, 1.0, 1.0, 1.0], [BUY] + [HOLD] * 4)
+    assert position_correlation(same, bh) == pytest.approx(1.0)
+    timer = _result([1.0] * 6, [0.0, 1.0, 0.0, 1.0, 0.0, 1.0], [BUY, SELL, BUY, SELL, BUY])
+    expected = statistics.correlation([0.0, 1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 1.0, 1.0, 1.0])
+    assert position_correlation(timer, bh) == pytest.approx(expected)
+    flat = _result([1.0] * 6, [0.0] * 6, [HOLD] * 5)
+    assert position_correlation(flat, bh) is None
+    with pytest.raises(ScoringError, match="same segment start"):
+        position_correlation(_result([1.0] * 6, [0.0] * 6, [HOLD] * 5, start=120), bh)

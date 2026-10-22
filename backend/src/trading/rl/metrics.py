@@ -30,6 +30,9 @@ computed from close RATIOS over the segment, which never feeds a decision.
 - ``action_entropy`` = Shannon entropy, in NATS, of the empirical distribution of EFFECTIVE actions
   (no-ops count as HOLD — what was actually done). 0.0 for a constant policy; ``ln 3`` max.
 - ``break_even_cost_bps`` — see :func:`break_even_cost_bps`.
+- ``longest_holding_streak`` (task-rl-10) — the longest run of consecutive steps held long;
+  ``round_trip_win_rate`` — share of closed round trips that made money net of costs;
+  ``position_correlation`` — Pearson correlation of two held-position paths (``corr(bh)``).
 """
 
 import math
@@ -444,3 +447,52 @@ def matched_trade_probability(results: Sequence[EpisodeResult]) -> float:
         raise ScoringError("cannot match a trade probability over zero steps")
     accepted = sum(1 for r in results for a in r.actions if a != HOLD)
     return accepted / steps
+
+
+def longest_holding_streak(result: EpisodeResult) -> int:
+    """The longest run of consecutive steps HELD long (positions before each step, the position
+    that earns that step's move — the :func:`exposure_fraction` convention), in steps. Program doc
+    §5.4's "longest holding streak" (task-rl-10): ``steps - 1 - lag`` for buy-and-hold, 0 for
+    always-flat."""
+    best = run = 0
+    for position in result.positions[:-1]:
+        run = run + 1 if position > 0 else 0
+        best = max(best, run)
+    return best
+
+
+def round_trip_win_rate(result: EpisodeResult) -> float | None:
+    """Share of CLOSED round trips (flat -> long fill, then long -> flat fill) that ended with more
+    equity than they started with, net of both legs' costs: the equity marked at the exit fill's
+    close vs the equity marked one bar before the entry fill (unchanged while flat, before the
+    entry cost). ``None`` when no round trip closed. A position still open at the end is not
+    counted (as ``domain.metrics.round_trips`` leaves open lots out)."""
+    mark = {cursor: i for i, cursor in enumerate(result.cursors)}
+    trips = wins = 0
+    entry_equity: float | None = None
+    for fill in result.fills:
+        index = mark.get(fill.fill_index)
+        if index is None or index == 0:
+            raise ScoringError(f"fill at bar {fill.fill_index} has no preceding equity mark")
+        if fill.position_before == 0 and fill.position_after > 0:
+            entry_equity = result.equity[index - 1]
+        elif fill.position_after == 0 and fill.position_before > 0 and entry_equity is not None:
+            trips += 1
+            wins += result.equity[index] > entry_equity
+            entry_equity = None
+    return None if trips == 0 else wins / trips
+
+
+def position_correlation(result: EpisodeResult, other: EpisodeResult) -> float | None:
+    """Pearson correlation of two replays' HELD position paths (positions before each step) over
+    their common steps — task-rl-10's ``corr(agent, buy-and-hold)``. ``None`` when fewer than two
+    common steps or either path is constant (no defined correlation)."""
+    if result.segment.start != other.segment.start:
+        raise ScoringError("position paths must come from the same segment start")
+    n = min(result.steps, other.steps)
+    if n < 2:
+        return None
+    try:
+        return statistics.correlation(result.positions[:n], other.positions[:n])
+    except statistics.StatisticsError:
+        return None

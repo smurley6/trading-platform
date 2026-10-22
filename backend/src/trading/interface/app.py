@@ -38,6 +38,7 @@ from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
 from trading.application.rl_dataset import BuildRlDataset
+from trading.application.rl_evaluation import RlEvaluationReport, RlEvaluationRequest
 from trading.application.signal_recording import record_signals
 from trading.application.sleeve_registry import SleeveRegistry, UnknownSleeveError
 from trading.application.sync_orders import SyncOrders
@@ -181,6 +182,10 @@ class AppDeps:
     # RL dataset freeze (task-rl-02): read by `python -m trading.jobs.rl_dataset` only (NO HTTP
     # route). Its --confirm guard reuses `real_historical_prices` (never freeze synthetic bars).
     rl_dataset: BuildRlDataset | None = None
+    # RL walk-forward evaluation (task-rl-10): the pure report/gates use case, read by
+    # `python -m trading.jobs.rl_eval` only (NO HTTP route). The job computes the Tier B env
+    # replays (trading.rl may not enter the app graph) and hands them over in the request.
+    rl_evaluator: Callable[[RlEvaluationRequest], Awaitable[RlEvaluationReport]] | None = None
 
 
 def create_app(deps: AppDeps) -> FastAPI:

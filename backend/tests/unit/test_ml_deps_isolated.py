@@ -145,3 +145,22 @@ def test_rl_export_imports_sb3_and_torch_lazily() -> None:
 
     assert {"trading.rl.export", "gymnasium", "numpy"} <= loaded
     assert {"torch", "stable_baselines3"} & loaded == set()
+
+
+def test_rl_eval_job_import_graph_has_no_ml_modules() -> None:
+    # task-rl-10: the eval job imports the env replay (trading.rl.scoring: gymnasium + numpy) and
+    # the SB3 retrain path only INSIDE its functions, so loading the module pulls in no ML.
+    _, loaded = _loaded_modules_after("import trading.jobs.rl_eval")
+
+    assert "trading.jobs.rl_eval" in loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert {"trading.rl.scoring", "trading.rl.export", "trading.rl.train"} & loaded == set()
+
+
+def test_rl_evaluation_use_case_is_stdlib_only() -> None:
+    # task-rl-10: the report/gates use case is pure application code (no numpy, no trading.rl).
+    _, loaded = _loaded_modules_after("import trading.application.rl_evaluation")
+
+    assert "trading.application.rl_evaluation" in loaded
+    assert (_HEAVY_ML_MODULES | {"numpy"}) & loaded == set()
+    assert {m for m in loaded if m == "trading.rl" or m.startswith("trading.rl.")} == set()

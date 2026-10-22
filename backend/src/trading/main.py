@@ -38,6 +38,11 @@ from trading.application.reconcile import Reconcile
 from trading.application.risk import KillSwitch, RiskGate, RiskLimits
 from trading.application.risk_precheck import PrecheckRisk
 from trading.application.rl_dataset import BuildRlDataset
+from trading.application.rl_evaluation import (
+    RlEvaluationReport,
+    RlEvaluationRequest,
+    build_rl_report,
+)
 from trading.application.safety_rehydration import SafetyState, rehydrate_safety_state
 from trading.application.sleeve_registry import SleeveRegistry, SleeveState
 from trading.application.sync_orders import SyncOrders
@@ -711,6 +716,15 @@ def build_dependencies(
         prices=historical_prices, clock=clock, adjustment=historical_adjustment or "raw"
     )
 
+    # RL walk-forward evaluation (task-rl-10): mirrors run_backtest as a closure, but over the PURE
+    # Tier B report builder. The task spec's closure over historical_prices /
+    # InMemoryBacktestEnvFactory / risk_limits is the Tier B' Backtest path; that path needs an RL
+    # Strategy, which the 2026-10-21 retarget cut with task-rl-11, and trading.main may not import
+    # trading.rl (forbidden contract) — so the replays are computed by `jobs/rl_eval.py` and passed
+    # in the request. Driven only by that job (no HTTP route).
+    async def rl_evaluator(request: RlEvaluationRequest) -> RlEvaluationReport:
+        return build_rl_report(request, as_of=clock.now())
+
     deps = AppDeps(
         event_store=event_store,
         read_model=read_model,
@@ -764,6 +778,7 @@ def build_dependencies(
         label_outcomes=label_outcomes,
         real_historical_prices=real_historical_prices,
         rl_dataset=rl_dataset,
+        rl_evaluator=rl_evaluator,
     )
     deps.aclosers.extend(aclosers)
     deps.aclosers.extend(live_aclosers)
